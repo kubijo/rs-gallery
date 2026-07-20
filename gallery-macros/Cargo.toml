@@ -1,0 +1,17 @@
+[package]
+name = "gallery-macros"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Unlicense"
+description = "Proc-macro for gallery: #[scene(\"name\")] registers a fn(&mut SceneCtx) as a discoverable scene."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+heck = "0.5"
+prettyplease = "0.2"

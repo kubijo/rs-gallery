@@ -1,0 +1,9 @@
+# `cargo generate --git <gallery-repo> template` scaffolds a new instance from these files, filling the
+# placeholders below. The same files also work as a plain copy — replace the `{{ … }}` markers by hand.
+[template]
+description = "A gallery component-catalog instance"
+
+[placeholders]
+gallery_git = { type = "string", prompt = "gallery framework git URL", default = "https://example.com/gallery.git" }
+scene_globs = { type = "string", prompt = "Scene glob, relative to gallery.toml", default = "*.scene.rs" }
+title = { type = "string", prompt = "Window title", default = "components" }

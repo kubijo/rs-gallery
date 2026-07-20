@@ -1,0 +1,7 @@
+# Repo-wide Rust toolchain (rustup-standard).
+# The Nix flake reads this same file via oxalica's rust-overlay,
+# so `nix develop` and a local `rustup` resolve an identical toolchain.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy", "rust-src", "llvm-tools-preview"]

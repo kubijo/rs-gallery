@@ -1,0 +1,20 @@
+# Build artifacts
+result**
+target/
+
+# Scaffolded local demo instances (`just demo-wgpu` / `just demo-femtovg`)
+/demo*/
+
+# AI
+.claude/*.local.*
+
+# IDE
+.idea
+.direnv
+
+# Misc Artifacts
+.direnv
+.DS_Store
+*.log
+**/*#
+*~

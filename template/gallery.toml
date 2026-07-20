@@ -1,0 +1,5 @@
+# Where gallery looks for scenes. Globs are relative to this file. The default finds the bundled
+# `example.scene.rs`; once your components live in their own crate, point this at them instead — scene
+# files are co-located with the components they exercise, e.g. `["../my-components/src/**/*.scene.rs"]`.
+scene_globs = ["{{scene_globs}}"]
+title = "{{title}}"

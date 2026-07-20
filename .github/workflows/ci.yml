@@ -1,0 +1,54 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # Runs the flake's `checks`: formatting (`repofmt --fail-on-change`) + repo lint (`repochk`).
+      - run: nix flake check -L
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # Clippy + the existing tests under coverage (llvm-cov, one pass) — the half of `just validate`
+      # that `nix flake check` doesn't cover.
+      - run: nix develop --command cargo clippy --all-targets -- -D warnings
+      - run: nix develop --command cargo llvm-cov --no-report nextest
+      - run: nix develop --command cargo llvm-cov report | tee coverage.txt
+      # Surface coverage in the UI (run summary + sticky PR comment) — self-contained, no third party.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: scripts/ci-coverage.sh coverage.txt
+  # Informational reports on push + PR; each `just` recipe is the single source of truth (run locally too).
+  report:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: [audit, outdated]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just ${{ matrix.recipe }}

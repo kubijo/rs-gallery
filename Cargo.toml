@@ -1,0 +1,50 @@
+[package]
+name = "gallery"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# Code is Unlicense; the bundled Noto fallback fonts (fonts/noto/) are SIL OFL 1.1.
+license = "Unlicense AND OFL-1.1"
+description = "egui-shelled component catalog: a fixed egui shell + Storybook-style scene discovery (config globs, `#[scene]` + inventory)."
+readme = "README.md"
+repository = "https://github.com/kubijo/rs-gallery"
+keywords = ["egui", "components", "gui", "catalog", "preview"]
+categories = ["gui", "development-tools"]
+
+[dependencies]
+camino = "1"
+egui = "0.35"
+eframe = {
+   version = "0.35",
+   default-features = false,
+   features = ["wgpu", "glow", "default_fonts", "wayland", "x11"]
+}
+inventory = "0.3"
+gallery-macros = { path = "gallery-macros" }
+hot-lib-reloader = "0.8"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+usvg = { version = "0.47", default-features = false }
+lyon = "1"
+sublime_fuzzy = "0.7"
+process-wrap = { version = "9.1.0", features = ["std"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+convert_case = "0.11.0"
+egui_extras = { version = "0.35.0", default-features = false }
+semver = "1"
+ureq = "2"
+
+[dev-dependencies]
+egui_kittest = "0.35"
+
+# Test-only, never linked: puts glow 0.16 in Cargo.lock so the
+# `femtovg_demo_pins_a_glow_version_distinct_from_eframe` test can assert it stays distinct from eframe's
+# glow 0.17. This is the glow the femtovg demo (femtovg 0.20.4) pulls; depended on directly rather than
+# through femtovg, whose heavy tree — including unmaintained ttf-parser (RUSTSEC-2026-0192) — would
+# otherwise land in the audit. gallery itself pins no glow version.
+glow = "0.16"
+
+[workspace]
+members = ["gallery-macros", "gallery-build"]
+# The instance scaffold isn't a real crate here — its manifest carries `cargo generate` placeholders.
+exclude = ["template"]

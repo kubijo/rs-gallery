@@ -1,0 +1,30 @@
+[package]
+# Set this to your crate's name — anything but `gallery`, whose scenes dylib this one would otherwise
+# collide with at link time. (The binary and directory can still be `gallery`.) A plain literal rather
+# than a templated placeholder: a git dependency's tree is parsed by every consumer, so an invalid
+# package name would error there.
+name = "app-gallery"
+version = "0.1.0"
+publish = false
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+crate-type = ["dylib"]
+
+[[bin]]
+name = "gallery"
+path = "main.rs"
+
+[dependencies]
+gallery = { git = "{{gallery_git}}" }
+egui = "0.35"
+# Add the crate(s) whose components you want to stage, e.g.
+# my-components = { path = "../my-components" }
+
+[build-dependencies]
+gallery-build = { git = "{{gallery_git}}", package = "gallery-build" }
+
+# Standalone workspace root: scaffolding this crate into an existing Cargo workspace won't splice it
+# into that workspace's members (which would bork its build) — the instance stands on its own.
+[workspace]

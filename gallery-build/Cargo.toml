@@ -1,0 +1,11 @@
+[package]
+name = "gallery-build"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "Unlicense"
+description = "Build-script helper for gallery: discovers *.scene.rs by glob and emits their module includes."
+
+[dependencies]
+camino = "1"
+glob = "0.3"

@@ -1,0 +1,51 @@
+# cargo-deny dependency policy — https://embarkstudios.github.io/cargo-deny/
+# `just audit` (and the CI `report (audit)` job) runs advisories + bans + licenses + sources.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# quick-xml (v0.39.4) is pulled ONLY by wayland-scanner, a build-time proc-macro that parses trusted
+# Wayland-protocol XML to generate bindings — never untrusted runtime input. Both advisories are XML DoS
+# (quadratic parse / unbounded allocation) that require attacker-controlled input, so neither applies
+# here, and wayland-scanner 0.31 semver-pins quick-xml 0.39 so there's no downstream fix.
+# Re-check when the winit/wayland stack moves to quick-xml >= 0.41.
+ignore = [
+    "RUSTSEC-2026-0194", # quadratic time checking a start tag for duplicate attributes
+    "RUSTSEC-2026-0195", # unbounded NsReader namespace-declaration allocation
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    # webpki-roots' bundled Mozilla CA data (ureq/rustls TLS) — a permissive data license.
+    "CDLA-Permissive-2.0",
+    # egui's bundled default fonts.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    # Our own crates.
+    "Unlicense",
+]
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# gallery-macros / gallery-build path deps carry no version by design; only flag registry wildcards.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

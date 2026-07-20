@@ -1,0 +1,18 @@
+# Standalone justfile for a gallery instance — no dependency on a parent workspace.
+
+# Bare `just` lists recipes instead of running the first one.
+[private]
+default:
+    @just --list
+
+# Run the component gallery.
+run:
+    cargo run
+
+# Run the gallery with live hot-reload — rebuilds + hot-swaps scenes as you edit them.
+hot:
+    cargo run -- --hot
+
+# Check whether a newer `gallery` is out and list what changed since your version.
+update:
+    cargo run -- --check-updates
