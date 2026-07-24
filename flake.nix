@@ -70,6 +70,7 @@
             pkgs.ruff
             pkgs.ty
             pkgs.samply
+            pkgs.binutils # addr2line, for `gallery-perf symbolicate`
             # egui/eframe build tooling.
             pkgs.pkg-config
           ];

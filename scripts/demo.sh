@@ -64,5 +64,5 @@ if [ "$variant" = femtovg ]; then
         | grep -oE '\bglow v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | sed 's/^/  /' >&2
 fi
 
-export CARGO_TARGET_DIR="$repo/target/demo-$variant"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/target}/demo-$variant"
 exec cargo run --manifest-path "$demo/Cargo.toml" -- "$@"

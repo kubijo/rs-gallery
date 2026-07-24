@@ -17,7 +17,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 demo="$repo/demo-profile"
 out="$repo/reports/$report"
 
-for tool in cargo-generate samply; do
+for tool in cargo-generate samply uv addr2line; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "profile: $tool not on PATH — enter the dev shell, or cargo install $tool" >&2
         exit 1
@@ -59,9 +59,15 @@ inherits = "release"
 debug = true
 TOML
 
-export CARGO_TARGET_DIR="$repo/target/profile"
-# The launcher resolves globs against the config dir before handing them to the build; matching that
-# exactly means its own `build_lib` is a cache hit rather than a cargo run inside the recording.
+# Its own target dir, so a profiling build never evicts the dev cache, nested under whatever the
+# environment already asked for — a globally exported `CARGO_TARGET_DIR` points off this disk on
+# purpose. A `[build] target-dir` in `~/.cargo/config.toml` is invisible to the shell and gets
+# overridden; reading it would take `cargo metadata --format-version 1 | jq -r .target_directory`.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/target}/profile"
+
+# The launcher rebuilds the scenes dylib at startup, under its own profile and with globs it resolves
+# against the config dir. Pre-building the same profile with the same globs makes that a cache hit,
+# keeping a cold compile of every dependency out of the recording.
 demo_abs=$(cd "$demo" && pwd -P)
 export GALLERY_SCENE_GLOBS="$demo_abs/*.scene.rs"
 (cd "$demo" && cargo build --profile profiling)
@@ -73,6 +79,14 @@ echo "profile: recording $frames frames${scene:+ of $scene} → reports/$report"
 samply record --save-only -o "$out/profile.json.gz" -- \
     "$CARGO_TARGET_DIR/profiling/gallery" "${args[@]}"
 
+# Resolve addresses here, not on demand: samply saves the profile unsymbolicated, and the next build
+# replaces the very binaries its addresses point into. Non-fatal under `set -e`, so a missing symbol
+# file still leaves a recording that `samply load` can symbolicate for itself.
+if ! (cd "$repo/tools" && uv run --frozen gallery-perf symbolicate "$out/profile.json.gz"); then
+    echo "profile: symbolication failed — the recording itself is intact" >&2
+fi
+
 echo
 echo "profile: saved $out/profile.json.gz"
-echo "  view:  samply load $out/profile.json.gz"
+echo "  view:     samply load $out/profile.json.gz"
+echo "  analyse:  (cd tools && uv run gallery-perf analyze $out/profile.json.gz)"

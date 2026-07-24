@@ -19,8 +19,10 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   still when the shell is idle rather than manufacturing traffic to look live.
 - **Profiling** — `--frames <n>`, optionally with `--scene <key>`, renders a fixed count and exits, so two recordings
   are comparable rather than however long you happened to sit there. `just profile <scene>` records one under samply
-  into `reports/`, and `gallery-perf analyze` (the uv package in `tools/`) breaks the samples down per crate, which is
-  what separates gallery's own time from the component's.
+  into `reports/`, resolving its addresses to symbols on the spot — samply defers that to view time, and by the next
+  build the binaries the addresses point into are gone. `gallery-perf analyze` (the uv package in `tools/`) then splits
+  self time per crate — separating gallery's own cost from the component's — over the samples that were drawing rather
+  than parked on the event loop, reporting how many that excluded.
 - **Host overrides** — `Settings` (e.g. the Controls-panel width) and `apply_default_style`, layered under the host's
   `setup` closure.
 - **Fonts** — bundled Noto fallback faces (Sans, Symbols, Symbols 2, Math; SIL OFL 1.1, in `fonts/noto/`) fill the
