@@ -12,8 +12,15 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   Scenes reach the shell `Linked` (compiled in) or via `HotDylib` (rebuilt and hot-swapped on `--hot`).
 - **Controls** — `text`, `slider`, `toggle`, `color`, `select` / `radio` / `buttons`, `pad2d`, `group`;
   declarative-by-use, with values persisted per scene across reloads.
-- **Shell** — tree sidebar with fuzzy filter and keyboard nav, Preview/Source and Debug toggles, collapsible panels, a
-  performance footer, and mesh-tessellated SVG icons.
+- **Shell** — tree sidebar with fuzzy filter and keyboard nav, Preview/Source and Debug toggles, collapsible panels, and
+  mesh-tessellated SVG icons.
+- **Performance window** — frame cost and p95 in a separate viewport on its own repaint clock, so watching the numbers
+  never drives the loop being measured. Reports the cost of building a frame, not the interval between frames, and holds
+  still when the shell is idle rather than manufacturing traffic to look live.
+- **Profiling** — `--frames <n>`, optionally with `--scene <key>`, renders a fixed count and exits, so two recordings
+  are comparable rather than however long you happened to sit there. `just profile <scene>` records one under samply
+  into `reports/`, and `gallery-perf analyze` (the uv package in `tools/`) breaks the samples down per crate, which is
+  what separates gallery's own time from the component's.
 - **Host overrides** — `Settings` (e.g. the Controls-panel width) and `apply_default_style`, layered under the host's
   `setup` closure.
 - **Fonts** — bundled Noto fallback faces (Sans, Symbols, Symbols 2, Math; SIL OFL 1.1, in `fonts/noto/`) fill the
@@ -25,6 +32,7 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   gallery never pins. `just demo-wgpu` and `just demo-femtovg` run the two backends; the femtovg demo exercises the
   offscreen path.
 - **Scaffolding** — `cargo generate … template --name <dir> --no-workspace` lays down a standalone instance crate (its
-  own `[workspace]` plus a `justfile` with `just run` / `just hot` / `just update`).
+  own `[workspace]` plus a `justfile` with `just run` / `just hot` / `just update`), carrying example and knob scenes
+  plus an animated one that drives the render loop for the performance window to measure.
 - **Update check** — `just update` (`cargo run -- --check-updates`) fetches the upstream CHANGELOG over HTTPS and prints
   what's changed since the `gallery` version you're building against.

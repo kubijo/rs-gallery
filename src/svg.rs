@@ -151,10 +151,15 @@ mod tests {
 
     #[test]
     fn bundled_icons_load_and_tessellate() {
-        // `load` parses every bundled SVG (panics on a malformed one); the wired icons must also
-        // produce geometry.
+        // A stroke-only icon (`fill="none"`) parses fine and tessellates to nothing, so check every
+        // one produces geometry rather than trusting `load` not to panic.
         let icons = Icons::load();
-        assert!(!icons.folder.indices.is_empty());
-        assert!(!icons.app.indices.is_empty());
+        for (name, icon) in [
+            ("folder", &icons.folder),
+            ("app", &icons.app),
+            ("search", &icons.search),
+        ] {
+            assert!(!icon.indices.is_empty(), "{name} tessellated to nothing");
+        }
     }
 }

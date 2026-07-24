@@ -21,6 +21,12 @@ let
         includes = [ "*.sh" "*.bash" "*.envrc" "*.envrc.*" ];
       };
 
+      python = {
+        command = lib.getExe pkgs.ruff;
+        options = [ "format" ];
+        includes = [ "*.py" ];
+      };
+
       markdown = {
         command = lib.getExe (pkgs.mdformat.withPlugins (p: [
           p.mdformat-gfm

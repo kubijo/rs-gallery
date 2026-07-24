@@ -1,0 +1,25 @@
+[project]
+name = "gallery-perf"
+version = "0.1.0"
+description = "Analysis for gallery's samply CPU profiles: where a frame's time went, by crate and function."
+requires-python = ">=3.12"
+
+# Deliberately dependency-free: the profile is JSON, and stdlib reads it.
+# Keeping it that way means callers need no resolved environment beyond the interpreter.
+dependencies = []
+
+[project.scripts]
+gallery-perf = "gallery_perf.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]

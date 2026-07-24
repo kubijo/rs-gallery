@@ -1,14 +1,11 @@
 //! Renderer-independence proof, injected into the femtovg demo by `scripts/demo.sh` (not part of the
 //! gallery crate — it's copied into a scaffolded instance that depends on `femtovg`).
 //!
-//! Under `Renderer::Glow`, `ctx.offscreen(size, draw)` lends the scene a bound framebuffer and a GL
-//! proc-address loader. The scene builds a femtovg `Canvas` from that loader — at femtovg's own glow
-//! version, which gallery never pins. That version is deliberately mismatched: femtovg 0.20.4 links
-//! glow 0.16 while eframe links glow 0.17, two incompatible crates in one binary, and only the raw C
-//! loader crosses between them. The scene draws vector shapes that react to the knobs, and gallery
-//! shows the result inline as an egui texture. Under `Renderer::Wgpu` the loader is absent, so
-//! `offscreen` renders a hint instead. The pure-egui scenes in this same demo render unchanged either
-//! way — that, plus this scene surviving the glow mismatch, is what "renderer-independent" means.
+//! Under `Renderer::Glow`, `ctx.offscreen` lends the scene a bound framebuffer and a GL proc-address
+//! loader, from which it builds a femtovg `Canvas`. The glow versions are deliberately mismatched —
+//! femtovg 0.20.4 links glow 0.16, eframe links 0.17 — so nothing but the raw C loader crosses between
+//! them, which is the whole proof. Under `Renderer::Wgpu` the loader is absent and `offscreen` draws a
+//! hint instead.
 
 use std::cell::RefCell;
 use std::ffi::CStr;

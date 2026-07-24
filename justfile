@@ -15,23 +15,27 @@ in-shell +cmd:
     if command -v "$1" >/dev/null 2>&1; then exec "$@"; fi
     exec nix develop --command "$@"
 
-# Scaffold + run the wgpu demo (default backend, pure-egui scenes) into a git-ignored demo-wgpu/; extra args go to the gallery binary, e.g. just demo-wgpu --hot.
+# Scaffold + run the wgpu demo (default backend, pure-egui scenes).
 demo-wgpu *args:
     @scripts/demo.sh wgpu {{ args }}
 
-# Scaffold + run the glow/femtovg demo into demo-femtovg/ — same scenes under OpenGL plus a femtovg offscreen scene, proving renderer independence; extra args go to the gallery binary.
+# Scaffold + run the glow/femtovg demo into demo-femtovg/.
 demo-femtovg *args:
     @scripts/demo.sh femtovg {{ args }}
+
+# Record a CPU profile of SCENE (a key fragment, e.g. `orbit`) into reports/REPORT.
+profile SCENE="" REPORT="00-latest" FRAMES="600":
+    @scripts/profile.sh {{ SCENE }} {{ REPORT }} {{ FRAMES }}
 
 # Reformat the whole repo (nix, markdown, shell, rust, and SVG via treefmt).
 format *args:
     @just in-shell repofmt {{ args }}
 
-# Validate the crate: formatting, repo lint, clippy, and tests under coverage (reports in target/llvm-cov).
+# Validate the crate: formatting, repo lint, clippy, and tests under coverage.
 validate:
     @just in-shell validate
 
-# Report direct dependencies with a newer version available (cargo-outdated; needs network).
+# Report direct dependencies with a newer version available.
 outdated:
     @just in-shell cargo outdated --root-deps-only
 

@@ -2,8 +2,18 @@
 result**
 target/
 
-# Scaffolded local demo instances (`just demo-wgpu` / `just demo-femtovg`)
+# Scaffolded local demo instances
 /demo*/
+
+# Recorded CPU profiles (`just profile`)
+/reports/
+
+# uv's resolved environment and python caches
+*.pyc
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
 
 # AI
 .claude/*.local.*

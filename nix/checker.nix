@@ -1,7 +1,12 @@
-# Repo checker (`repochk`): lints tracked sources — shellcheck on shell scripts,
-# and `just --fmt --check` on the justfile. git-based enumeration.
-# Add a checker by dropping another entry into `checkers` (a `command` that exits
-# non-zero on failure, plus the `includes` globs it owns).
+# Repo checker (`repochk`): lints shell scripts
+# with shellcheck and the justfile with `just --fmt --check`.
+#
+# Enumeration is git-based, and deliberately covers untracked-but-not-ignored
+# files too: a checker that only sees committed ones passes a brand-new script
+# it never read.
+#
+# Add a checker by dropping another entry into `checkers`
+# (a `command` that exits non-zero on failure, plus the `includes` globs it owns).
 pkgs:
 let
   lib = pkgs.lib;
@@ -12,6 +17,13 @@ let
       includes = [ "*.sh" "*.bash" ];
       command = pkgs.writeShellScript "shell-check" ''
         exec ${lib.getExe pkgs.shellcheck} -x "$1"
+      '';
+    }
+    {
+      name = "python";
+      includes = [ "*.py" ];
+      command = pkgs.writeShellScript "python-check" ''
+        exec ${lib.getExe pkgs.ruff} check "$1"
       '';
     }
     {
@@ -50,7 +62,7 @@ pkgs.writeShellApplication {
             failed=$((failed + 1))
           fi
         fi
-      done < <(git -C "$tree_root" ls-files -- ${lib.concatMapStringsSep " " (p: ''"${p}"'') checker.includes})
+      done < <(git -C "$tree_root" ls-files --cached --others --exclude-standard -- ${lib.concatMapStringsSep " " (p: ''"${p}"'') checker.includes})
     '') checkers}
 
     echo ""

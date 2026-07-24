@@ -10,8 +10,11 @@ use std::{
     collections::BTreeMap,
     fs,
     process::Command,
-    sync::{Arc, Mutex},
-    time::Instant,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -177,7 +180,15 @@ pub struct Gallery<S: SceneSource> {
     state: ShellState,
     settings: Settings,
     icons: Icons,
-    perf: PerfStats,
+    perf: Arc<Mutex<PerfStats>>,
+    /// Set by the perf window when its close button is hit; the shell clears `show_perf` next frame.
+    perf_close: Arc<AtomicBool>,
+    /// Frozen at open: recomputing it each frame would yank the window back on every drag.
+    perf_pos: Option<egui::Pos2>,
+    frames_left: Option<u32>,
+    /// A `--scene` request, resolved on the first frame once the manifest exists. Matched on a
+    /// fragment, since the real keys are `module_path::name` and nobody wants to type those.
+    scene_request: Option<String>,
     /// The GL proc-address loader, `Some` under [`Renderer::Glow`] — handed to scenes as
     /// [`SceneCtx::gl_loader`].
     gl_loader: Option<GlLoader>,
@@ -197,14 +208,17 @@ impl<S: SceneSource> Gallery<S> {
         Self {
             source,
             state: ShellState {
-                show_perf: true,
                 show_scenes: true,
                 show_controls: true,
                 ..ShellState::default()
             },
             settings,
             icons: Icons::load(),
-            perf: PerfStats::new(),
+            perf: Arc::new(Mutex::new(PerfStats::new())),
+            perf_close: Arc::new(AtomicBool::new(false)),
+            perf_pos: None,
+            frames_left: None,
+            scene_request: None,
             gl_loader,
             gl,
         }
@@ -213,14 +227,25 @@ impl<S: SceneSource> Gallery<S> {
 
 impl<S: SceneSource> eframe::App for Gallery<S> {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let frame_start = Instant::now();
         let gl_loader = self.gl_loader.clone();
         let gl = self.gl.clone();
         self.source.before_frame(ui.ctx());
         // The `Debug` toggle drives egui's own overlay on every interactive widget.
         ui.ctx()
             .all_styles_mut(|style| style.debug.show_interactive_widgets = self.state.debug);
-        self.perf.record(ui.input(|i| i.stable_dt));
+        if self.perf_close.swap(false, Ordering::Relaxed) {
+            self.state.show_perf = false;
+        }
         let manifest = self.source.manifest();
+        if let Some(request) = self.scene_request.take() {
+            let needle = request.to_lowercase();
+            self.state.selected = manifest
+                .scenes
+                .iter()
+                .map(scene_key)
+                .find(|key| key.to_lowercase().contains(&needle));
+        }
         let tree = build_tree(&manifest);
 
         // Keep the selected scene if it still exists (across reloads/reordering); else the first.
@@ -235,24 +260,40 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
 
         handle_keyboard(ui.ctx(), &mut self.state, &tree, &manifest.scenes);
 
-        // Always-present footer; `show_perf` expands it (live) or collapses it
-        // to its header bar, which carries the chevron to expand it again.
-        let expanded = self.state.show_perf;
-        egui::Panel::bottom("gallery-perf")
-            .resizable(false)
-            .exact_size(if expanded {
-                PERF_PANEL_HEIGHT
-            } else {
-                HEADER_H + 2.0
-            })
-            .frame(egui::Frame::NONE.fill(PANEL_BG))
-            .show(ui, |ui| {
-                render_performance(ui, &self.perf, &mut self.state.show_perf);
-            });
-        if expanded {
-            // Live numbers need a repaint each tick;
-            // only pay for it while expanded.
-            ui.ctx().request_repaint();
+        // Its own viewport, on its own repaint clock: watching the numbers never drives this loop, and
+        // the meter's own draw lands in its budget rather than the frame it measures.
+        if self.state.show_perf {
+            if self.perf_pos.is_none() {
+                self.perf_pos = perf_window_pos(ui.ctx());
+            }
+            let mut builder = egui::ViewportBuilder::default()
+                .with_title("gallery · perf")
+                .with_inner_size(PERF_WINDOW_SIZE);
+            if let Some(pos) = self.perf_pos {
+                builder = builder.with_position(pos);
+            }
+            let perf = self.perf.clone();
+            let close = self.perf_close.clone();
+            ui.ctx().show_viewport_deferred(
+                egui::ViewportId::from_hash_of("gallery-perf"),
+                builder,
+                move |ctx, _class| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE.fill(PANEL_BG))
+                        .show(ctx, |ui| {
+                            render_performance(ui, &perf.lock().expect("perf stats"));
+                        });
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        close.store(true, Ordering::Relaxed);
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    }
+                    // Fast enough to read as live, far below the render loop it reports on.
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                },
+            );
+        } else {
+            // Re-park on the next open, in case the shell has moved since.
+            self.perf_pos = None;
         }
 
         let icons = &self.icons;
@@ -371,13 +412,14 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                     // The same header bar as the side panels, so all three line up in height and style.
                     let mut header = header_bar(ui);
                     header.label(header_title(&breadcrumb(scene, &manifest.groups)));
-                    // Debug toggle + the Preview/Source switch cluster on the right; tight padding
-                    // keeps them within the slim header bar.
+                    // Tight padding keeps the cluster within the slim header bar.
                     header.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
                         ui.selectable_value(&mut self.state.show_source, true, "Source");
                         ui.selectable_value(&mut self.state.show_source, false, "Preview");
                         ui.checkbox(&mut self.state.debug, "Debug");
+                        ui.checkbox(&mut self.state.show_perf, "Perf")
+                            .on_hover_text("Performance window (⌘B)");
                     });
                 }
 
@@ -418,6 +460,24 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                     }
                 }
             });
+
+        // Timed here, not read from `frame.info().cpu_usage`: eframe reports that
+        // per *viewport* redraw, so the perf window's own repaints overwrite it
+        // and the meter ends up charging the shell for the instrument.
+        // This is the shell's build cost; tessellate and paint sit outside it.
+        self.perf
+            .lock()
+            .expect("perf stats")
+            .record(frame_start.elapsed().as_secs_f32());
+
+        if let Some(left) = self.frames_left.as_mut() {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
     }
 }
 
@@ -803,10 +863,29 @@ fn collapsed_panel(
 
 // --- Performance footer ---
 
-/// The performance footer's expanded height (header + labels row + sparkline).
-const PERF_PANEL_HEIGHT: f32 = 60.0;
-/// Muted grey for the FPS / frame-time labels; the values themselves render in white.
 const PERF_LABEL: egui::Color32 = egui::Color32::from_rgb(0x6F, 0x6F, 0x6F);
+const TABLE_ROW_H: f32 = 18.0;
+const TABLE_LABEL_W: f32 = 96.0;
+const PERF_WINDOW_SIZE: [f32; 2] = [380.0, 240.0];
+
+/// Park the perf window beside the shell rather than over it, flipping left when the monitor has no
+/// room. `None` when the shell's geometry is unknown — Wayland never reports it — leaving it to the WM.
+fn perf_window_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
+    let (outer, monitor) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size));
+    let outer = outer?;
+    let gap = 8.0;
+    let right = outer.right() + gap;
+    Some(
+        if monitor.is_none_or(|m| right + PERF_WINDOW_SIZE[0] <= m.x) {
+            egui::pos2(right, outer.top())
+        } else {
+            egui::pos2(
+                (outer.left() - gap - PERF_WINDOW_SIZE[0]).max(0.0),
+                outer.top(),
+            )
+        },
+    )
+}
 /// Translucent threshold gridlines, then their even fainter ms labels.
 const PERF_GRID: egui::Color32 = egui::Color32::from_rgba_premultiplied(0x50, 0x50, 0x50, 0x80);
 const PERF_GRID_LABEL: egui::Color32 =
@@ -816,42 +895,61 @@ const PERF_GOOD: egui::Color32 = egui::Color32::from_rgb(0x4C, 0xAF, 0x50);
 const PERF_WARN: egui::Color32 = egui::Color32::from_rgb(0xE0, 0xB0, 0x30);
 const PERF_BAD: egui::Color32 = egui::Color32::from_rgb(0xD9, 0x3A, 0x3A);
 
-/// Frame-time ring buffer with smoothed display values for the performance strip.
-/// `record` refreshes the shown FPS / frame time ~4×/sec so they read steady, not jittery.
+/// Frame-cost ring buffer with smoothed display values for the performance window.
+///
+/// Samples are the cost of *building* a frame, not the interval between frames, so they mean the same
+/// thing whether the shell is repainting steadily or idle. Deliberately no FPS: under a reactive loop
+/// repaint frequency measures how often something asked for a frame, not how expensive one is.
 struct PerfStats {
-    frame_times: [f32; 30],
+    /// Per-frame CPU build cost, in seconds.
+    costs: [f32; 30],
     write_idx: usize,
-    display_fps: u32,
     display_ms: f32,
+    display_p95_ms: f32,
     update_at: Instant,
+    /// When the last sample landed, so the window can tell "cheap" apart from "not rendering".
+    last_record: Instant,
 }
 
 impl PerfStats {
     fn new() -> Self {
         Self {
-            frame_times: [0.0; 30],
+            costs: [0.0; 30],
             write_idx: 0,
-            display_fps: 0,
             display_ms: 0.0,
+            display_p95_ms: 0.0,
             update_at: Instant::now(),
+            last_record: Instant::now(),
         }
     }
 
-    /// Record a frame's delta; ~4×/sec, refresh the smoothed FPS / frame time from the window average.
+    /// What the shell is doing, for the window's status row. A reactive shell nobody is touching
+    /// produces no frames, so a frozen readout is correct — this says so instead of looking broken.
+    fn activity(&self) -> String {
+        let idle = self.last_record.elapsed();
+        if idle < Duration::from_millis(400) {
+            "rendering".to_owned()
+        } else {
+            format!("idle {:.0}s", idle.as_secs_f32())
+        }
+    }
+
+    /// Record one frame's build cost (seconds); ~4×/sec, refresh the smoothed average and p95.
     #[expect(
         clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "averaging 30 small, non-negative frame times into a display FPS"
+        reason = "averaging 30 small, non-negative costs"
     )]
-    fn record(&mut self, dt: f32) {
-        self.frame_times[self.write_idx] = dt;
-        self.write_idx = (self.write_idx + 1) % self.frame_times.len();
+    fn record(&mut self, cost: f32) {
+        self.costs[self.write_idx] = cost;
+        self.write_idx = (self.write_idx + 1) % self.costs.len();
+        self.last_record = Instant::now();
         if self.update_at.elapsed().as_secs_f32() > 0.25 {
             self.update_at = Instant::now();
-            let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
-            self.display_fps = (1.0 / avg) as u32;
+            let avg = self.costs.iter().sum::<f32>() / self.costs.len() as f32;
             self.display_ms = avg * 1_000.0;
+            let mut sorted = self.costs;
+            sorted.sort_by(f32::total_cmp);
+            self.display_p95_ms = sorted[sorted.len() * 95 / 100] * 1_000.0;
         }
     }
 }
@@ -859,7 +957,6 @@ impl PerfStats {
 /// Which way a collapse [`caret`] points — toward where a click sends the panel.
 #[derive(Clone, Copy)]
 enum Caret {
-    Down,
     Left,
     Right,
 }
@@ -870,11 +967,6 @@ fn caret(ui: &mut egui::Ui, dir: Caret) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click());
     let c = rect.center();
     let pts = match dir {
-        Caret::Down => vec![
-            egui::pos2(c.x - 3.0, c.y - 2.0),
-            egui::pos2(c.x + 3.0, c.y - 2.0),
-            egui::pos2(c.x, c.y + 3.0),
-        ],
         Caret::Right => vec![
             egui::pos2(c.x - 2.0, c.y - 3.0),
             egui::pos2(c.x - 2.0, c.y + 3.0),
@@ -896,84 +988,87 @@ fn caret(ui: &mut egui::Ui, dir: Caret) -> egui::Response {
     resp
 }
 
-/// The performance footer: a titled header bar with a collapse caret.
-/// When expanded, the labelled FPS + frame time cluster with the sparkline, centred in the band.
-fn render_performance(ui: &mut egui::Ui, perf: &PerfStats, expanded: &mut bool) {
-    let top = ui.max_rect();
+fn render_performance(ui: &mut egui::Ui, perf: &PerfStats) {
     {
         let mut header = header_bar(ui);
-        let dir = if *expanded { Caret::Down } else { Caret::Right };
-        if caret(&mut header, dir).clicked() {
-            *expanded = !*expanded;
-        }
-        header.add_space(2.0);
         header.label(header_title("Performance"));
     }
-    // Footer's own top edge, painted over the header bar so it reads apart from the canvas above.
-    ui.painter()
-        .hline(top.x_range(), top.top(), egui::Stroke::new(1.0, HAIRLINE));
-    if !*expanded {
-        return;
-    }
 
-    let font = egui::FontId::monospace(9.0);
-    // One `LayoutJob` per row so the grey label and white value share a baseline.
-    let row = |label: &str, value: String| {
-        let mut job = egui::text::LayoutJob::default();
-        job.append(
-            label,
-            0.0,
-            egui::TextFormat {
-                font_id: font.clone(),
-                color: PERF_LABEL,
-                ..Default::default()
-            },
-        );
-        job.append(
-            &format!("  {value}"),
-            0.0,
-            egui::TextFormat {
-                font_id: font.clone(),
-                color: egui::Color32::WHITE,
-                ..Default::default()
-            },
-        );
-        job
-    };
+    ui.add_space(6.0);
+    render_metric_table(ui, perf);
 
-    // Labels + sparkline cluster on the left, vertically centred in the band below the header.
-    ui.allocate_ui_with_layout(
-        ui.available_size(),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.add_space(8.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                ui.label(row("FPS       ", format!("{:>4}", perf.display_fps)));
-                ui.label(row("Frame time", format!("{:>5.1} ms", perf.display_ms)));
-            });
-            ui.add_space(16.0);
-            let (spark, _) = ui.allocate_exact_size(egui::vec2(132.0, 30.0), egui::Sense::hover());
-            render_sparkline(ui, &perf.frame_times, perf.write_idx, spark);
-        },
+    // Taken as a rect rather than through a `horizontal`, whose cross-axis sizing caps the height.
+    ui.add_space(6.0);
+    let left = ui.available_rect_before_wrap();
+    let plot = egui::Rect::from_min_max(
+        egui::pos2(left.left() + 6.0, left.top()),
+        egui::pos2(left.right() - 6.0, left.bottom() - 6.0),
     );
+    ui.allocate_rect(plot, egui::Sense::hover());
+    render_sparkline(ui, &perf.costs, perf.write_idx, plot);
 }
 
-/// Paint the frame-time sparkline: bars right-aligned in `rect`,
-/// oldest sample first, with threshold gridlines
-///  - at 60 fps (17 ms)
-///  - and 30 fps (33 ms)
+/// The readings, painted rather than laid out: a `Grid` sizes columns to content, so the box would
+/// breathe whenever a reading changed width, and it draws no inner rules. Fixed geometry gives both.
+fn render_metric_table(ui: &mut egui::Ui, perf: &PerfStats) {
+    let font = egui::FontId::monospace(11.0);
+    let rows = [
+        ("Frame cost", format!("{:.1} ms", perf.display_ms)),
+        ("p95", format!("{:.1} ms", perf.display_p95_ms)),
+        ("Shell", perf.activity()),
+    ];
+
+    let avail = ui.available_rect_before_wrap();
+    let table = egui::Rect::from_min_size(
+        egui::pos2(avail.left() + 6.0, avail.top()),
+        egui::vec2(avail.width() - 12.0, TABLE_ROW_H * rows.len() as f32),
+    );
+    ui.allocate_rect(table, egui::Sense::hover());
+
+    let painter = ui.painter();
+    let rule = egui::Stroke::new(1.0, HAIRLINE);
+    painter.rect_stroke(table, 0.0, rule, egui::StrokeKind::Inside);
+    let divider = table.left() + TABLE_LABEL_W;
+    painter.vline(divider, table.y_range(), rule);
+
+    let mut top = table.top();
+    for (i, (name, reading)) in rows.iter().enumerate() {
+        if i > 0 {
+            painter.hline(table.x_range(), top, rule);
+        }
+        let mid = top + TABLE_ROW_H / 2.0;
+        painter.text(
+            egui::pos2(table.left() + 8.0, mid),
+            egui::Align2::LEFT_CENTER,
+            name,
+            font.clone(),
+            PERF_LABEL,
+        );
+        painter.text(
+            egui::pos2(divider + 8.0, mid),
+            egui::Align2::LEFT_CENTER,
+            reading,
+            font.clone(),
+            egui::Color32::WHITE,
+        );
+        top += TABLE_ROW_H;
+    }
+}
+
+/// Paint the frame-cost sparkline into `rect`, oldest sample first. The gridlines are frame budgets —
+/// 17 ms (60 fps) and 33 ms (30 fps) — so a bar above one costs more than that budget allows.
 #[expect(
     clippy::cast_precision_loss,
     reason = "small bar counts cast to pixel offsets"
 )]
-fn render_sparkline(ui: &egui::Ui, frame_times: &[f32; 30], write_idx: usize, rect: egui::Rect) {
-    let n = frame_times.len();
+fn render_sparkline(ui: &egui::Ui, costs: &[f32; 30], write_idx: usize, rect: egui::Rect) {
+    let n = costs.len();
+    // A gutter for the gridline labels; the plot takes everything else.
+    let plot_left = rect.left() + 30.0;
     let bar_h_max = (rect.height() - 2.0).max(4.0);
-    let bar_stride = 3.0_f32;
-    let bar_fill = 2.0;
-    let spark_w = n as f32 * bar_stride;
-    let spark_left = rect.right() - spark_w - 4.0;
+    let bar_stride = ((rect.right() - plot_left) / n as f32).max(1.0);
+    let bar_fill = (bar_stride - 1.0).max(1.0);
+    let spark_left = plot_left;
     let spark_bottom = rect.bottom() - 1.0;
     let spark_top = spark_bottom - bar_h_max;
     let scale_max = 1.0 / 30.0; // 33.3 ms fills the height.
@@ -981,7 +1076,7 @@ fn render_sparkline(ui: &egui::Ui, frame_times: &[f32; 30], write_idx: usize, re
     // Border around the plot area.
     let border_rect = egui::Rect::from_min_max(
         egui::pos2(spark_left - 1.0, spark_top - 1.0),
-        egui::pos2(rect.right() - 3.0, spark_bottom + 1.0),
+        egui::pos2(rect.right(), spark_bottom + 1.0),
     );
     ui.painter().rect_stroke(
         border_rect,
@@ -1014,7 +1109,7 @@ fn render_sparkline(ui: &egui::Ui, frame_times: &[f32; 30], write_idx: usize, re
     // Bars, oldest (write_idx) at the left.
     for i in 0..n {
         let idx = (write_idx + i) % n;
-        let t = frame_times[idx];
+        let t = costs[idx];
         if t <= 0.0 {
             continue;
         }
@@ -1073,6 +1168,24 @@ pub fn run<S: SceneSource + 'static>(
     settings: Settings,
     setup: impl FnOnce(&egui::Context) + 'static,
 ) -> eframe::Result {
+    run_with(title, source, settings, setup, RunOptions::default())
+}
+
+/// Overrides for a scripted run; an ordinary session sets none. `frames` renders exactly that many
+/// and exits, which is what makes two profiles comparable; `scene` picks the one to measure.
+#[derive(Default)]
+struct RunOptions {
+    frames: Option<u32>,
+    scene: Option<String>,
+}
+
+fn run_with<S: SceneSource + 'static>(
+    title: &str,
+    source: S,
+    settings: Settings,
+    setup: impl FnOnce(&egui::Context) + 'static,
+    options: RunOptions,
+) -> eframe::Result {
     let renderer = match settings.renderer {
         Renderer::Wgpu => eframe::Renderer::Wgpu,
         Renderer::Glow => eframe::Renderer::Glow,
@@ -1099,12 +1212,11 @@ pub fn run<S: SceneSource + 'static>(
             }
             // `cc.get_proc_address` is `Some` under glow — the version-agnostic GL loader that reaches
             // scenes as `SceneCtx::gl_loader`. `cc.gl` is gallery's own context for `offscreen` FBOs.
-            Ok(Box::new(Gallery::new(
-                source,
-                settings,
-                cc.get_proc_address.clone(),
-                cc.gl.clone(),
-            )))
+            let mut gallery =
+                Gallery::new(source, settings, cc.get_proc_address.clone(), cc.gl.clone());
+            gallery.frames_left = options.frames;
+            gallery.scene_request = options.scene;
+            Ok(Box::new(gallery))
         }),
     )
 }
@@ -1122,27 +1234,36 @@ mod hot {
     /// gallery/egui version — a single workspace lock guarantees it.
     pub struct HotDylib {
         reloader: LibReloader,
+        watching: bool,
     }
 
     impl HotDylib {
         /// Load `lib<lib_name>.<dylib-ext>` from the current executable's directory — the same
         /// `<target>/<profile>/` cargo drops both the host binary and the dylib into.
         ///
+        /// `watching` says whether a watcher is rebuilding that dylib (`--hot`). Only then is there
+        /// anything to poll for.
+        ///
         /// # Errors
         /// If the executable path can't be read, or the dylib can't be loaded from that directory.
-        pub fn new(lib_name: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        pub fn new(lib_name: &str, watching: bool) -> Result<Self, Box<dyn std::error::Error>> {
             let exe = std::env::current_exe()?;
             let dir = exe
                 .parent()
                 .ok_or("current executable has no parent directory")?;
             let dir = camino::Utf8Path::from_path(dir).ok_or("executable path is not UTF-8")?;
             let reloader = LibReloader::new(dir, lib_name, Some(Duration::from_millis(200)), None)?;
-            Ok(Self { reloader })
+            Ok(Self { reloader, watching })
         }
     }
 
     impl SceneSource for HotDylib {
         fn before_frame(&mut self, ctx: &egui::Context) {
+            // Polling unconditionally kept the shell repainting 5×/s forever, so it never came to rest
+            // and a frame-cost reading had nothing at rest to measure.
+            if !self.watching {
+                return;
+            }
             // Swap in a rebuilt dylib, then keep polling so edits show without user input.
             let _ = self.reloader.update();
             ctx.request_repaint_after(Duration::from_millis(200));
@@ -1197,7 +1318,9 @@ macro_rules! launch {
 /// Read the config, build the scenes dylib from its globs, load it, and open the window. Prefer the
 /// [`launch!`] macro, which fills `package`/`manifest_dir` from the calling crate.
 ///
-/// Args: `--config <path>` (default `<manifest_dir>/gallery.toml`); `--hot` (rebuild + swap on edits).
+/// Args: `--config <path>` (default `<manifest_dir>/gallery.toml`); `--hot` (rebuild + swap on edits);
+/// `--frames <n>` with optional `--scene <key>` for a deterministic profiling run that renders exactly
+/// `n` frames and exits.
 pub fn launch(
     package: &str,
     manifest_dir: &str,
@@ -1208,9 +1331,9 @@ pub fn launch(
         check_updates();
         return Ok(());
     }
-    let (config_path, hot) = launch_args(manifest_dir);
-    let config = read_config(&config_path);
-    let base = config_path.parent().unwrap_or_else(|| Utf8Path::new("."));
+    let args = launch_args(manifest_dir);
+    let config = read_config(&args.config);
+    let base = args.config.parent().unwrap_or_else(|| Utf8Path::new("."));
     let globs: Vec<String> = config
         .scene_globs
         .iter()
@@ -1218,15 +1341,15 @@ pub fn launch(
         .collect();
 
     build_lib(manifest_dir, &globs);
-    let watcher = if hot {
+    let watcher = if args.hot {
         spawn_watcher(manifest_dir, &globs)
     } else {
         None
     };
     // The dylib is `lib<crate>.so`; the crate's lib name is the package name with dashes as underscores.
-    let source =
-        HotDylib::new(&package.replace('-', "_")).expect("load the freshly built scenes dylib");
-    let result = run(&config.title, source, settings, setup);
+    let source = HotDylib::new(&package.replace('-', "_"), args.hot)
+        .expect("load the freshly built scenes dylib");
+    let result = run_with(&config.title, source, settings, setup, args.options);
     // Window closed normally: stop the watcher (the Ctrl-C/SIGTERM path is handled in spawn_watcher).
     if let Some(watcher) = &watcher {
         let _ = watcher.lock().unwrap().kill();
@@ -1245,24 +1368,40 @@ fn default_title() -> String {
     "gallery".to_owned()
 }
 
-fn launch_args(manifest_dir: &str) -> (Utf8PathBuf, bool) {
+struct LaunchArgs {
+    config: Utf8PathBuf,
+    hot: bool,
+    options: RunOptions,
+}
+
+fn launch_args(manifest_dir: &str) -> LaunchArgs {
     let mut config = None;
     let mut hot = false;
+    let mut options = RunOptions::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--hot" => hot = true,
             "--config" => config = Some(args.next().expect("--config needs a path")),
+            "--frames" => {
+                let count = args.next().expect("--frames needs a count");
+                options.frames = Some(count.parse().expect("--frames needs a number"));
+            }
+            "--scene" => options.scene = Some(args.next().expect("--scene needs a scene key")),
             other => panic!("unknown argument: {other}"),
         }
     }
     let path = config
         .map(Utf8PathBuf::from)
         .unwrap_or_else(|| Utf8Path::new(manifest_dir).join("gallery.toml"));
-    let path = path
+    let config = path
         .canonicalize_utf8()
         .unwrap_or_else(|e| panic!("config `{path}`: {e}"));
-    (path, hot)
+    LaunchArgs {
+        config,
+        hot,
+        options,
+    }
 }
 
 fn read_config(path: &Utf8Path) -> Config {
@@ -1659,13 +1798,15 @@ mod tests {
 
     #[test]
     fn perf_stats_starts_zeroed() {
-        assert_eq!(PerfStats::new().display_fps, 0);
+        let perf = PerfStats::new();
+        assert_eq!(perf.display_ms, 0.0);
+        assert_eq!(perf.display_p95_ms, 0.0);
     }
 
     #[test]
     fn perf_stats_ring_buffer_wraps() {
         let mut perf = PerfStats::new();
-        let cap = perf.frame_times.len();
+        let cap = perf.costs.len();
         for _ in 0..cap + 2 {
             perf.record(0.016);
         }
@@ -1675,29 +1816,33 @@ mod tests {
     #[test]
     fn perf_stats_smooths_over_the_window() {
         let mut perf = PerfStats::new();
-        for _ in 0..perf.frame_times.len() {
+        for _ in 0..perf.costs.len() {
             perf.record(1.0 / 60.0);
         }
         // Reopen the ~4×/sec smoothing window without waiting on the wall clock.
-        perf.update_at -= std::time::Duration::from_millis(300);
+        perf.update_at -= Duration::from_millis(300);
         perf.record(1.0 / 60.0);
+        // Every sample is the same cost, so the average and the p95 land on it.
         assert!(
-            (59..=60).contains(&perf.display_fps),
-            "fps {}",
-            perf.display_fps
+            (perf.display_ms - 16.67).abs() < 0.1,
+            "avg {}",
+            perf.display_ms
         );
-        assert!((perf.display_ms - 16.67).abs() < 0.1);
+        assert!(
+            (perf.display_p95_ms - 16.67).abs() < 0.1,
+            "p95 {}",
+            perf.display_p95_ms
+        );
     }
 
     #[test]
-    fn performance_strip_renders_with_its_title() {
+    fn performance_window_renders_with_its_title() {
         let mut perf = PerfStats::new();
-        for _ in 0..perf.frame_times.len() {
+        for _ in 0..perf.costs.len() {
             perf.record(1.0 / 60.0);
         }
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
-            let mut expanded = true;
-            render_performance(ui, &perf, &mut expanded);
+            render_performance(ui, &perf);
         });
         harness.run();
         assert!(harness.query_by_label("Performance").is_some());

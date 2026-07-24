@@ -61,12 +61,15 @@
             # Rust toolchain from rust-toolchain.toml (rust-overlay) + test/deps tooling.
             (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
             pkgs.cargo-nextest
-            pkgs.cargo-llvm-cov # coverage — instruments the test run (`just validate`, CI test job)
+            pkgs.cargo-llvm-cov
             (validateFor pkgs) # `validate`: the full gate
             pkgs.cargo-outdated
-            pkgs.cargo-deny # dependency audit (`just audit`, CI)
-            # Scaffolds a new instance from template/.
+            pkgs.cargo-deny
             pkgs.cargo-generate
+            pkgs.uv
+            pkgs.ruff
+            pkgs.ty
+            pkgs.samply
             # egui/eframe build tooling.
             pkgs.pkg-config
           ];
