@@ -37,7 +37,7 @@ mod perf;
 mod svg;
 mod tree;
 mod update;
-pub use context::SceneCtx;
+pub use context::{SceneCtx, Stage};
 pub use hot::HotDylib;
 pub use knobs::{ChoiceStyle, Knob, Pad2DSpec};
 use knobs::{KnobStore, render_knobs};
@@ -50,7 +50,7 @@ use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, vis
 
 /// Common imports for scene files: `use gallery::prelude::*;` then bare `scene_meta!` / `#[scene]`.
 pub mod prelude {
-    pub use crate::{Offscreen, Pad2DSpec, SceneCtx, SceneEntry, scene, scene_meta};
+    pub use crate::{Offscreen, Pad2DSpec, SceneCtx, SceneEntry, Stage, scene, scene_meta, stage};
 }
 
 /// A discoverable component state, authored with [`macro@scene`] and joined to its group by
@@ -95,6 +95,32 @@ macro_rules! scene_meta {
                 title: $title,
             }
         }
+    };
+}
+
+/// [`SceneCtx::stage`], with the size spelled the short way.
+///
+/// ```ignore
+/// stage!(ctx, |ui| ui.button("Save"));            // fits its content
+/// stage!(ctx, (300.0, 200.0), |ui| scroll(ui));   // a pinned viewport
+/// stage!(ctx, (300, 200), |ui| scroll(ui));       // ...however the numbers are written
+/// stage!(ctx, 200, |ui| avatar(ui));              // a square
+/// stage!(ctx, fill, |ui| dashboard(ui));          // the whole canvas
+/// ```
+#[macro_export]
+macro_rules! stage {
+    // Before the size arm: `fit`/`fill` are bare idents, which `$size:expr` would swallow.
+    ($ctx:expr, fit, $add:expr $(,)?) => {
+        $ctx.stage($crate::Stage::Fit, $add)
+    };
+    ($ctx:expr, fill, $add:expr $(,)?) => {
+        $ctx.stage($crate::Stage::Fill, $add)
+    };
+    ($ctx:expr, $size:expr, $add:expr $(,)?) => {
+        $ctx.stage($size, $add)
+    };
+    ($ctx:expr, $add:expr $(,)?) => {
+        $ctx.stage($crate::Stage::Fit, $add)
     };
 }
 
@@ -446,10 +472,8 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         render_source_view(ui, scene.source);
                     }
                 } else {
-                    // A checkerboard canvas, so a component's transparency and bounds read against the
-                    // shell — over the area below the header only, or it paints over the breadcrumb and
-                    // view tabs above.
-                    paint_checkerboard(ui, ui.available_rect_before_wrap());
+                    // Plain canvas: the checkerboard belongs to each `SceneCtx::stage`,
+                    // around the component it frames, so a scene's prose reads as prose.
                     if let (Some(scene), Some(key)) = (scene, &key) {
                         let store = self.state.knobs.entry(key.clone()).or_default();
                         let target = self.state.targets.entry(key.clone()).or_default();
@@ -666,25 +690,31 @@ fn render_source_view(ui: &mut egui::Ui, source: &str) {
     clippy::cast_precision_loss,
     reason = "tile counts are small, non-negative screen dimensions"
 )]
-fn paint_checkerboard(ui: &egui::Ui, rect: egui::Rect) {
+/// The backdrop a [`SceneCtx::stage`](crate::SceneCtx::stage) sits on,
+/// so transparency and bounds read against the shell.
+/// Shapes rather than paint: a fitted stage learns its rect
+/// only after drawing, and fills in a slot reserved before it.
+pub(crate) fn checkerboard(rect: egui::Rect) -> Vec<egui::Shape> {
     const SIZE: f32 = 12.0;
     const DARK: egui::Color32 = egui::Color32::from_rgb(0x25, 0x25, 0x25);
     const LIGHT: egui::Color32 = egui::Color32::from_rgb(0x35, 0x35, 0x35);
 
-    let painter = ui.painter_at(rect);
     let cols = (rect.width() / SIZE + 1.0) as usize;
     let rows = (rect.height() / SIZE + 1.0) as usize;
+    let mut tiles = Vec::with_capacity(rows * cols);
     for row in 0..rows {
         for col in 0..cols {
             let corner = egui::pos2(
                 rect.min.x + col as f32 * SIZE,
                 rect.min.y + row as f32 * SIZE,
             );
-            let tile = egui::Rect::from_min_size(corner, egui::Vec2::splat(SIZE));
+            // Clamp, so the last row and column stop at the edge instead of overhanging it.
+            let tile = egui::Rect::from_min_size(corner, egui::Vec2::splat(SIZE)).intersect(rect);
             let color = if (row + col) % 2 == 0 { DARK } else { LIGHT };
-            painter.rect_filled(tile, 0.0, color);
+            tiles.push(egui::Shape::rect_filled(tile, 0.0, color));
         }
     }
+    tiles
 }
 
 // --- Panel chrome ---

@@ -43,12 +43,43 @@ scene_meta! { title: "Components / Button" }
 
 #[scene("enabled")]
 fn enabled(ctx: &mut SceneCtx) {
-    ctx.ui.button("Save");
+    stage!(ctx, |ui| { ui.button("Save"); });
 }
 
 #[scene("disabled")]
 fn disabled(ctx: &mut SceneCtx) {
-    ctx.ui.add_enabled(false, egui::Button::new("Save"));
+    stage!(ctx, |ui| { ui.add_enabled(false, egui::Button::new("Save")); });
+}
+```
+
+The canvas is plain, so a scene reads as a **document**: headings and prose go straight onto `ctx.ui`, and each thing
+you are demonstrating goes in a **stage** — which puts it on the checkerboard (so transparency and bounds read against
+the shell), captions it with its size, and lets you collapse it. A bare closure fits the content; `fill` takes the rest
+of the canvas; anything else is a size, written however the call site already has it:
+
+```rust
+stage!(ctx, |ui| ui.button("Save"));            // fit to content
+stage!(ctx, (300.0, 200.0), |ui| scroll(ui));   // a pinned viewport
+stage!(ctx, (300, 200), |ui| scroll(ui));       // ...however you write the numbers
+stage!(ctx, 200, |ui| avatar(ui));              // a square
+stage!(ctx, fill, |ui| dashboard(ui));          // the rest of the canvas
+```
+
+`fill` measures what is left where it is called, so a scene that is a single `fill` gets the whole canvas — the shape
+every scene had before stages — while one placed after other content takes only the remainder.
+
+A pinned size is for components that behave differently depending on how much room they have — a scroll area, a wrapping
+layout, anything with a breakpoint:
+
+```rust
+#[scene("scrolling")]
+fn scrolling(ctx: &mut SceneCtx) {
+    ctx.ui.heading("Vertical scroll (200px viewport)");
+    stage!(ctx, (300, 200), |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for i in 0..40 { ui.label(format!("Item {i}")); }
+        });
+    });
 }
 ```
 

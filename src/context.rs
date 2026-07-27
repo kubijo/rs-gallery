@@ -24,8 +24,49 @@ pub struct SceneCtx<'a> {
     pub ui: &'a mut egui::Ui,
     knobs: &'a mut Vec<Knob>,
     cursor: usize,
+    stages: usize,
     gl: Option<GlDeps<'a>>,
 }
+
+/// How much room a [`stage`](SceneCtx::stage) takes.
+/// `(300.0, 200.0)`, `(300, 200)` and `200` (a square) all convert.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Stage {
+    Fit,
+    /// For a component that behaves differently at different sizes
+    /// — a scroll area, a wrapping layout, anything with a breakpoint.
+    Fixed(egui::Vec2),
+    Fill,
+}
+
+impl From<egui::Vec2> for Stage {
+    fn from(size: egui::Vec2) -> Self {
+        Self::Fixed(size)
+    }
+}
+
+/// `(width, height)`, and a bare side length for a square, per numeric type.
+macro_rules! stage_from {
+    ($($number:ty),+ $(,)?) => {$(
+        impl From<($number, $number)> for Stage {
+            fn from((width, height): ($number, $number)) -> Self {
+                Self::Fixed(egui::vec2(width as f32, height as f32))
+            }
+        }
+
+        impl From<$number> for Stage {
+            fn from(side: $number) -> Self {
+                Self::Fixed(egui::Vec2::splat(side as f32))
+            }
+        }
+    )+};
+}
+
+stage_from!(f32, f64, u16, i16, u32, i32, usize, isize);
+
+/// Breathing room between a staged component
+/// and the edge of its checkerboard.
+const PADDING: i8 = 16;
 
 impl<'a> SceneCtx<'a> {
     pub(crate) fn new(
@@ -37,8 +78,83 @@ impl<'a> SceneCtx<'a> {
             ui,
             knobs,
             cursor: 0,
+            stages: 0,
             gl,
         }
+    }
+
+    /// Put a component on the checkerboard, captioned with its size and collapsible.
+    /// The canvas is plain, so headings and prose drawn onto `ui` read as headings and prose.
+    ///
+    /// [`stage!`](crate::stage) spells the common cases shorter.
+    pub fn stage(&mut self, size: impl Into<Stage>, add: impl FnOnce(&mut egui::Ui)) {
+        let size = size.into();
+        let id = self.ui.id().with(("gallery-stage", self.stages));
+        self.stages += 1;
+        let mut open = self.ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
+
+        // The badge sits above the stage but reports a size `Fit` only knows
+        // once drawn, so keep the position and paint the text in afterwards.
+        let badge_at = self
+            .ui
+            .horizontal(|ui| {
+                let arrow = if open { "▾" } else { "▸" };
+                if ui
+                    .add(egui::Button::new(arrow).small().frame(false))
+                    .on_hover_text(if open { "Collapse" } else { "Expand" })
+                    .clicked()
+                {
+                    open = !open;
+                    ui.data_mut(|d| d.insert_temp(id, open));
+                }
+                ui.cursor().min
+            })
+            .inner;
+
+        // Reserved before the content, so the checkerboard lands beneath it.
+        let backdrop = self.ui.painter().add(egui::Shape::Noop);
+        let framed = egui::Frame::new()
+            .inner_margin(egui::Margin::same(PADDING))
+            .show(self.ui, |ui| {
+                if !open {
+                    return ui.min_rect();
+                }
+                ui.scope(|ui| match size {
+                    Stage::Fit => add(ui),
+                    Stage::Fixed(wanted) => {
+                        ui.allocate_ui(wanted, |ui| {
+                            ui.set_min_size(wanted);
+                            add(ui);
+                        });
+                    }
+                    Stage::Fill => {
+                        let available = ui.available_size();
+                        ui.allocate_ui(available, |ui| {
+                            ui.set_min_size(available);
+                            add(ui);
+                        });
+                    }
+                })
+                .response
+                .rect
+            });
+
+        if open {
+            let backdrop_rect = framed.response.rect;
+            self.ui.painter().set(
+                backdrop,
+                egui::Shape::Vec(crate::checkerboard(backdrop_rect)),
+            );
+        }
+        // The component's own size, not the padded box around it.
+        let content = framed.inner;
+        self.ui.painter().text(
+            badge_at,
+            egui::Align2::LEFT_TOP,
+            format!("{:.0}×{:.0}", content.width(), content.height()),
+            egui::FontId::proportional(10.0),
+            self.ui.visuals().weak_text_color(),
+        );
     }
 
     /// The GL proc-address loader — `Some` only under [`Renderer::Glow`](crate::Renderer::Glow). Build a
@@ -353,6 +469,68 @@ mod tests {
                 0,
                 "switching style at the same label drops the stored value"
             );
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn any_size_shape_converts_to_a_fixed_stage() {
+        assert_eq!(
+            Stage::from((300.0, 200.0)),
+            Stage::Fixed(egui::vec2(300.0, 200.0))
+        );
+        assert_eq!(
+            Stage::from((300, 200)),
+            Stage::Fixed(egui::vec2(300.0, 200.0)),
+            "integer pairs convert, so a call site need not spell floats"
+        );
+        assert_eq!(
+            Stage::from(64),
+            Stage::Fixed(egui::Vec2::splat(64.0)),
+            "a bare number is a square"
+        );
+        assert_eq!(Stage::from(64.0_f32), Stage::Fixed(egui::Vec2::splat(64.0)));
+        assert_eq!(
+            Stage::from(egui::vec2(4.0, 5.0)),
+            Stage::Fixed(egui::vec2(4.0, 5.0))
+        );
+    }
+
+    /// Guards the macro's arm order: `fit`/`fill` would otherwise parse
+    /// as a size, and a lone closure has to fall through to the fitted arm.
+    #[test]
+    fn the_macro_accepts_every_stage_form() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+            let mut drawn = 0;
+
+            crate::stage!(ctx, |ui| {
+                ui.label("implicitly fitted");
+                drawn += 1;
+            });
+            crate::stage!(ctx, fit, |ui| {
+                ui.label("explicitly fitted");
+                drawn += 1;
+            });
+            crate::stage!(ctx, fill, |ui| {
+                ui.label("filled");
+                drawn += 1;
+            });
+            crate::stage!(ctx, (120.0, 80.0), |ui| {
+                ui.label("float pair");
+                drawn += 1;
+            });
+            crate::stage!(ctx, (120, 80), |ui| {
+                ui.label("integer pair");
+                drawn += 1;
+            });
+            crate::stage!(ctx, 64, |ui| {
+                ui.label("square");
+                drawn += 1;
+            });
+
+            assert_eq!(drawn, 6, "every form ran its body");
         });
         harness.run();
     }

@@ -41,6 +41,8 @@ fn vector_shapes(ctx: &mut SceneCtx) {
         },
     );
 
+    ctx.ui.heading("femtovg, drawn into gallery's FBO");
+    // No `stage!`: it lends only a `Ui`, and `offscreen` needs the whole `SceneCtx`.
     ctx.offscreen([520u32, 340], |o| {
         let loader = o.gl_loader();
         let fbo = o.fbo();

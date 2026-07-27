@@ -9,7 +9,9 @@ scene_meta! { title: "Example / Knobs" }
 #[scene("text")]
 fn text(ctx: &mut SceneCtx) {
     let value = ctx.text("label", "edit me");
-    ctx.ui.label(format!("value = {value:?}"));
+    stage!(ctx, |ui| {
+        ui.label(format!("value = {value:?}"));
+    });
 }
 
 /// `slider` — numeric; `step` snaps the value and sets the readout's decimals (`0.0` is smooth).
@@ -19,23 +21,27 @@ fn slider(ctx: &mut SceneCtx) {
     let whole = ctx.slider("integer", 24.0, 12.0, 64.0, 1.0);
     let tenths = ctx.slider("tenths", 1.0, 0.0, 5.0, 0.1);
     let hundredths = ctx.slider("hundredths", 0.5, 0.0, 1.0, 0.01);
-    ctx.ui
-        .label(format!("{smooth} · {whole} · {tenths} · {hundredths}"));
+    stage!(ctx, |ui| {
+        ui.label(format!("{smooth} · {whole} · {tenths} · {hundredths}"));
+    });
 }
 
 /// `toggle` — a boolean checkbox.
 #[scene("toggle")]
 fn toggle(ctx: &mut SceneCtx) {
     let enabled = ctx.toggle("enabled", true);
-    ctx.ui.label(if enabled { "enabled" } else { "disabled" });
+    stage!(ctx, |ui| {
+        ui.label(if enabled { "enabled" } else { "disabled" });
+    });
 }
 
 /// `color` — an sRGBA colour picker.
 #[scene("color")]
 fn color(ctx: &mut SceneCtx) {
     let tint = ctx.color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
-    ctx.ui
-        .label(egui::RichText::new("Tinted sample").size(28.0).color(tint));
+    stage!(ctx, |ui| {
+        ui.label(egui::RichText::new("Tinted sample").size(28.0).color(tint));
+    });
 }
 
 /// `select` / `radio` / `buttons` — three styles for a one-of-N choice; each returns the index.
@@ -45,10 +51,12 @@ fn choice(ctx: &mut SceneCtx) {
     let dropdown = ctx.select("select", OPTIONS, 0);
     let radio = ctx.radio("radio", OPTIONS, 1);
     let segmented = ctx.buttons("buttons", OPTIONS, 2);
-    ctx.ui.label(format!(
-        "select = {}, radio = {}, buttons = {}",
-        OPTIONS[dropdown], OPTIONS[radio], OPTIONS[segmented],
-    ));
+    stage!(ctx, |ui| {
+        ui.label(format!(
+            "select = {}, radio = {}, buttons = {}",
+            OPTIONS[dropdown], OPTIONS[radio], OPTIONS[segmented],
+        ));
+    });
 }
 
 /// `pad2d` — a 2-axis pad; `Pad2DSpec` sets its ranges and y-orientation.
@@ -66,8 +74,9 @@ fn pad2d(ctx: &mut SceneCtx) {
             ..Pad2DSpec::default()
         },
     );
-    ctx.ui
-        .label(format!("({x:.2}, {y:.2}) · ({px:.0}, {py:.0})"));
+    stage!(ctx, |ui| {
+        ui.label(format!("({x:.2}, {y:.2}) · ({px:.0}, {py:.0})"));
+    });
 }
 
 /// `group` — a labelled separator that splits the knobs beneath it into sections.
@@ -80,5 +89,7 @@ fn group(ctx: &mut SceneCtx) {
     let tint = ctx.color("tint", egui::Color32::WHITE);
     let bold = ctx.toggle("bold", false);
     let label = egui::RichText::new(format!("({x:.1}, {y:.1})")).color(tint);
-    ctx.ui.label(if bold { label.strong() } else { label });
+    stage!(ctx, |ui| {
+        ui.label(if bold { label.strong() } else { label });
+    });
 }

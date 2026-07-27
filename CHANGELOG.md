@@ -12,6 +12,12 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   Scenes reach the shell `Linked` (compiled in) or via `HotDylib` (rebuilt and hot-swapped on `--hot`).
 - **Controls** — `text`, `slider`, `toggle`, `color`, `select` / `radio` / `buttons`, `pad2d`, `group`;
   declarative-by-use, with values persisted per scene across reloads.
+- **Scenes read as documents** — the canvas is plain, so headings and prose drawn onto `ctx.ui` look like headings and
+  prose. Each thing being demonstrated goes in a `stage!`, which carries the checkerboard, a size caption and a collapse
+  toggle: a bare closure fits the content, `fill` takes the rest of the canvas, and anything else is a size —
+  `(300.0, 200.0)`, `(300, 200)` or `200` for a square all convert, so a call site writes the dimensions the way it
+  already holds them. A scene with several stages and prose between them is the point; a scene that is a single `fill`
+  is the whole-canvas shape every scene had before stages, said out loud.
 - **Shell** — tree sidebar with fuzzy filter and keyboard nav, Preview/Source and Debug toggles, collapsible panels, and
   mesh-tessellated SVG icons.
 - **Performance window** — frame cost and p95 in a separate viewport on its own repaint clock, so watching the numbers

@@ -22,23 +22,24 @@ fn orbit(ctx: &mut SceneCtx) {
         ctx.ui.ctx().request_repaint();
     }
 
-    let t = ctx.ui.input(|i| i.time) as f32 * speed;
+    // Fitted, so the badge tracks `radius`.
     let span = radius * 2.0 + dot * 2.0 + 8.0;
-    let (rect, _) = ctx
-        .ui
-        .allocate_exact_size(egui::vec2(span, span), egui::Sense::hover());
-    let painter = ctx.ui.painter_at(rect);
-    let center = rect.center();
+    stage!(ctx, |ui| {
+        let t = ui.input(|i| i.time) as f32 * speed;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(span, span), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        let center = rect.center();
 
-    for i in 0..count {
-        let phase = std::f32::consts::TAU * i as f32 / count as f32;
-        let angle = phase + t;
-        let pos = egui::pos2(
-            center.x + radius * angle.cos(),
-            center.y + radius * angle.sin(),
-        );
-        // Fade around the ring so the motion reads even at low speed.
-        let fade = 0.35 + 0.65 * (0.5 + 0.5 * angle.sin());
-        painter.circle_filled(pos, dot, accent.gamma_multiply(fade));
-    }
+        for i in 0..count {
+            let phase = std::f32::consts::TAU * i as f32 / count as f32;
+            let angle = phase + t;
+            let pos = egui::pos2(
+                center.x + radius * angle.cos(),
+                center.y + radius * angle.sin(),
+            );
+            // Fade around the ring so the motion reads even at low speed.
+            let fade = 0.35 + 0.65 * (0.5 + 0.5 * angle.sin());
+            painter.circle_filled(pos, dot, accent.gamma_multiply(fade));
+        }
+    });
 }
