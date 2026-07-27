@@ -44,3 +44,6 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   plus an animated one that drives the render loop for the performance window to measure.
 - **Update check** — `just update` (`cargo run -- --check-updates`) fetches the upstream CHANGELOG over HTTPS and prints
   what's changed since the `gallery` version you're building against.
+- **Docs formatting** — code fences in Markdown are formatted as code rather than left as prose: `just format` sends
+  Rust fences through the rustfmt this repo already pins and Bash fences through beautysh, so the README's examples
+  carry the same style as the source they mirror.

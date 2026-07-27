@@ -11,7 +11,7 @@ shell finds them, with no central list.
 
 An instance is one flat crate plus a config — nothing else. Scaffold one into a sub-directory of your choosing with
 
-```
+```bash
 cargo generate --git kubijo/rs-gallery template --name my-gallery --no-workspace
 ```
 
@@ -43,12 +43,16 @@ scene_meta! { title: "Components / Button" }
 
 #[scene("enabled")]
 fn enabled(ctx: &mut SceneCtx) {
-    stage!(ctx, |ui| { ui.button("Save"); });
+    stage!(ctx, |ui| {
+        ui.button("Save");
+    });
 }
 
 #[scene("disabled")]
 fn disabled(ctx: &mut SceneCtx) {
-    stage!(ctx, |ui| { ui.add_enabled(false, egui::Button::new("Save")); });
+    stage!(ctx, |ui| {
+        ui.add_enabled(false, egui::Button::new("Save"));
+    });
 }
 ```
 
@@ -57,13 +61,13 @@ you are demonstrating goes in a **stage** — which puts it on the checkerboard 
 the shell), captions it with its size, and lets you collapse it. A bare closure fits the content; `fill` takes the rest
 of the canvas; anything else is a size, written however the call site already has it:
 
-```rust
-stage!(ctx, |ui| ui.button("Save"));            // fit to content
-stage!(ctx, (300.0, 200.0), |ui| scroll(ui));   // a pinned viewport
-stage!(ctx, (300, 200), |ui| scroll(ui));       // ...however you write the numbers
-stage!(ctx, 200, |ui| avatar(ui));              // a square
-stage!(ctx, fill, |ui| dashboard(ui));          // the rest of the canvas
-```
+| `stage!`'s size argument | the stage is sized              |
+| ------------------------ | ------------------------------- |
+| omitted, or `fit`        | to fit its content              |
+| `(300.0, 200.0)`         | to a pinned 300×200 viewport    |
+| `(300, 200)`             | the same — integers convert too |
+| `200`                    | to a 200×200 square             |
+| `fill`                   | to whatever canvas is left      |
 
 `fill` measures what is left where it is called, so a scene that is a single `fill` gets the whole canvas — the shape
 every scene had before stages — while one placed after other content takes only the remainder.
@@ -77,7 +81,9 @@ fn scrolling(ctx: &mut SceneCtx) {
     ctx.ui.heading("Vertical scroll (200px viewport)");
     stage!(ctx, (300, 200), |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for i in 0..40 { ui.label(format!("Item {i}")); }
+            for i in 0..40 {
+                ui.label(format!("Item {i}"));
+            }
         });
     });
 }
@@ -102,7 +108,7 @@ fn label(ctx: &mut SceneCtx) {
 
 The title's slashes build the sidebar tree; the scenes are children:
 
-```
+```text
 Components
   Button
     enabled

@@ -7,6 +7,66 @@ pkgs:
 let
   lib = pkgs.lib;
 
+  # rustfmt from the repo toolchain (rust-toolchain.toml via rust-overlay), so the formatter
+  # and the build agree on edition.
+  rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml;
+
+  # mdformat formats fenced code through `mdformat.codeformatter` entry points, one per language.
+  # nixpkgs ships one for bash (mdformat-beautysh) but none for Rust, hence this: rustfmt reached by
+  # absolute store path, so nothing depends on what happens to be on PATH at format time.
+  rustfmtPluginPyproject = pkgs.writeText "pyproject.toml" ''
+    [build-system]
+    requires = ["setuptools"]
+    build-backend = "setuptools.build_meta"
+
+    [project]
+    name = "mdformat-rustfmt-local"
+    version = "0.1.0"
+
+    [project.entry-points."mdformat.codeformatter"]
+    rust = "mdformat_rustfmt_local:format_rust"
+
+    [tool.setuptools]
+    py-modules = ["mdformat_rustfmt_local"]
+  '';
+
+  rustfmtPluginModule = pkgs.writeText "mdformat_rustfmt_local.py" ''
+    """Format Rust fences in Markdown with this repo's pinned rustfmt."""
+
+    import subprocess
+
+    RUSTFMT = "${lib.getExe' rustToolchain "rustfmt"}"
+
+
+    def format_rust(unformatted: str, _info_str: str) -> str:
+        done = subprocess.run(
+            [RUSTFMT, "--edition", "2024", "--emit", "stdout", "--quiet"],
+            input=unformatted,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # Raise rather than hand back the input: mdformat swallows a codeformatter's
+        # exception into a warning naming the file and line, and that warning is the only
+        # signal a fence stopped being valid Rust. Returning it unchanged would be silent.
+        if done.returncode:
+            raise ValueError(done.stderr.strip() or "rustfmt rejected this block")
+        return done.stdout
+  '';
+
+  mdformatRustfmt = pkgs.python3Packages.buildPythonPackage {
+    pname = "mdformat-rustfmt-local";
+    version = "0.1.0";
+    pyproject = true;
+    build-system = [ pkgs.python3Packages.setuptools ];
+    doCheck = false;
+    src = pkgs.runCommand "mdformat-rustfmt-local-src" { } ''
+      mkdir -p $out
+      cp ${rustfmtPluginPyproject} $out/pyproject.toml
+      cp ${rustfmtPluginModule} $out/mdformat_rustfmt_local.py
+    '';
+  };
+
   treefmtConfig = pkgs.treefmt.buildConfig {
     on-unmatched = "debug";
     formatter = {
@@ -32,8 +92,19 @@ let
           p.mdformat-gfm
           p.mdformat-frontmatter
           p.mdformat-simple-breaks
+          p.mdformat-beautysh
+          mdformatRustfmt
         ]));
-        options = [ "--number" "--wrap=120" ];
+        # Naming the code formatters makes mdformat *require* them: a plugin that stops loading
+        # is an error rather than fences silently going unformatted.
+        options = [
+          "--number"
+          "--wrap=120"
+          "--codeformatters"
+          "rust"
+          "--codeformatters"
+          "bash"
+        ];
         includes = [ "*.md" "*.markdown" ];
       };
 
@@ -48,10 +119,8 @@ let
         includes = [ "justfile" "**/justfile" "Justfile" "**/Justfile" "*.just" "*.justfile" ];
       };
 
-      # rustfmt from the repo toolchain (rust-toolchain.toml via rust-overlay), so the formatter
-      # and the build agree on edition.
       rust = {
-        command = lib.getExe' (pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml) "rustfmt";
+        command = lib.getExe' rustToolchain "rustfmt";
         options = [ "--edition" "2024" ];
         includes = [ "*.rs" ];
       };
