@@ -29,6 +29,25 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   build the binaries the addresses point into are gone. `gallery-perf analyze` (the uv package in `tools/`) then splits
   self time per crate — separating gallery's own cost from the component's — over the samples that were drawing rather
   than parked on the event loop, reporting how many that excluded.
+- **Headless render** — `--render <path.png> --scene <pattern>` writes a scene's canvas with no window, so an agent or
+  CI can look at a component instead of asking someone for a screenshot. Drawn by the same code the shell draws with, so
+  the image is the canvas alone and holds still as the chrome around it changes.
+- **Capture recipes** — the defaults are rarely the state worth seeing, so `--capture <file.toml>` renders a list of
+  shots, each naming its scene, size and knobs. A file rather than flags: labels contain spaces that shell wrappers
+  drop, and a set of states is worth committing. Knobs go by label (or a regex over them), choices by option label —
+  both survive a reordering. Values are applied between frames rather than seeded, since a knob doesn't exist until the
+  scene asks for it. Anything that can't be honoured stops the run: a clean render of the wrong state is worse than
+  none.
+- **Recipe generator** — `--init-capture` prints a recipe with every knob at the value its scene declared, so the
+  starting point already renders and the first edit is the state you were after.
+- **Capture follows the renderer** — under `Renderer::Glow` it paints through an OpenGL context taken off an EGL device,
+  with no window and no display server, so a scene drawing with `ctx.offscreen(...)` captures its content rather than
+  the hint wgpu would leave in its place. egui_kittest ships no glow renderer, so this is one of gallery's own; the
+  texture a scene registers goes through `egui_glow`'s painter, since the `Frame` a test harness builds carries no glow
+  hook and nothing outside eframe can give it one.
+- **Command line** — parsed by clap, so `--help` lists the arguments and a bad one is an error, not a panic. Failures
+  that come down to a choice name the candidates in a framed list, styled through `anstream` so a pipe or `NO_COLOR`
+  gets the same text plain.
 - **Host overrides** — `Settings` (e.g. the Controls-panel width) and `apply_default_style`, layered under the host's
   `setup` closure.
 - **Fonts** — bundled Noto fallback faces (Sans, Symbols, Symbols 2, Math; SIL OFL 1.1, in `fonts/noto/`) fill the
@@ -40,10 +59,12 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   gallery never pins. `just demo-wgpu` and `just demo-femtovg` run the two backends; the femtovg demo exercises the
   offscreen path.
 - **Scaffolding** — `cargo generate … template --name <dir> --no-workspace` lays down a standalone instance crate (its
-  own `[workspace]` plus a `justfile` with `just run` / `just hot` / `just update`), carrying example and knob scenes
-  plus an animated one that drives the render loop for the performance window to measure.
+  own `[workspace]` plus a `justfile` with `just run` / `just hot` / `just update` / `just render` / `just capture` /
+  `just knobs` / `just capture-init`), carrying example and knob scenes plus an animated one that drives the render loop
+  for the performance window to measure, and a `capture.toml` showing the recipe format against those scenes.
 - **Update check** — `just update` (`cargo run -- --check-updates`) fetches the upstream CHANGELOG over HTTPS and prints
   what's changed since the `gallery` version you're building against.
 - **Docs formatting** — code fences in Markdown are formatted as code rather than left as prose: `just format` sends
-  Rust fences through the rustfmt this repo already pins and Bash fences through beautysh, so the README's examples
-  carry the same style as the source they mirror.
+  Rust fences through the rustfmt this repo already pins, Bash fences through beautysh and TOML fences through taplo, so
+  the README's examples carry the same style as the source they mirror. taplo formats the `.toml` files too — bar
+  `Cargo.toml`, which cargo itself writes.

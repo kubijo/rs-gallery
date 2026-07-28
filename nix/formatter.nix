@@ -67,6 +67,61 @@ let
     '';
   };
 
+  # Same shape as the Rust plugin above. `mdformat-config` on PyPI would cover TOML,
+  # but it isn't in nixpkgs and also brings JSON and YAML fence formatters this repo
+  # hasn't asked for; going local keeps fences on the very taplo that formats the `.toml` files.
+  taploPluginPyproject = pkgs.writeText "pyproject.toml" ''
+    [build-system]
+    requires = ["setuptools"]
+    build-backend = "setuptools.build_meta"
+
+    [project]
+    name = "mdformat-taplo-local"
+    version = "0.1.0"
+
+    [project.entry-points."mdformat.codeformatter"]
+    toml = "mdformat_taplo_local:format_toml"
+
+    [tool.setuptools]
+    py-modules = ["mdformat_taplo_local"]
+  '';
+
+  taploPluginModule = pkgs.writeText "mdformat_taplo_local.py" ''
+    """Format TOML fences in Markdown with the taplo that formats this repo's .toml files."""
+
+    import subprocess
+
+    TAPLO = "${lib.getExe pkgs.taplo}"
+
+
+    def format_toml(unformatted: str, _info_str: str) -> str:
+        done = subprocess.run(
+            [TAPLO, "format", "--colors", "never", "-"],
+            input=unformatted,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # Raise rather than hand back the input, as in the Rust plugin: the warning mdformat
+        # makes of it is the only sign a fence stopped being valid TOML.
+        if done.returncode:
+            raise ValueError(done.stderr.strip() or "taplo rejected this block")
+        return done.stdout
+  '';
+
+  mdformatTaplo = pkgs.python3Packages.buildPythonPackage {
+    pname = "mdformat-taplo-local";
+    version = "0.1.0";
+    pyproject = true;
+    build-system = [ pkgs.python3Packages.setuptools ];
+    doCheck = false;
+    src = pkgs.runCommand "mdformat-taplo-local-src" { } ''
+      mkdir -p $out
+      cp ${taploPluginPyproject} $out/pyproject.toml
+      cp ${taploPluginModule} $out/mdformat_taplo_local.py
+    '';
+  };
+
   treefmtConfig = pkgs.treefmt.buildConfig {
     on-unmatched = "debug";
     formatter = {
@@ -94,6 +149,7 @@ let
           p.mdformat-simple-breaks
           p.mdformat-beautysh
           mdformatRustfmt
+          mdformatTaplo
         ]));
         # Naming the code formatters makes mdformat *require* them: a plugin that stops loading
         # is an error rather than fences silently going unformatted.
@@ -104,6 +160,8 @@ let
           "rust"
           "--codeformatters"
           "bash"
+          "--codeformatters"
+          "toml"
         ];
         includes = [ "*.md" "*.markdown" ];
       };
@@ -141,6 +199,15 @@ let
           '';
         });
         includes = [ "*.svg" ];
+      };
+
+      # Not `Cargo.toml`: cargo owns its manifests — `cargo add` writes its own shape,
+      # and taplo restructuring a dependency entry only starts a fight neither side wins.
+      toml = {
+        command = lib.getExe pkgs.taplo;
+        options = [ "format" ];
+        includes = [ "*.toml" ];
+        excludes = [ "Cargo.toml" "**/Cargo.toml" ];
       };
 
       yaml = {

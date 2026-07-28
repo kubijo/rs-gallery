@@ -8,12 +8,17 @@ use std::{
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
+use clap::Parser;
 use process_wrap::std::{ChildWrapper, CommandWrap};
 
-use crate::{HotDylib, RunOptions, Settings, run_with, update::check_updates};
+use crate::{
+    HotDylib, RunOptions, SceneSource, Settings, diagnostic::Diagnostic, render, run_with,
+    tree::resolve_scene, update::check_updates,
+};
 
-/// The consumer's entire `main`. Both arguments are required — a `setup` closure and [`Settings`], which
-/// names the [`Renderer`](crate::Renderer):
+/// The consumer's entire `main`. Both arguments are required
+/// — a `setup` closure and [`Settings`], which names
+/// the [`Renderer`](crate::Renderer):
 ///
 /// ```ignore
 /// fn main() -> gallery::eframe::Result {
@@ -21,8 +26,8 @@ use crate::{HotDylib, RunOptions, Settings, run_with, update::check_updates};
 /// }
 /// ```
 ///
-/// Expands to [`launch()`] with the calling crate's name and manifest dir filled in. `setup` runs
-/// against the fresh egui context (e.g. `|ctx| egui_extras::install_image_loaders(ctx)`).
+/// Expands to [`launch()`] with the calling crate's name and manifest dir filled in.
+/// `setup` runs against the fresh egui context (e.g. `|ctx| egui_extras::install_image_loaders(ctx)`).
 #[macro_export]
 macro_rules! launch {
     ($setup:expr, $settings:expr) => {
@@ -35,28 +40,37 @@ macro_rules! launch {
     };
 }
 
-/// Read the config, build the scenes dylib from its globs, load it, and open the window. Prefer the
-/// [`launch!`] macro, which fills `package`/`manifest_dir` from the calling crate.
+/// Read the config, build the scenes dylib from its globs, load it,
+/// and open the window — or, headlessly, render scenes to PNGs instead.
 ///
-/// Args: `--config <path>` (default `<manifest_dir>/gallery.toml`); `--hot` (rebuild + swap on edits);
-/// `--frames <n>` with optional `--scene <key>` for a deterministic profiling run that renders exactly
-/// `n` frames and exits.
+/// Prefer the [`launch!`] macro, which fills `package`/`manifest_dir` from the calling crate.
+/// `--help` lists the arguments.
 ///
 /// # Panics
-/// If an argument is unknown or missing its value, or the config can't be read or parsed.
+/// If the config can't be read or parsed, or the scenes dylib can't be built or loaded.
+/// A bad argument, an unmatched scene or knob, or a failed render exits with a message instead.
 pub fn launch(
     package: &str,
     manifest_dir: &str,
     settings: Settings,
-    setup: impl FnOnce(&egui::Context) + 'static,
+    setup: impl Fn(&egui::Context) + 'static,
 ) -> eframe::Result {
-    if std::env::args().skip(1).any(|arg| arg == "--check-updates") {
+    let cli = Cli::parse();
+    // Before the config is read, so a stale or broken `gallery.toml`
+    // can't stop you finding out that the pinned version is the reason.
+    if cli.check_updates {
         check_updates();
         return Ok(());
     }
-    let args = launch_args(manifest_dir);
-    let config = read_config(&args.config);
-    let base = args.config.parent().unwrap_or_else(|| Utf8Path::new("."));
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(|| Utf8Path::new(manifest_dir).join("gallery.toml"));
+    let config_path = config_path
+        .canonicalize_utf8()
+        .unwrap_or_else(|e| panic!("config `{config_path}`: {e}"));
+    let config = read_config(&config_path);
+    let base = config_path.parent().unwrap_or_else(|| Utf8Path::new("."));
     let globs: Vec<String> = config
         .scene_globs
         .iter()
@@ -64,20 +78,133 @@ pub fn launch(
         .collect();
 
     build_lib(manifest_dir, &globs);
-    let watcher = if args.hot {
+    // The dylib is `lib<crate>.so`; the crate's lib name is the package name with dashes as underscores.
+    let mut source = HotDylib::new(&package.replace('-', "_"), cli.hot)
+        .expect("load the freshly built scenes dylib");
+    let manifest = source.manifest();
+
+    // Everything above is how scenes get here at all, so a headless run branches only where the window
+    // would have opened — before any watcher, which nothing would be left to shut down.
+    if let Some(shots) = shots(&cli, &config_path) {
+        return match render::render(&manifest, settings.renderer, &setup, &shots) {
+            Ok(()) => Ok(()),
+            Err(reason) => fail(&reason),
+        };
+    }
+
+    // Matched here rather than mid-frame: a miss can still be reported and exited on.
+    let scene = cli.scene.as_ref().map(|pattern| {
+        resolve_scene(&manifest.scenes, pattern).unwrap_or_else(|reason| fail(&reason))
+    });
+    let options = RunOptions {
+        frames: cli.frames,
+        scene: scene.map(crate::tree::scene_key),
+    };
+
+    let watcher = if cli.hot {
         spawn_watcher(manifest_dir, &globs)
     } else {
         None
     };
-    // The dylib is `lib<crate>.so`; the crate's lib name is the package name with dashes as underscores.
-    let source = HotDylib::new(&package.replace('-', "_"), args.hot)
-        .expect("load the freshly built scenes dylib");
-    let result = run_with(&config.title, source, settings, setup, args.options);
+    let result = run_with(&config.title, source, settings, setup, options);
     // Window closed normally: stop the watcher (the Ctrl-C/SIGTERM path is handled in spawn_watcher).
     if let Some(watcher) = &watcher {
         let _ = watcher.lock().unwrap().kill();
     }
     result
+}
+
+/// Report a headless failure the way clap reports a bad argument — on stderr, then a non-zero exit —
+/// rather than a panic, which buries the part the caller has to act on under a backtrace notice.
+fn fail(problem: &Diagnostic) -> ! {
+    problem.report();
+    std::process::exit(1)
+}
+
+/// The shots this invocation asks for, or `None` when it wants the window.
+///
+/// A recipe describes its own. The single-scene flags describe one shot between them,
+/// so asking for several at once stays coherent — a listing or a generated recipe
+/// then says what the image beside it was set to.
+fn shots(cli: &Cli, config: &Utf8Path) -> Option<Vec<render::Shot>> {
+    if let Some(recipe) = &cli.capture {
+        // Relative to the config, like the scene globs: both describe the instance, not the shell.
+        let recipe = config.parent().unwrap_or(Utf8Path::new(".")).join(recipe);
+        return Some(
+            render::read_recipe(&recipe, cli.out.as_deref()).unwrap_or_else(|reason| fail(&reason)),
+        );
+    }
+    if cli.render.is_none() && !cli.list_knobs && !cli.init_capture {
+        return None;
+    }
+    let scene = cli.scene.clone().expect("clap requires --scene for these");
+    Some(vec![render::Shot {
+        scene,
+        out: cli.render.clone(),
+        size: cli
+            .size
+            .as_deref()
+            .map_or(Ok(render::DEFAULT_SIZE), render::parse_size)
+            .unwrap_or_else(|reason| fail(&reason.into())),
+        knobs: Vec::new(),
+        frames: cli.frames,
+        list: cli.list_knobs,
+        template: cli.init_capture,
+    }])
+}
+
+// This doc comment is the `--help` text, so it reads as instructions rather than as rationale; why
+// knobs are set in a file instead of in flags is in the `render` module's own docs.
+/// An egui component gallery: browse scenes in a window, or render them to PNGs headlessly.
+///
+/// Knob values are set in a `--capture` recipe rather than in flags.
+/// `--list-knobs` prints the labels a scene declares; `--render` captures one scene as it stands.
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    /// Config to read scene globs from [default: <manifest-dir>/gallery.toml]
+    #[arg(long, value_name = "PATH")]
+    config: Option<Utf8PathBuf>,
+
+    /// Rebuild and hot-swap scenes as they are edited
+    #[arg(long, conflicts_with_all = ["render", "capture", "list_knobs", "init_capture"])]
+    hot: bool,
+
+    /// Report whether a newer gallery is out, and what changed since this one
+    #[arg(long)]
+    check_updates: bool,
+
+    /// The scene: a whole key, else a case-insensitive regex. Must match exactly one
+    #[arg(long, value_name = "PATTERN")]
+    scene: Option<String>,
+
+    /// Frames to draw before exiting (windowed) or capturing (headless)
+    #[arg(long, value_name = "N")]
+    frames: Option<u32>,
+
+    /// Render one scene's canvas to a PNG, at its default knobs, and exit
+    #[arg(long, value_name = "PATH", requires = "scene")]
+    render: Option<Utf8PathBuf>,
+
+    /// Canvas size to render at [default: 1280x720]
+    #[arg(long, value_name = "WxH")]
+    size: Option<String>,
+
+    /// Print the scene's knobs, their kinds and their values, and exit
+    #[arg(long, requires = "scene")]
+    list_knobs: bool,
+
+    /// Print a capture recipe for the scene, its knobs filled in at their current values, and exit
+    #[arg(long, requires = "scene")]
+    init_capture: bool,
+
+    /// Render every shot in a capture recipe (TOML, relative to the config) and exit
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["render", "scene", "list_knobs", "init_capture", "size"])]
+    capture: Option<Utf8PathBuf>,
+
+    /// Where --capture writes, overriding the recipe's own `out`
+    #[arg(long, value_name = "DIR", requires = "capture")]
+    out: Option<Utf8PathBuf>,
 }
 
 #[derive(serde::Deserialize)]
@@ -89,42 +216,6 @@ struct Config {
 
 fn default_title() -> String {
     "gallery".to_owned()
-}
-
-struct LaunchArgs {
-    config: Utf8PathBuf,
-    hot: bool,
-    options: RunOptions,
-}
-
-fn launch_args(manifest_dir: &str) -> LaunchArgs {
-    let mut config = None;
-    let mut hot = false;
-    let mut options = RunOptions::default();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--hot" => hot = true,
-            "--config" => config = Some(args.next().expect("--config needs a path")),
-            "--frames" => {
-                let count = args.next().expect("--frames needs a count");
-                options.frames = Some(count.parse().expect("--frames needs a number"));
-            }
-            "--scene" => options.scene = Some(args.next().expect("--scene needs a scene key")),
-            other => panic!("unknown argument: {other}"),
-        }
-    }
-    let path = config
-        .map(Utf8PathBuf::from)
-        .unwrap_or_else(|| Utf8Path::new(manifest_dir).join("gallery.toml"));
-    let config = path
-        .canonicalize_utf8()
-        .unwrap_or_else(|e| panic!("config `{path}`: {e}"));
-    LaunchArgs {
-        config,
-        hot,
-        options,
-    }
 }
 
 fn read_config(path: &Utf8Path) -> Config {
@@ -162,8 +253,8 @@ fn build_lib(manifest_dir: &str, globs: &[String]) {
 /// under any other profile it lands somewhere nothing reads, and the cold compile that produced it is
 /// pure cost.
 fn host_profile() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.file_name()?.to_str()?;
+    let exe = Utf8PathBuf::from_path_buf(std::env::current_exe().ok()?).ok()?;
+    let dir = exe.parent()?.file_name()?;
     Some(if dir == "debug" { "dev" } else { dir }.to_owned())
 }
 

@@ -21,10 +21,12 @@
       );
       formatterFor = pkgs: import ./nix/formatter.nix pkgs;
       checkerFor = pkgs: import ./nix/checker.nix pkgs;
+      testFor = pkgs: import ./nix/test.nix { inherit pkgs; };
       validateFor = pkgs: import ./nix/validate.nix {
         inherit pkgs;
         formatter = formatterFor pkgs;
         checker = checkerFor pkgs;
+        test = testFor pkgs;
       };
     in
     {
@@ -63,6 +65,7 @@
             pkgs.cargo-nextest
             pkgs.cargo-llvm-cov
             (validateFor pkgs) # `validate`: the full gate
+            (testFor pkgs) # `gallery-test`: the tests, with a GL stack for the capture ones
             pkgs.cargo-outdated
             pkgs.cargo-deny
             pkgs.cargo-generate

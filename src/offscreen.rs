@@ -30,7 +30,11 @@ impl RenderTarget {
         clippy::cast_possible_wrap,
         reason = "small, non-negative pixel dimensions"
     )]
-    unsafe fn create(gl: &glow::Context, frame: &mut eframe::Frame, size: [u32; 2]) -> Self {
+    unsafe fn create(
+        gl: &glow::Context,
+        register: &mut dyn FnMut(glow::NativeTexture) -> egui::TextureId,
+        size: [u32; 2],
+    ) -> Self {
         let (w, h) = (size[0] as i32, size[1] as i32);
         // SAFETY: `gl` is the live context (fn contract); standard offscreen-FBO setup.
         let (fbo, texture, rbo) = unsafe {
@@ -80,7 +84,7 @@ impl RenderTarget {
             gl.bind_renderbuffer(glow::RENDERBUFFER, None);
             (fbo, texture, rbo)
         };
-        let tex_id = frame.register_native_glow_texture(texture);
+        let tex_id = register(texture);
         Self {
             fbo,
             texture,
@@ -159,20 +163,34 @@ impl Offscreen {
     }
 }
 
+/// Hands a GL texture to egui and gets back an id to draw it by.
+///
+/// A closure rather than the `eframe::Frame` that backs it in a window, because the headless capture
+/// has no usable one: `Frame::_new_kittest` leaves the hook `None`, and the field is `pub(crate)`.
+/// There, `egui_glow::Painter::register_native_texture` — the same call eframe wraps — stands in.
+///
+/// Owned rather than borrowed, because `&'a mut (dyn FnMut + 'a)` puts `'a` in an invariant position.
+/// [`GlDeps`] has to stay covariant for a caller to hand it to a shorter-lived [`crate::SceneCtx`].
+pub(crate) type RegisterTexture<'a> = Box<dyn FnMut(glow::NativeTexture) -> egui::TextureId + 'a>;
+
 /// The glow-backend handles a scene needs for non-egui rendering — the loader, gallery's own glow
-/// context (for FBO bookkeeping), the frame (to register textures), and this scene's cached target.
-/// Present only under [`Renderer::Glow`](crate::Renderer::Glow).
+/// context (for FBO bookkeeping), a way to register a texture with egui, and this scene's cached
+/// target. Present only under [`Renderer::Glow`](crate::Renderer::Glow).
 pub(crate) struct GlDeps<'a> {
     pub loader: crate::GlLoader,
     pub gl: &'a glow::Context,
-    pub frame: &'a mut eframe::Frame,
+    pub register: RegisterTexture<'a>,
     pub target: &'a mut Option<RenderTarget>,
 }
 
 impl GlDeps<'_> {
-    /// Ensure the cached target matches `size` — creating it, or resizing it in place — then bind and
-    /// clear it, run `draw`, and restore egui's framebuffer, returning the colour texture to show. That
-    /// attachment is bottom-left origin, so the caller flips V when displaying it.
+    /// Ensure the cached target matches `size` — creating it, or resizing it in place — then bind it,
+    /// clear it, run `draw`, and put back the framebuffer that was bound, returning the colour texture
+    /// to show. That attachment is bottom-left origin, so the caller flips V when displaying it.
+    ///
+    /// Putting back what was bound, rather than framebuffer 0: a window's egui paints to 0,
+    /// but a headless capture paints into an FBO of its own, and everything the scene draws
+    /// after this call would otherwise land somewhere the capture never reads.
     #[expect(
         clippy::cast_possible_wrap,
         reason = "small, non-negative pixel dimensions"
@@ -182,15 +200,20 @@ impl GlDeps<'_> {
         size: [u32; 2],
         draw: impl FnOnce(&Offscreen),
     ) -> egui::TextureId {
-        // SAFETY (both blocks below): `self.gl` is the live glow context handed in by the shell.
+        // SAFETY (every block below): `self.gl` is the live glow context handed in by the shell.
         match self.target.as_mut() {
             Some(target) if target.size != size => unsafe { target.resize(self.gl, size) },
             Some(_) => {}
-            None => *self.target = Some(unsafe { RenderTarget::create(self.gl, self.frame, size) }),
+            None => {
+                let target = unsafe { RenderTarget::create(self.gl, &mut *self.register, size) };
+                *self.target = Some(target);
+            }
         }
         let target = self.target.as_ref().expect("just ensured present");
         let (tex_id, fbo) = (target.tex_id, target.fbo);
-        // SAFETY: bind the scene's FBO for `draw`, then restore egui's default framebuffer below.
+        // SAFETY: read the binding to put back, since it is not always framebuffer 0.
+        let previous = unsafe { self.gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING) };
+        // SAFETY: bind the scene's FBO for `draw`; the previous binding goes back below.
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             self.gl.viewport(0, 0, size[0] as i32, size[1] as i32);
@@ -203,9 +226,11 @@ impl GlDeps<'_> {
             size,
             fbo: fbo.0,
         });
-        // SAFETY: back to egui's framebuffer for the rest of the frame.
+        // SAFETY: `previous` came from GL itself a moment ago, so it names a live framebuffer or 0.
         unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            let restore =
+                std::num::NonZeroU32::new(previous.unsigned_abs()).map(glow::NativeFramebuffer);
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, restore);
         }
         tex_id
     }

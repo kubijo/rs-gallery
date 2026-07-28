@@ -23,7 +23,8 @@ carries its own `[workspace]`). The command prompts for the gallery git URL, sce
 the source of truth as the shape evolves.
 
 `just run` opens the window; `just hot` rebuilds and hot-swaps scenes as you edit them. (Both wrap `cargo run`, so plain
-`cargo run` / `cargo run -- --hot` work too.)
+`cargo run` / `cargo run -- --hot` work too.) Without a window at all, `just render` and `just capture` write scenes to
+PNGs — see [Rendering scenes to images](#rendering-scenes-to-images).
 
 > The instance package must not be named `gallery` — its scenes dylib would clash with the framework crate at link time.
 > (The binary and directory still can.) The scaffold names it `app-gallery`; that one field is a plain literal, not a
@@ -120,6 +121,55 @@ instead of a group with a lone child.
 
 Within a group, scenes sort by `(order, name)`. Pin one with `#[scene("name", order = N)]` (lower first); scenes with no
 `order` fall to the end, alphabetically. Folders stay in title order.
+
+## Rendering scenes to images
+
+A scene renders to a PNG with no window, so anyone without a screen — over SSH, in CI, an agent iterating on a layout —
+can look at a component instead of asking for a screenshot:
+
+```bash
+just render Button /tmp/button.png            # the canvas at 1280x720
+just render Button /tmp/button.png 480x320    # ...or at a size you pick
+```
+
+The scene is a whole key (`module_path::name`) or a case-insensitive regex over the keys, and must match exactly one.
+The image is the canvas alone — no sidebar, controls or header — so it stays put when unrelated chrome moves.
+
+That uses the scene's default knobs, rarely the state worth seeing. Other states go in a capture recipe;
+`just capture-init <scene>` writes one with the knobs already filled in, and `just capture` renders every shot in it:
+
+```toml
+out = "renders" # relative to this file; `just capture <file> <dir>` overrides it
+size = "640x360" # for any shot that doesn't state its own
+
+[[shot]]
+name = "night" # the shot's identity, and its filename: renders/night.png
+scene = "vehicle"
+knobs = { night = true, "sunroof open" = true, "body style" = "SUV" }
+
+[[shot]]
+name = "spinning"
+scene = "orbit"
+frames = 40 # an animated scene draws a different frame each time; pick one
+knobs = { dots = 96, accent = "#6C9CD8" }
+```
+
+A knob key is its label, or a regex over the labels — the exact label wins, so punctuation like `width (chars)` needs no
+escaping. Choices take an option label, colours a hex string. `just knobs <scene>` prints them ready to paste:
+
+```text
+buttons "body style" = "sedan"  (sedan | suv | hatch)
+slider  "speed" = 1  (0.1 ..= 2, step 0.1)
+color   "accent" = #4caf50ff
+```
+
+A pattern or label matching none or several, or a value its kind won't take, stops the run: a clean render of the wrong
+state is worse than none.
+
+Capture follows the renderer the instance configures. Under `Renderer::Glow` it paints through an OpenGL context taken
+off an EGL device — no window, no display server — so a scene drawing with `ctx.offscreen(...)` captures its real
+content. That needs an EGL driver present; without one the run stops and says so, rather than quietly producing a
+picture the window would never show.
 
 ## How it works
 

@@ -1,0 +1,38 @@
+# A capture recipe: the scene states `just capture` renders to PNGs, headlessly.
+#
+# Knobs live here rather than in command-line flags because a label can contain spaces,
+# and because a set of states is worth keeping — reviewable in a diff, re-runnable after a change.
+# `just knobs <scene>` prints the labels a scene declares.
+
+# Where the PNGs go, relative to this file. `just capture <file> <dir>` overrides it.
+out = "renders"
+# The canvas each shot renders at, unless it says otherwise.
+size = "640x360"
+
+[[shot]]
+# The name is the shot's identity and its filename — here `renders/knobs-choice.png`.
+name = "knobs-choice"
+# A whole scene key, or a case-insensitive regex; it has to match exactly one scene.
+scene = "knobs::choice"
+# Each key is a knob's label, or a regex over the labels. A choice is set by option label.
+knobs = { select = "two", radio = "three", buttons = "one" }
+
+[[shot]]
+name = "knobs-colour"
+scene = "knobs::color"
+knobs = { tint = "#E8A33D" }
+
+[[shot]]
+name = "knobs-everything"
+scene = "knobs::group"
+size = "480x240"
+# Numbers and booleans are written as themselves; `x` and `y` are two knobs, matched exactly.
+knobs = { x = 0.6, y = -0.4, tint = "#7FD4A0", bold = true }
+
+[[shot]]
+name = "orbit-mid-spin"
+scene = "orbit"
+size = "480x480"
+# An animated scene draws a different frame each time, so pick which one to catch.
+frames = 40
+knobs = { dots = 96, radius = 150, accent = "#6C9CD8" }

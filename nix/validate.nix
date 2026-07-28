@@ -1,6 +1,6 @@
 # `validate`: the full local gate — formatting, repo lint, clippy, and the tests under coverage
 # (text + HTML for humans, lcov + cobertura for CI, into target/llvm-cov).
-{ pkgs, formatter, checker }:
+{ pkgs, formatter, checker, test }:
 pkgs.writeShellApplication {
   name = "validate";
   runtimeInputs = [
@@ -11,6 +11,7 @@ pkgs.writeShellApplication {
     pkgs.ty
     formatter
     checker
+    test
   ];
   text = ''
     repofmt --fail-on-change
@@ -29,7 +30,8 @@ pkgs.writeShellApplication {
     # as "N functions have mismatched data", and the totals
     # count code that no longer exists.
     cargo llvm-cov clean --workspace
-    cargo llvm-cov --no-report nextest
+    # Through the wrapper, which carries the GL stack the capture tests render on.
+    gallery-test
     cargo llvm-cov report
     cargo llvm-cov report --html
     cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info

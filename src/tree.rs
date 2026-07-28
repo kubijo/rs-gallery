@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Manifest, SceneEntry, SceneGroupMeta};
+use crate::{Manifest, SceneEntry, SceneGroupMeta, diagnostic::Diagnostic};
 
 /// A node in the sidebar tree: child groups plus the scenes placed directly here.
 #[derive(Default)]
@@ -123,6 +123,50 @@ pub(crate) fn scene_key(scene: &SceneEntry) -> String {
     format!("{}::{}", scene.module_path, scene.name)
 }
 
+/// The one scene `pattern` names: its whole key,
+/// or failing that a case-insensitive regex searched against every key.
+///
+/// Keys are `module_path::name` and nobody wants to type those
+/// in full, so a bare `map` finds `app::map::map`.
+///
+/// Matching anything but exactly one scene is an error rather
+/// than a first-match win: every caller acts on the result unattended
+/// — profile a scene, render one to a file — where quietly picking
+/// one of several is indistinguishable from having picked the right one.
+///
+/// # Errors
+/// A message naming the candidates when several match,
+/// every key when none does, or the regex's own
+/// complaint when the pattern doesn't compile.
+pub(crate) fn resolve_scene<'a>(
+    scenes: &'a [SceneEntry],
+    pattern: &str,
+) -> Result<&'a SceneEntry, Diagnostic> {
+    if let Some(exact) = scenes.iter().find(|scene| scene_key(scene) == pattern) {
+        return Ok(exact);
+    }
+    let regex = regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+        .map_err(|e| Diagnostic::new(format!("scene pattern `{pattern}` is not a regex: {e}")))?;
+    let matched: Vec<&SceneEntry> = scenes
+        .iter()
+        .filter(|scene| regex.is_match(&scene_key(scene)))
+        .collect();
+    match matched.as_slice() {
+        [one] => Ok(one),
+        [] => Err(Diagnostic::new(format!("no scene matches `{pattern}`"))
+            .candidates(scenes.iter().map(scene_key))
+            .hint("pick one of these, or part of one")),
+        several => Err(Diagnostic::new(format!(
+            "scene pattern `{pattern}` matches {} scenes",
+            several.len()
+        ))
+        .candidates(several.iter().copied().map(scene_key))
+        .hint("narrow the pattern until it matches exactly one")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +197,46 @@ mod tests {
     #[test]
     fn scene_key_joins_module_path_and_name() {
         assert_eq!(scene_key(&scene("map", "app::map", true)), "app::map::map");
+    }
+
+    #[test]
+    fn a_scene_pattern_matches_part_of_a_key_ignoring_case() {
+        let scenes = [scene("map", "app::map", true), scene("orbit", "demo", true)];
+        let found = resolve_scene(&scenes, "MAP").expect("one match");
+        assert_eq!(scene_key(found), "app::map::map");
+    }
+
+    #[test]
+    fn a_scene_pattern_matching_none_or_several_is_an_error_that_lists_them() {
+        let scenes = [
+            scene("map", "app::map", true),
+            scene("aerial", "app::map", false),
+        ];
+        // Mapped to the name first: `SceneEntry` carries a fn pointer and so isn't `Debug`.
+        let none = resolve_scene(&scenes, "vehicle")
+            .map(|scene| scene.name)
+            .expect_err("matches nothing")
+            .plain();
+        assert!(none.contains("app::map::map"), "lists what is available");
+
+        let several = resolve_scene(&scenes, "app::map")
+            .map(|scene| scene.name)
+            .expect_err("matches both")
+            .plain();
+        assert!(several.contains("2 scenes"), "says how many: {several}");
+        assert!(several.contains("aerial"), "names the candidates");
+    }
+
+    #[test]
+    fn a_whole_key_wins_over_reading_it_as_a_regex() {
+        // Without the literal pass, `app::map::map`
+        // is also an unanchored regex matching `…::aerial`.
+        let scenes = [
+            scene("map", "app::map", true),
+            scene("aerial", "app::map::map", false),
+        ];
+        let found = resolve_scene(&scenes, "app::map::map").expect("the exact key");
+        assert_eq!(found.name, "map");
     }
 
     #[test]

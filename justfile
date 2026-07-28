@@ -27,7 +27,7 @@ demo-femtovg *args:
 profile SCENE="" REPORT="00-latest" FRAMES="600":
     @scripts/profile.sh {{ SCENE }} {{ REPORT }} {{ FRAMES }}
 
-# Reformat the whole repo (nix, markdown, shell, rust, and SVG via treefmt).
+# Reformat the whole repo.
 format *args:
     @just in-shell repofmt {{ args }}
 

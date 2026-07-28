@@ -1,0 +1,8 @@
+# TOML formatting, for the `.toml` files and for the toml fences in Markdown — `nix/formatter.nix`
+# points both at this taplo, so a fence and a file are formatted the same way.
+
+[formatting]
+# A trailing comment stays one space after its value. Aligning them into a column pushes a short entry
+# out past 120 characters whenever a long one shares the block, which is how the README's example
+# recipe ended up unreadable.
+align_comments = false

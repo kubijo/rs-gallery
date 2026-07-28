@@ -106,16 +106,26 @@ layers, three of them automatic:
 - [ ] Backend: puffin (egui-native scopes + `puffin_egui` in-app flamegraph, feature-gated) for the live/semantic view;
   samply for the external CPU + A/B view. The same spans feed the Tier-3 perf window.
 
-### Tier 1 — scene snapshots (parked)
+### Tier 1 — scene snapshots (half landed)
 
-Static snapshots are thin without interaction replay (which gallery lacks — bmc's testbed has it). Worth revisiting once
-a record-replay layer exists; far more valuable then.
+Rendering a scene headlessly landed as `--render` / `--capture`; comparing one against a stored golden did not, and is
+what the rest of this tier is about.
 
-- [ ] Snapshot-backend-agnostic API (`snapshot!`) that can target **pixels** (egui_kittest wgpu image + an odiff-style
+- [x] **Why this stopped being "thin".** A static snapshot of default knobs shows a state nobody chose. Capture recipes
+  answer that without a record-replay layer: a shot names its knobs by label, so the state is *declared* rather than
+  replayed. What recipes still can't express is a state only reachable by clicking, dragging or typing.
+- [x] Renders the canvas alone, through the `render_canvas` the shell itself draws with, so a capture is the component's
+  own pixels — on either backend. The glow one is gallery's own `TestRenderer` over an EGL-device context, since
+  egui_kittest ships only a wgpu one.
+- [ ] Snapshot-backend-agnostic API (`snapshot!`) that can target **pixels** (the `--render` path plus an odiff-style
   diff) *or* **structure** (serialize the scene's AccessKit tree / `Shape` list — jest-style, text-diffable in a PR, no
   GPU/AA flakiness). Pick per use; don't hard-code one.
-- [ ] Design a record-replay layer for knob/pointer interactions first (informed by bmc's `record` / `--perf-frames` and
-  jest snapshot ergonomics); without it these stay static default-knob renders.
+- [ ] Nothing in `just validate` renders today — a pixel test needs a GPU and the GitHub runner has none, so only the
+  parsing and knob-matching around it is covered. Software drivers would give CI an adapter either way (lavapipe via
+  `VK_ICD_FILENAMES` for wgpu, `EGL_MESA_device_software` for glow), but the runners ship no mesa at all, and software
+  antialiasing won't match a real GPU's — so assert coarse properties rather than exact pixels.
+- [ ] Design a record-replay layer for pointer interactions (informed by bmc's `record` and jest snapshot ergonomics).
+  Knob state no longer needs it; hover, drag and focus still do.
 - [ ] Storage location: default to **co-located with the file of origin**, derived by the `snapshot!` macro itself from
   `file!()` + `module_path!()` + its label, so a path is never written by hand. Overriding the *root* is then the only
   config needed, and it should be strongly-typed Rust in the snapshot harness — the harness is a test binary, so its

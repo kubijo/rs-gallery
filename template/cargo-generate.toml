@@ -3,6 +3,12 @@
 [template]
 description = "A gallery component-catalog instance"
 
+# Copied verbatim, not templated: just's `{{ VAR }}` interpolation
+# is cargo-generate's syntax too, and an unknown name there expands
+# to nothing — so templating this would silently empty every recipe
+# argument. It carries no placeholders of its own.
+exclude = ["justfile"]
+
 [placeholders]
 gallery_git = { type = "string", prompt = "gallery framework git URL", default = "https://example.com/gallery.git" }
 scene_globs = { type = "string", prompt = "Scene glob, relative to gallery.toml", default = "*.scene.rs" }

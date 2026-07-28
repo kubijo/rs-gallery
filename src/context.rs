@@ -258,11 +258,11 @@ impl<'a> SceneCtx<'a> {
     /// `glow::Texture`, so it stays glow-version-agnostic. Glow renderer only — panics under wgpu. The
     /// escape hatch behind [`offscreen`](Self::offscreen).
     pub fn register_native_texture(&mut self, gl_name: std::num::NonZeroU32) -> egui::TextureId {
-        self.gl
+        let deps = self
+            .gl
             .as_mut()
-            .expect("register_native_texture requires the glow renderer")
-            .frame
-            .register_native_glow_texture(glow::NativeTexture(gl_name))
+            .expect("register_native_texture requires the glow renderer");
+        (deps.register)(glow::NativeTexture(gl_name))
     }
 
     /// Render non-egui content into an offscreen texture of `size` pixels and show it inline. gallery

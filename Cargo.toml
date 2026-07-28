@@ -12,7 +12,7 @@ keywords = ["egui", "components", "gui", "catalog", "preview"]
 categories = ["gui", "development-tools"]
 
 [dependencies]
-camino = "1"
+camino = { version = "1", features = ["serde1"] }
 egui = "0.35"
 eframe = {
    version = "0.35",
@@ -33,9 +33,16 @@ convert_case = "0.11.0"
 egui_extras = { version = "0.35.0", default-features = false }
 semver = "1"
 ureq = "2"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+anstream = "1"
+anstyle = "1"
+egui_kittest = { version = "0.35", features = ["wgpu", "eframe"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+glutin = { version = "0.32", default-features = false, features = ["egl"] }
 
 [dev-dependencies]
-egui_kittest = "0.35"
+indoc = "2"
 
 # Test-only, never linked: puts glow 0.16 in Cargo.lock so the
 # `femtovg_demo_pins_a_glow_version_distinct_from_eframe` test can assert it stays distinct from eframe's
