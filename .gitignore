@@ -22,6 +22,11 @@ __pycache__/
 .idea
 .direnv
 
+# What a failing snapshot test leaves beside the reference it disagreed with
+tests/snapshots/*.diff.png
+tests/snapshots/*.new.png
+tests/snapshots/*.old.png
+
 # Misc Artifacts
 .direnv
 .DS_Store

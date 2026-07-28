@@ -67,12 +67,22 @@ impl GlowCapture {
             })?
             .collect();
 
+        // Which GL to insist on, when reproducibility matters more than speed.
+        // Two machines only agree on a rendered image if they rasterise it
+        // the same way, so the snapshot tests pin a software renderer
+        // through this and nix pins the mesa that provides it.
+        let wanted = std::env::var("GALLERY_CAPTURE_RENDERER").ok();
         let mut tried = Vec::new();
         for device in &devices {
             let name = device.name().unwrap_or("<unnamed device>").to_owned();
             match Self::on_device(device) {
-                Ok(capture) => return Ok(capture),
                 Err(reason) => tried.push(format!("{name} — {reason}")),
+                Ok(capture) => match &wanted {
+                    Some(wanted) if !capture.renders_with(wanted) => {
+                        tried.push(format!("{name} — renders with {}", capture.renderer()));
+                    }
+                    _ => return Ok(capture),
+                },
             }
         }
         Err(
@@ -85,6 +95,18 @@ impl GlowCapture {
     /// The painter this capture draws through, for the app to register textures with.
     pub(crate) fn painter(&self) -> Rc<RefCell<egui_glow::Painter>> {
         self.painter.clone()
+    }
+
+    /// What GL says it draws with, e.g. `llvmpipe (LLVM 21.1.8, 256 bits)`.
+    fn renderer(&self) -> String {
+        // SAFETY: the context is current on this thread.
+        unsafe { self.gl.get_parameter_string(glow::RENDERER) }
+    }
+
+    fn renders_with(&self, wanted: &str) -> bool {
+        self.renderer()
+            .to_lowercase()
+            .contains(&wanted.to_lowercase())
     }
 
     fn on_device(device: &Device) -> Result<Self, String> {

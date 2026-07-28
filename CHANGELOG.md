@@ -45,6 +45,11 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   the hint wgpu would leave in its place. egui_kittest ships no glow renderer, so this is one of gallery's own; the
   texture a scene registers goes through `egui_glow`'s painter, since the `Frame` a test harness builds carries no glow
   hook and nothing outside eframe can give it one.
+- **Reference images** — captures are diffed against committed PNGs, so a change to stage sizing, the bundled fallback
+  faces, a knob override or the offscreen GL path fails a test instead of going unnoticed. They come from an ordinary
+  capture recipe (`tests/reference.toml`), which makes the fixture exercise what a caller writes rather than the structs
+  it parses into. `UPDATE_SNAPSHOTS=1` takes an intended change and keeps the old image beside it. Comparable between
+  machines only because the tests pin llvmpipe from the pinned mesa — a GPU antialiases the same scene its own way.
 - **Command line** — parsed by clap, so `--help` lists the arguments and a bad one is an error, not a panic. Failures
   that come down to a choice name the candidates in a framed list, styled through `anstream` so a pipe or `NO_COLOR`
   gets the same text plain.

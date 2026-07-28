@@ -1002,53 +1002,122 @@ mod tests {
                 use eframe::glow::HasContext as _;
                 gl.clear_color(1.0, 0.0, 1.0, 1.0);
                 gl.clear(glow::COLOR_BUFFER_BIT);
+                // A second colour in one corner, so the reference has structure to disagree about
+                // rather than one flat field that any wrong draw would still fill.
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(0, 0, 16, 16);
+                gl.clear_color(0.0, 1.0, 1.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                gl.disable(glow::SCISSOR_TEST);
             }
         });
     }
 
-    /// The whole glow path in one go: a scene draws with a GL library of its own,
-    /// and the pixels come back out of the PNG. Everything else here asserts
-    /// structure, so this is the one test that would notice the capture rendering
-    /// the wrong thing while still being the right size.
-    #[cfg(not(target_vendor = "apple"))]
-    #[test]
-    fn a_glow_capture_holds_what_a_scene_drew_offscreen() {
-        let scene = SceneEntry {
-            render: draws_offscreen,
-            name: "offscreen",
-            module_path: "t",
+    /// A scene of the kind the shell is for: prose, and a fixed-size stage on the checkerboard.
+    fn a_documented_stage(ctx: &mut crate::SceneCtx<'_>) {
+        ctx.ui.heading("Snapshot");
+        ctx.ui.label("prose above the stage");
+        crate::stage!(ctx, (96, 40), |ui: &mut egui::Ui| {
+            ui.label("in the stage");
+        });
+    }
+
+    /// Each way a stage can be sized, so one reference covers the conversions rather than one of them.
+    fn every_stage_form(ctx: &mut crate::SceneCtx<'_>) {
+        ctx.ui.label("fitted");
+        crate::stage!(ctx, |ui: &mut egui::Ui| {
+            ui.label("hugs its content");
+        });
+        ctx.ui.label("pinned");
+        crate::stage!(ctx, (150, 36), |ui: &mut egui::Ui| {
+            ui.label("150×36");
+        });
+        ctx.ui.label("square");
+        crate::stage!(ctx, 64, |ui: &mut egui::Ui| {
+            ui.label("64");
+        });
+    }
+
+    /// Glyphs the default faces lack. Without the bundled Noto fallbacks these come out as tofu, which
+    /// no structural assertion would notice and a reader of the reference cannot miss.
+    fn glyphs_past_the_default_faces(ctx: &mut crate::SceneCtx<'_>) {
+        ctx.ui.heading("→ ∑ ≈ ± °");
+        ctx.ui.label("arrows ← ↑ ↓ →");
+        ctx.ui.label("math ∀ ∈ ∞ √");
+        ctx.ui.label("symbols ✓ ✗ ★ ♦");
+    }
+
+    /// Everything drawn here comes from a knob, so its reference is a picture of the override path.
+    fn dressed_by_knobs(ctx: &mut crate::SceneCtx<'_>) {
+        let caption = ctx.text("caption", "the default");
+        let tint = ctx.color("tint", egui::Color32::WHITE);
+        let width = ctx.slider("width", 70.0, 20.0, 260.0, 1.0);
+        crate::stage!(ctx, (width, 48.0), |ui: &mut egui::Ui| {
+            ui.label(egui::RichText::new(caption).color(tint).size(20.0));
+        });
+    }
+
+    /// The scenes the reference recipe names, standing in for a consumer's `*.scene.rs`.
+    fn reference_scenes() -> Manifest {
+        let scene = |render, name| SceneEntry {
+            render,
+            name,
+            module_path: "reference",
             default: true,
             order: 0,
             source: "",
         };
+        Manifest {
+            scenes: vec![
+                scene(a_documented_stage, "documented-stage"),
+                scene(every_stage_form, "stage-forms"),
+                scene(glyphs_past_the_default_faces, "glyph-fallbacks"),
+                scene(dressed_by_knobs, "knobs-applied"),
+                scene(draws_offscreen, "offscreen-gl"),
+            ],
+            groups: Vec::new(),
+        }
+    }
+
+    /// Every reference image, rendered the way a caller renders: one recipe, one run.
+    ///
+    /// Through [`read_recipe`] rather than hand-built [`Shot`]s, so the fixture covers what someone
+    /// actually writes — the TOML, its defaults, the knob values as spelled there — and the recipe sits
+    /// beside the images for review. Hand-built shots would only test these structs.
+    ///
+    /// This is the one test that asserts what a capture *looks like*; the rest check that some value
+    /// arrived somewhere. Comparable between machines because the tests pin a software rasteriser
+    /// (`nix/test.nix`). `UPDATE_SNAPSHOTS=1` rewrites a reference once the change is meant, keeping
+    /// the old one beside it.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn the_reference_images_match_what_the_recipe_renders() {
         let out = Utf8PathBuf::from_path_buf(std::env::temp_dir())
             .expect("a UTF-8 temp dir")
-            .join("gallery-offscreen/capture.png");
-        let shot = Shot {
-            scene: "offscreen".to_owned(),
-            out: Some(out.clone()),
-            size: egui::vec2(120.0, 120.0),
-            knobs: Vec::new(),
-            frames: None,
-            list: false,
-            template: false,
-        };
-        let manifest = Manifest {
-            scenes: vec![scene],
-            groups: Vec::new(),
-        };
-        render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &[shot])
-            .expect("a glow capture of a scene that draws offscreen");
+            .join("gallery-reference");
+        let recipe = Utf8Path::new("tests/reference.toml");
+        let shots = read_recipe(recipe, Some(&out)).expect("the reference recipe");
+        render(
+            &reference_scenes(),
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &shots,
+        )
+        .expect("every reference shot renders");
 
-        let png = std::fs::read(&out).expect("the capture was written");
-        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
-            .expect("a PNG")
-            .to_rgba8();
-        // The magenta the scene cleared its framebuffer to, somewhere in the canvas.
-        let drawn = image
-            .pixels()
-            .any(|p| p.0[0] > 200 && p.0[1] < 60 && p.0[2] > 200);
-        assert!(drawn, "what the scene drew offscreen reached the capture");
+        // Collected rather than asserted one at a time: a layout change usually moves several images,
+        // and seeing all of them beats fixing them one run apiece.
+        let mut results = egui_kittest::SnapshotResults::new();
+        for shot in &shots {
+            let path = shot.out.as_ref().expect("a recipe shot writes a file");
+            let name = path.file_stem().expect("a PNG filename");
+            let png = std::fs::read(path).expect("the capture was written");
+            let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .expect("a PNG")
+                .to_rgba8();
+            results.add(egui_kittest::try_image_snapshot(&image, name));
+        }
+        results.unwrap();
     }
 
     #[test]

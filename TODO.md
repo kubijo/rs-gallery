@@ -117,9 +117,16 @@ what the rest of this tier is about.
 - [x] Renders the canvas alone, through the `render_canvas` the shell itself draws with, so a capture is the component's
   own pixels — on either backend. The glow one is gallery's own `TestRenderer` over an EGL-device context, since
   egui_kittest ships only a wgpu one.
-- [ ] Snapshot-backend-agnostic API (`snapshot!`) that can target **pixels** (the `--render` path plus an odiff-style
-  diff) *or* **structure** (serialize the scene's AccessKit tree / `Shape` list — jest-style, text-diffable in a PR, no
-  GPU/AA flakiness). Pick per use; don't hard-code one.
+- [x] **Pixels, against a committed reference.** `egui_kittest`'s snapshot support (dify) compares a capture with
+  `tests/snapshots/*.png`; `UPDATE_SNAPSHOTS=1` rewrites one after an intended change and keeps the old beside it. It
+  only means anything because the tests pin llvmpipe from the pinned mesa (`nix/test.nix`) — on a GPU the same scene
+  antialiases differently and every developer would disagree with the reference.
+- [ ] It scales to a handful of images, not hundreds. Past that, the shape that works is a persistent differ fed image
+  pairs over a pipe (`odiff --server`) rather than a process per image, and an HTML report putting before/after/diff
+  side by side — reviewing a wall of failures in a browser beats opening `*.diff.png` by hand. Worth porting when the
+  reference count justifies it, not before.
+- [ ] Structural snapshots as the other target: serialize the scene's AccessKit tree / `Shape` list — jest-style,
+  text-diffable in a PR, no GPU or antialiasing to pin at all. A `snapshot!` API would pick per use.
 - [ ] Nothing in `just validate` renders today — a pixel test needs a GPU and the GitHub runner has none, so only the
   parsing and knob-matching around it is covered. Software drivers would give CI an adapter either way (lavapipe via
   `VK_ICD_FILENAMES` for wgpu, `EGL_MESA_device_software` for glow), but the runners ship no mesa at all, and software

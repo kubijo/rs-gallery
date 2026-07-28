@@ -1,0 +1,39 @@
+# The recipe behind the reference images in `tests/snapshots/`,
+# run by the capture test in `src/render.rs`.
+#
+# `--out` is supplied by the test, which is why there is no `out` here:
+# the PNGs are scratch, and only the references they are compared against
+# are committed. Sizes are roomy on purpose, because the canvas scrolls
+# and an image cut off at the edge would hide the layout change it exists to catch.
+#
+# Adding a shot: name it after the scene, render once with `UPDATE_SNAPSHOTS=1`,
+# and look at the PNG before committing it — a reference nobody read is
+# a reference that locks in whatever was there.
+
+[[shot]]
+name = "documented-stage"
+scene = "documented-stage"
+size = "360x220"
+
+[[shot]]
+name = "stage-forms"
+scene = "stage-forms"
+size = "320x400"
+
+[[shot]]
+name = "glyph-fallbacks"
+scene = "glyph-fallbacks"
+size = "300x160"
+
+# Values that differ from every default the scene declares, so the image is evidence the overrides
+# arrived rather than evidence the defaults did.
+[[shot]]
+name = "knobs-applied"
+scene = "knobs-applied"
+size = "320x140"
+knobs = { caption = "overridden", tint = "#e8a33d", width = 230 }
+
+[[shot]]
+name = "offscreen-gl"
+scene = "offscreen-gl"
+size = "160x160"

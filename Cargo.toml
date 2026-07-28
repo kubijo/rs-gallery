@@ -37,7 +37,7 @@ clap = { version = "4", features = ["derive"] }
 regex = "1"
 anstream = "1"
 anstyle = "1"
-egui_kittest = { version = "0.35", features = ["wgpu", "eframe"] }
+egui_kittest = { version = "0.35", features = ["wgpu", "eframe", "snapshot"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 glutin = { version = "0.32", default-features = false, features = ["egl"] }
 
