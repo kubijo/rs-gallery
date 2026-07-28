@@ -121,6 +121,10 @@ past a handful of images, and a structural target beside the pixel one.
   `tests/snapshots/*.png`; `UPDATE_SNAPSHOTS=1` rewrites one after an intended change and keeps the old beside it. It
   only means anything because the tests pin llvmpipe from the pinned mesa (`nix/test.nix`) — on a GPU the same scene
   antialiases differently and every developer would disagree with the reference.
+- [ ] Only this crate's own tests compare images; a consumer capturing their components wants the same thing. It needs a
+  way to say so — `--capture --verify`, against references beside the recipe — and once it exists the differ moves from
+  a dev-dependency to an optional feature, so only those who ask for it link it (and inherit its MPL-2.0 corner; see
+  `deny.toml`).
 - [ ] It scales to a handful of images, not hundreds. Past that, the shape that works is a persistent differ fed image
   pairs over a pipe (`odiff --server`) rather than a process per image, and an HTML report putting before/after/diff
   side by side — reviewing a wall of failures in a browser beats opening `*.diff.png` by hand. Worth porting when the

@@ -1,14 +1,8 @@
-# The recipe behind the reference images in `tests/snapshots/`,
-# run by the capture test in `src/render.rs`.
+# The recipe behind `tests/snapshots/`, run by the capture test in `src/render.rs`. No `out`: the test
+# supplies one, since these PNGs are scratch and only the references are committed.
 #
-# `--out` is supplied by the test, which is why there is no `out` here:
-# the PNGs are scratch, and only the references they are compared against
-# are committed. Sizes are roomy on purpose, because the canvas scrolls
-# and an image cut off at the edge would hide the layout change it exists to catch.
-#
-# Adding a shot: name it after the scene, render once with `UPDATE_SNAPSHOTS=1`,
-# and look at the PNG before committing it — a reference nobody read is
-# a reference that locks in whatever was there.
+# Sizes are roomy because the canvas scrolls, and an image cut off at the edge hides the layout change
+# it exists to catch. Look at a new one before committing it.
 
 [[shot]]
 name = "documented-stage"

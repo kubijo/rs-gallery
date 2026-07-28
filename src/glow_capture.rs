@@ -1,16 +1,8 @@
-//! Headless capture on the glow backend: an OpenGL context off an EGL device,
-//! with no window and no display server, and an [`egui_kittest::TestRenderer`]
-//! that paints into it.
+//! Headless capture on the glow backend, following glutin's `egl_device` example: a GL context off an
+//! EGL device, with no window and no display server.
 //!
-//! egui_kittest ships a wgpu renderer only, so a `Renderer::Glow` instance
-//! would otherwise capture through wgpu — where `SceneCtx::offscreen`
-//! has no GL to draw with and shows its hint instead of the component.
-//! This module is what makes a capture show what the window would.
-//!
-//! The recipe is glutin's own `egl_device` example: enumerate devices,
-//! build a display from one, take a config, make a context current
-//! with no surface at all, then render into a framebuffer object
-//! and read it back.
+//! egui_kittest ships a wgpu renderer only, so without this a `Renderer::Glow` scene would capture
+//! `SceneCtx::offscreen`'s hint instead of the component.
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -67,22 +59,15 @@ impl GlowCapture {
             })?
             .collect();
 
-        // Which GL to insist on, when reproducibility matters more than speed.
-        // Two machines only agree on a rendered image if they rasterise it
-        // the same way, so the snapshot tests pin a software renderer
-        // through this and nix pins the mesa that provides it.
+        // Two machines only agree on a rendered image if they rasterise it the same way, so the
+        // reference tests pin a software renderer through this (`nix/test.nix`).
         let wanted = std::env::var("GALLERY_CAPTURE_RENDERER").ok();
         let mut tried = Vec::new();
         for device in &devices {
             let name = device.name().unwrap_or("<unnamed device>").to_owned();
-            match Self::on_device(device) {
+            match Self::on_device(device, wanted.as_deref()) {
+                Ok(capture) => return Ok(capture),
                 Err(reason) => tried.push(format!("{name} — {reason}")),
-                Ok(capture) => match &wanted {
-                    Some(wanted) if !capture.renders_with(wanted) => {
-                        tried.push(format!("{name} — renders with {}", capture.renderer()));
-                    }
-                    _ => return Ok(capture),
-                },
             }
         }
         Err(
@@ -97,19 +82,7 @@ impl GlowCapture {
         self.painter.clone()
     }
 
-    /// What GL says it draws with, e.g. `llvmpipe (LLVM 21.1.8, 256 bits)`.
-    fn renderer(&self) -> String {
-        // SAFETY: the context is current on this thread.
-        unsafe { self.gl.get_parameter_string(glow::RENDERER) }
-    }
-
-    fn renders_with(&self, wanted: &str) -> bool {
-        self.renderer()
-            .to_lowercase()
-            .contains(&wanted.to_lowercase())
-    }
-
-    fn on_device(device: &Device) -> Result<Self, String> {
+    fn on_device(device: &Device, wanted: Option<&str>) -> Result<Self, String> {
         let display = Self::open(device)?;
         let config = Self::config(&display, ConfigSurfaceTypes::empty())?;
         let context = Self::context(&display, &config)?;
@@ -132,6 +105,14 @@ impl GlowCapture {
         // SAFETY: the context is current on this thread, and `loader` resolves against its display.
         let gl =
             Arc::new(unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) });
+        // Before the painter, which compiles shaders a rejected device would only throw away.
+        if let Some(wanted) = wanted {
+            // SAFETY: the context is current on this thread.
+            let renderer = unsafe { gl.get_parameter_string(glow::RENDERER) };
+            if !renderer.to_lowercase().contains(&wanted.to_lowercase()) {
+                return Err(format!("renders with {renderer}"));
+            }
+        }
         let painter = egui_glow::Painter::new(gl.clone(), "", None, false)
             .map_err(|e| format!("painter: {e}"))?;
 
@@ -156,10 +137,8 @@ impl GlowCapture {
 
     /// A config for offscreen work, admitting the given surface types.
     ///
-    /// `empty()` asks for no surface type at all, which matches everything.
-    /// The builder's default is `WINDOW`, which a device display has no configs
-    /// for — and EGL reports "matched nothing" as success, so that mistake reads
-    /// as a bare absence rather than an error.
+    /// The builder defaults to `WINDOW`, which a device display has no configs for — and EGL reports
+    /// "matched nothing" as success, so that mistake reads as a bare absence rather than an error.
     fn config(
         display: &Display,
         surfaces: ConfigSurfaceTypes,
@@ -193,12 +172,9 @@ impl GlowCapture {
             .map_err(|e| format!("context: {e}"))
     }
 
-    /// A 1×1 pbuffer to hang the context on, for drivers that won't go surfaceless.
-    /// Nothing is drawn into it — every pixel goes to the capture framebuffer
-    /// — so its size never matters.
-    ///
-    /// It takes a config of its own: the one chosen for surfaceless work was matched
-    /// against no surface type, and need not be among those that can back a pbuffer.
+    /// A 1×1 pbuffer to hang the context on, for drivers that won't go surfaceless. Nothing is drawn
+    /// into it, so its size never matters — but it needs a config of its own, the surfaceless one
+    /// having been matched against no surface type at all.
     fn with_pbuffer(
         display: &Display,
     ) -> Result<

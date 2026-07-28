@@ -1,18 +1,11 @@
-//! Headless scene → PNG, for a caller with no screen: an agent or CI renders
-//! a scene in a chosen state, looks at the image, and iterates on the layout.
+//! Headless scene → PNG, for a caller with no screen. Only the canvas is captured, through the same
+//! [`render_canvas`] the shell draws with, so a picture holds still as the chrome around it changes.
 //!
-//! Only the canvas is captured — [`render_canvas`] draws it as the whole
-//! viewport, so the picture is what the component itself gets and holds
-//! still when the shell's chrome around it changes.
+//! `--render` takes a scene at its defaults; setting knobs takes a [`Recipe`], which keeps labels
+//! containing spaces out of argv and makes a set of states reviewable and re-runnable.
 //!
-//! A scene at its default knobs is one flag away (`--render`).
-//! Setting knobs takes a [`Recipe`]: a TOML file of shots, which keeps
-//! labels containing spaces out of argv and makes a set of states one reviewable,
-//! re-runnable artefact rather than a command line nobody can reconstruct.
-//!
-//! Knobs are declarative-by-use: one does not exist until the scene's first frame
-//! asks for it, so an override cannot be seeded up front.
-//! Hence the frame protocol in [`shoot`] — declare, apply, redraw, capture.
+//! Knobs are declarative-by-use, so an override cannot be seeded up front — hence the frame protocol
+//! in [`shoot`]: declare, apply, redraw, capture.
 
 use std::{collections::BTreeMap, fmt::Write as _};
 
@@ -1002,8 +995,7 @@ mod tests {
                 use eframe::glow::HasContext as _;
                 gl.clear_color(1.0, 0.0, 1.0, 1.0);
                 gl.clear(glow::COLOR_BUFFER_BIT);
-                // A second colour in one corner, so the reference has structure to disagree about
-                // rather than one flat field that any wrong draw would still fill.
+                // A second colour in one corner: a flat field would look right however it went wrong.
                 gl.enable(glow::SCISSOR_TEST);
                 gl.scissor(0, 0, 16, 16);
                 gl.clear_color(0.0, 1.0, 1.0, 1.0);
@@ -1038,8 +1030,8 @@ mod tests {
         });
     }
 
-    /// Glyphs the default faces lack. Without the bundled Noto fallbacks these come out as tofu, which
-    /// no structural assertion would notice and a reader of the reference cannot miss.
+    /// Glyphs the default faces lack: without the bundled Noto fallbacks these are tofu, which no
+    /// structural assertion would notice and no reader of the reference could miss.
     fn glyphs_past_the_default_faces(ctx: &mut crate::SceneCtx<'_>) {
         ctx.ui.heading("→ ∑ ≈ ± °");
         ctx.ui.label("arrows ← ↑ ↓ →");
@@ -1079,16 +1071,11 @@ mod tests {
         }
     }
 
-    /// Every reference image, rendered the way a caller renders: one recipe, one run.
+    /// The one test that asserts what a capture *looks like*; the rest check that a value arrived.
     ///
-    /// Through [`read_recipe`] rather than hand-built [`Shot`]s, so the fixture covers what someone
-    /// actually writes — the TOML, its defaults, the knob values as spelled there — and the recipe sits
-    /// beside the images for review. Hand-built shots would only test these structs.
-    ///
-    /// This is the one test that asserts what a capture *looks like*; the rest check that some value
-    /// arrived somewhere. Comparable between machines because the tests pin a software rasteriser
-    /// (`nix/test.nix`). `UPDATE_SNAPSHOTS=1` rewrites a reference once the change is meant, keeping
-    /// the old one beside it.
+    /// Through [`read_recipe`] rather than hand-built [`Shot`]s, so it covers what someone writes.
+    /// Comparable between machines only because the tests pin a software rasteriser (`nix/test.nix`).
+    /// `UPDATE_SNAPSHOTS=1` takes an intended change.
     #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn the_reference_images_match_what_the_recipe_renders() {
@@ -1105,8 +1092,8 @@ mod tests {
         )
         .expect("every reference shot renders");
 
-        // Collected rather than asserted one at a time: a layout change usually moves several images,
-        // and seeing all of them beats fixing them one run apiece.
+        // Collected, not asserted one at a time: a layout change moves several images, and seeing all
+        // of them beats fixing them one run apiece.
         let mut results = egui_kittest::SnapshotResults::new();
         for shot in &shots {
             let path = shot.out.as_ref().expect("a recipe shot writes a file");

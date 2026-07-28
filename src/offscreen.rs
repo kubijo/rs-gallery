@@ -165,12 +165,11 @@ impl Offscreen {
 
 /// Hands a GL texture to egui and gets back an id to draw it by.
 ///
-/// A closure rather than the `eframe::Frame` that backs it in a window, because the headless capture
-/// has no usable one: `Frame::_new_kittest` leaves the hook `None`, and the field is `pub(crate)`.
-/// There, `egui_glow::Painter::register_native_texture` — the same call eframe wraps — stands in.
+/// A closure rather than the `eframe::Frame` a window uses: `Frame::_new_kittest` leaves the hook
+/// `None` and the field is `pub(crate)`, so a capture registers through `egui_glow`'s painter instead.
 ///
-/// Owned rather than borrowed, because `&'a mut (dyn FnMut + 'a)` puts `'a` in an invariant position.
-/// [`GlDeps`] has to stay covariant for a caller to hand it to a shorter-lived [`crate::SceneCtx`].
+/// Owned rather than borrowed, because `&'a mut (dyn FnMut + 'a)` puts `'a` in an invariant position
+/// and [`GlDeps`] must stay covariant to reach a shorter-lived [`crate::SceneCtx`].
 pub(crate) type RegisterTexture<'a> = Box<dyn FnMut(glow::NativeTexture) -> egui::TextureId + 'a>;
 
 /// The glow-backend handles a scene needs for non-egui rendering — the loader, gallery's own glow

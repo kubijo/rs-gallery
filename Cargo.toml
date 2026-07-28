@@ -37,12 +37,15 @@ clap = { version = "4", features = ["derive"] }
 regex = "1"
 anstream = "1"
 anstyle = "1"
-egui_kittest = { version = "0.35", features = ["wgpu", "eframe", "snapshot"] }
+egui_kittest = { version = "0.35", features = ["wgpu", "eframe"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 glutin = { version = "0.32", default-features = false, features = ["egl"] }
 
 [dev-dependencies]
 indoc = "2"
+# `snapshot` here, not above: its differ would otherwise land in every consumer's binary for something
+# only these tests do. Move it up behind an optional feature once consumers can verify (TODO, Tier 1).
+egui_kittest = { version = "0.35", features = ["snapshot"] }
 
 # Test-only, never linked: puts glow 0.16 in Cargo.lock so the
 # `femtovg_demo_pins_a_glow_version_distinct_from_eframe` test can assert it stays distinct from eframe's

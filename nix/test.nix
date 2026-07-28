@@ -1,12 +1,8 @@
-# `gallery-test`: the test run, with a GL stack attached.
+# `gallery-test`: the test run, with a GL stack attached. A CI runner has neither a GPU nor a system
+# EGL; mesa supplies a software device through `EGL_MESA_device_software`, needing no display server.
 #
-# The glow capture tests need an EGL device, and a CI runner has neither a GPU nor a system EGL. Mesa
-# supplies both — a software device through `EGL_MESA_device_software`, which is what makes a headless
-# OpenGL context possible with no display server at all.
-#
-# The environment rides on this wrapper rather than the dev shell on purpose: `__EGL_VENDOR_LIBRARY_-
-# FILENAMES` *replaces* the driver list, so setting it shell-wide would take the machine's own GPU away
-# from `just run`. Here it reaches the tests and nothing else.
+# On this wrapper rather than the dev shell because `__EGL_VENDOR_LIBRARY_FILENAMES` *replaces* the
+# driver list — shell-wide it would take the machine's own GPU away from `just run`.
 { pkgs }:
 pkgs.writeShellApplication {
   name = "gallery-test";

@@ -37,6 +37,10 @@ allow = [
   # Our own crates.
   "Unlicense",
 ]
+# MPL-2.0 is copyleft per *file*, so an unmodified crate carries nothing outward — per crate, though,
+# not blanket. `colored` arrives under the reference tests' image differ. Should comparison ever ship
+# to consumers it lands in their binaries too, which is worth re-examining rather than inheriting.
+exceptions = [{ allow = ["MPL-2.0"], crate = "colored" }]
 private = { ignore = true }
 
 [bans]

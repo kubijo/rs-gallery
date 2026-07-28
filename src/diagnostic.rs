@@ -1,12 +1,9 @@
-//! A failure the caller has to act on, and how it reaches them.
+//! A failure the caller has to act on.
 //!
-//! A headless run fails on things a person then has to fix, and the fix is usually one of a handful
-//! of names the program already knows. So a [`Diagnostic`] carries those names as a list rather than
-//! flattening them into a sentence, and prints them framed under the headline they belong to.
-//!
-//! Styling goes through `anstream`, which drops it for a pipe, for `NO_COLOR`, or for a terminal that
-//! cannot take escapes. The frame is not styling and always survives — it is what keeps a twenty-scene
-//! listing legible in a CI log.
+//! The fix is usually one of a handful of names the program already knows, so a [`Diagnostic`] keeps
+//! them as a list rather than flattening them into a sentence. Styling goes through `anstream` and so
+//! disappears for a pipe or `NO_COLOR`; the frame is not styling and stays, which is what keeps a
+//! twenty-scene listing legible in a CI log.
 
 use std::fmt::Write as _;
 
