@@ -40,9 +40,9 @@ actual `cargo publish`. Research: crates.io Trusted Publishing (RFC 3691), Cargo
 
 ## Perf: honest measurement, profiling, scene snapshots
 
-Prior art is `bmc-wasm-runtime`'s `just profile` (→ `tools/perf_record.py`): samply CPU sampling plus internal
-per-frame/per-section timing, an A/B `perf_compare.py` ledger, and a `capture`/`verify` visual-regression suite. Most of
-it ports; the fuel/instruction-count layer is wasmi-specific and doesn't (its native analogue is wall-clock spans).
+The shape to aim for, borrowed from a wasm runtime's own harness: samply CPU sampling plus per-frame and per-section
+timing, an A/B comparison ledger, and a capture/verify visual-regression suite. Most of that translates; a
+fuel/instruction-count layer does not, being particular to a wasm interpreter — the native analogue is wall-clock spans.
 Ordered by value: honest meter → profiler → snapshots.
 
 Motivation — the current perf footer is not trustworthy (`src/lib.rs`), and fixing it is the prerequisite for everything
@@ -88,12 +88,12 @@ reactive; idle → it holds the last real frame's numbers.
 
 ### Tier 2 — per-scene profiling with automatic gallery-vs-their-code attribution
 
-`just profile <scene>`: a fixed-frame headless pump of one scene at default knobs (bmc's `--perf-frames`), under samply,
-with an A/B ledger. The framework-vs-component attribution the profile must make obvious comes from stacking four
-layers, three of them automatic:
+`just profile <scene>`: a fixed-frame headless pump of one scene at default knobs, under samply, with an A/B ledger. The
+framework-vs-component attribution the profile must make obvious comes from stacking four layers, three of them
+automatic:
 
 - [ ] **Crate attribution (free):** samply symbolication → per-crate breakdown (`gallery` / component crate / egui /
-  epaint / wgpu). Port bmc's `perf_analyze.py` + `perf_compare.py` (they only need samply's Firefox-Profiler format) and
+  epaint / wgpu). An analyse + compare pair needs only samply's Firefox-Profiler format, so both port cleanly, as does
   the colour-Δ comparison table.
 - [ ] **`#[scene]` auto-span:** the `gallery-macros` proc-macro injects `profile_scope!("scene::<module_path>")` into
   the generated wrapper — per-scene names for free, no manual annotation. Gated behind a `profiling` feature (a no-op
@@ -106,10 +106,10 @@ layers, three of them automatic:
 - [ ] Backend: puffin (egui-native scopes + `puffin_egui` in-app flamegraph, feature-gated) for the live/semantic view;
   samply for the external CPU + A/B view. The same spans feed the Tier-3 perf window.
 
-### Tier 1 — scene snapshots (half landed)
+### Tier 1 — scene snapshots (landed; what remains is scale and a second target)
 
-Rendering a scene headlessly landed as `--render` / `--capture`; comparing one against a stored golden did not, and is
-what the rest of this tier is about.
+Rendering a scene headlessly and diffing it against a committed reference both landed. What is left is the shape needed
+past a handful of images, and a structural target beside the pixel one.
 
 - [x] **Why this stopped being "thin".** A static snapshot of default knobs shows a state nobody chose. Capture recipes
   answer that without a record-replay layer: a shot names its knobs by label, so the state is *declared* rather than
@@ -127,12 +127,13 @@ what the rest of this tier is about.
   reference count justifies it, not before.
 - [ ] Structural snapshots as the other target: serialize the scene's AccessKit tree / `Shape` list — jest-style,
   text-diffable in a PR, no GPU or antialiasing to pin at all. A `snapshot!` API would pick per use.
-- [ ] Nothing in `just validate` renders today — a pixel test needs a GPU and the GitHub runner has none, so only the
-  parsing and knob-matching around it is covered. Software drivers would give CI an adapter either way (lavapipe via
-  `VK_ICD_FILENAMES` for wgpu, `EGL_MESA_device_software` for glow), but the runners ship no mesa at all, and software
-  antialiasing won't match a real GPU's — so assert coarse properties rather than exact pixels.
-- [ ] Design a record-replay layer for pointer interactions (informed by bmc's `record` and jest snapshot ergonomics).
-  Knob state no longer needs it; hover, drag and focus still do.
+- [x] Renders in CI, on a runner with no GPU: `nix/test.nix` puts mesa's EGL driver on the wrapper that runs the tests,
+  and `EGL_MESA_device_software` supplies a device that needs no DRM node. Verified locally by hiding `/dev/dri` in a
+  mount namespace — the capture still rendered.
+- [ ] The wgpu path has no equivalent pin, so only glow captures are reference-tested. Lavapipe via `VK_ICD_FILENAMES`
+  would give wgpu a deterministic rasteriser too, if a wgpu-rendered reference is ever wanted.
+- [ ] Design a record-replay layer for pointer interactions, informed by jest snapshot ergonomics. Knob state no longer
+  needs it; hover, drag and focus still do.
 - [ ] Storage location: default to **co-located with the file of origin**, derived by the `snapshot!` macro itself from
   `file!()` + `module_path!()` + its label, so a path is never written by hand. Overriding the *root* is then the only
   config needed, and it should be strongly-typed Rust in the snapshot harness — the harness is a test binary, so its

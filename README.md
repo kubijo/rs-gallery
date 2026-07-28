@@ -204,8 +204,8 @@ crate: `--hot` rebuilds only the library, and the host loads its own crate's `.s
 
 Working: discovery, the title tree, hot-reload, controls (slider/toggle/text/color/select/pad2d/group), the sidebar
 fuzzy filter + keyboard navigation, per-scene source view, selection preserved across reloads, SVG icons, a required
-`Renderer` choice (`wgpu` or `glow`), and offscreen non-egui rendering under glow (`ctx.offscreen`, exercised by the
-femtovg demo).
+`Renderer` choice (`wgpu` or `glow`), offscreen non-egui rendering under glow (`ctx.offscreen`, exercised by the femtovg
+demo), and headless capture to PNG on either backend, driven by a capture recipe.
 
 What's left is genuinely new design, not more porting:
 
