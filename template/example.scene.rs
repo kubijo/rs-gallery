@@ -60,11 +60,24 @@ fn document(ctx: &mut SceneCtx) {
          it has — a scroll area, a wrapping layout, anything with a breakpoint.",
     );
     stage!(ctx, (300, 120), |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
             for i in 0..12 {
                 ui.label(format!("Item {i}"));
             }
         });
+    });
+
+    ctx.ui.add_space(12.0);
+    ctx.ui.heading("More than fits");
+    ctx.ui.label(
+        "`scrollable()` hands the scroll area to the stage, which is what keeps the bar and the \
+         clipped edge on the checkerboard with the padding inside them. It is a modifier, not a \
+         size, so it goes on a pinned stage as readily as on `fill`.",
+    );
+    ctx.stage(Stage::Fixed(egui::vec2(300.0, 120.0)).scrollable(), |ui| {
+        for i in 0..40 {
+            ui.label(format!("Line {i}"));
+        }
     });
 
     ctx.ui.add_space(12.0);
@@ -83,6 +96,44 @@ fn document(ctx: &mut SceneCtx) {
 fn full_canvas(ctx: &mut SceneCtx) {
     stage!(ctx, fill, |ui| {
         ui.centered_and_justified(|ui| ui.heading("The whole canvas, one component"));
+    });
+}
+
+/// `scroll` is `fill` that scrolls once its content outgrows it.
+///
+/// A long list need not draw every row: the stage owns the scroll area,
+/// so a scene reads `ui.clip_rect()` for the visible slice and spaces
+/// over the rest — what `ScrollArea::show_rows` does when the scene owns it instead.
+///
+/// The label reports how much of `rows` that skips.
+/// Drag `rows` down until the content fits and the bar retires.
+///
+/// The readout goes above the stage, not below it: a `fill` stage takes
+/// the whole canvas, so anything after one pushes the canvas past
+/// its own viewport and you get a second scrollbar around the first.
+#[scene("scrolling")]
+fn scrolling(ctx: &mut SceneCtx) {
+    let rows = ctx.slider("rows", 200.0, 0.0, 1000.0, 1.0) as usize;
+    let row_height =
+        ctx.ui.text_style_height(&egui::TextStyle::Body) + ctx.ui.spacing().item_spacing.y;
+    // Last frame's count: this frame's is not known until the stage below has drawn.
+    let drawn_id = egui::Id::new("scrolling-drawn");
+    let drawn = ctx.ui.data(|d| d.get_temp::<usize>(drawn_id).unwrap_or(0));
+    ctx.ui
+        .label(format!("{drawn} of {rows} rows drawn last frame"));
+
+    stage!(ctx, scroll, |ui| {
+        let top = ui.cursor().top();
+        let clip = ui.clip_rect();
+        let first = (((clip.top() - top) / row_height).floor().max(0.0) as usize).min(rows);
+        let last = (((clip.bottom() - top) / row_height).ceil().max(0.0) as usize).min(rows);
+
+        ui.add_space(first as f32 * row_height);
+        for row in first..last {
+            ui.label(format!("Row {row}"));
+        }
+        ui.add_space((rows - last) as f32 * row_height);
+        ui.data_mut(|d| d.insert_temp(drawn_id, last - first));
     });
 }
 

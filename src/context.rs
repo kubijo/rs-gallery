@@ -39,9 +39,55 @@ pub enum Stage {
     Fill,
 }
 
+impl Stage {
+    /// Let the stage scroll vertically when its content outgrows it.
+    ///
+    /// Only does something on a stage with a bound to outgrow,
+    /// so pair it with [`Self::Fill`] or [`Self::Fixed`].
+    /// A [`Self::Fit`] stage grows to its content and never overflows.
+    ///
+    /// The stage owns the scroll area rather than the scene,
+    /// so the bar and the clipped edge line up with the checkerboard
+    /// while the padding stays with the content inside the viewport.
+    ///
+    /// A scene that wants to skip the rows
+    /// it cannot see reads [`egui::Ui::clip_rect`].
+    #[must_use]
+    pub fn scrollable(self) -> StageSpec {
+        StageSpec {
+            size: self,
+            scroll: true,
+        }
+    }
+}
+
+/// A [`Stage`] and how it behaves — what [`stage`](SceneCtx::stage)
+/// actually takes. Every `Stage` converts, so the flags are opt-in
+/// and spelling a plain size still works.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct StageSpec {
+    size: Stage,
+    scroll: bool,
+}
+
+impl From<Stage> for StageSpec {
+    fn from(size: Stage) -> Self {
+        Self {
+            size,
+            scroll: false,
+        }
+    }
+}
+
 impl From<egui::Vec2> for Stage {
     fn from(size: egui::Vec2) -> Self {
         Self::Fixed(size)
+    }
+}
+
+impl From<egui::Vec2> for StageSpec {
+    fn from(size: egui::Vec2) -> Self {
+        Stage::from(size).into()
     }
 }
 
@@ -57,6 +103,20 @@ macro_rules! stage_from {
         impl From<$number> for Stage {
             fn from(side: $number) -> Self {
                 Self::Fixed(egui::Vec2::splat(side as f32))
+            }
+        }
+
+        // Spelled out per type rather than blanketed over `Into<Stage>`,
+        // which would overlap the reflexive `From<StageSpec>`.
+        impl From<($number, $number)> for StageSpec {
+            fn from(size: ($number, $number)) -> Self {
+                Stage::from(size).into()
+            }
+        }
+
+        impl From<$number> for StageSpec {
+            fn from(side: $number) -> Self {
+                Stage::from(side).into()
             }
         }
     )+};
@@ -87,8 +147,8 @@ impl<'a> SceneCtx<'a> {
     /// The canvas is plain, so headings and prose drawn onto `ui` read as headings and prose.
     ///
     /// [`stage!`](crate::stage) spells the common cases shorter.
-    pub fn stage(&mut self, size: impl Into<Stage>, add: impl FnOnce(&mut egui::Ui)) {
-        let size = size.into();
+    pub fn stage(&mut self, size: impl Into<StageSpec>, add: impl FnOnce(&mut egui::Ui)) {
+        let StageSpec { size, scroll } = size.into();
         let id = self.ui.id().with(("gallery-stage", self.stages));
         self.stages += 1;
         let mut open = self.ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
@@ -111,32 +171,60 @@ impl<'a> SceneCtx<'a> {
             })
             .inner;
 
+        // `fill` is passed in rather than read off `ui`: inside a scroll area the available width
+        // shrinks the moment the bar appears, and a stage that resized to it would take the bar
+        // away again, flipping every frame.
+        let sized = |ui: &mut egui::Ui, fill: egui::Vec2| {
+            ui.scope(|ui| match size {
+                Stage::Fit => add(ui),
+                Stage::Fixed(wanted) => {
+                    ui.allocate_ui(wanted, |ui| {
+                        ui.set_min_size(wanted);
+                        add(ui);
+                    });
+                }
+                Stage::Fill => {
+                    ui.allocate_ui(fill, |ui| {
+                        ui.set_min_size(fill);
+                        add(ui);
+                    });
+                }
+            })
+            .response
+            .rect
+        };
+        let padding = egui::Margin::same(PADDING);
+
         // Reserved before the content, so the checkerboard lands beneath it.
         let backdrop = self.ui.painter().add(egui::Shape::Noop);
         let framed = egui::Frame::new()
-            .inner_margin(egui::Margin::same(PADDING))
+            // A scrolling stage pads inside its viewport instead, so the bar and the clipped edge
+            // reach the checkerboard rather than stopping a margin short of it.
+            .inner_margin(if scroll { egui::Margin::ZERO } else { padding })
             .show(self.ui, |ui| {
                 if !open {
                     return ui.min_rect();
                 }
-                ui.scope(|ui| match size {
-                    Stage::Fit => add(ui),
-                    Stage::Fixed(wanted) => {
-                        ui.allocate_ui(wanted, |ui| {
-                            ui.set_min_size(wanted);
-                            add(ui);
-                        });
-                    }
-                    Stage::Fill => {
-                        let available = ui.available_size();
-                        ui.allocate_ui(available, |ui| {
-                            ui.set_min_size(available);
-                            add(ui);
-                        });
-                    }
-                })
-                .response
-                .rect
+                let available = ui.available_size();
+                if !scroll {
+                    return sized(ui, available);
+                }
+                // egui fades a scrollable edge to `ui.stack().bg_color()` — the nearest opaque frame
+                // fill above it. A stage's frame is transparent, so that finds the panel behind
+                // and the fade paints the panel's colour over the checkerboard.
+                ui.style_mut().spacing.scroll.fade.strength = 0.0;
+                // Clamped: a stage squeezed thinner than its own padding would otherwise
+                // ask for a negative box, which egui rejects outright.
+                let inside = (available - padding.sum()).max(egui::Vec2::ZERO);
+                let scrolled = egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(padding)
+                        .show(ui, |ui| sized(ui, inside))
+                        .inner
+                });
+                // The badge reports the stage itself, not the run of content it scrolls over
+                // — a viewport of 200 rows is 200 rows tall, which says nothing about the stage.
+                scrolled.inner_rect
             });
 
         if open {
@@ -529,9 +617,50 @@ mod tests {
                 ui.label("square");
                 drawn += 1;
             });
+            crate::stage!(ctx, scroll, |ui| {
+                ui.label("scrolling");
+                drawn += 1;
+            });
+            ctx.stage(Stage::Fixed(egui::vec2(120.0, 80.0)).scrollable(), |ui| {
+                ui.label("a scrolling stage of its own size");
+                drawn += 1;
+            });
 
-            assert_eq!(drawn, 6, "every form ran its body");
+            assert_eq!(drawn, 8, "every form ran its body");
         });
-        harness.run();
+        // Stepped rather than run to quiescence: scroll area fades its bar in
+        // over time and so keeps asking for frames, which `run` treats as a runaway UI.
+        harness.run_steps(2);
+    }
+
+    /// The canvas a scene draws on is itself a scroll area, so a scrolling stage that grew to its
+    /// content would scroll the canvas too and leave the viewer two bars around one list.
+    #[test]
+    fn a_scrolling_stage_keeps_to_the_canvas_instead_of_growing_to_its_content() {
+        // Cells, because the closure holds its captures for as long as the harness lives.
+        let room = std::cell::Cell::new(0.0);
+        let took = std::cell::Cell::new(0.0);
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            egui::ScrollArea::both().show(ui, |ui| {
+                let mut knobs = Vec::new();
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                room.set(ctx.ui.available_height());
+                let before = ctx.ui.min_rect().height();
+                ctx.stage(Stage::Fill.scrollable(), |ui| {
+                    for row in 0..200 {
+                        ui.label(format!("Row {row}"));
+                    }
+                });
+                took.set(ctx.ui.min_rect().height() - before);
+            });
+        });
+        harness.run_steps(2);
+
+        assert!(
+            took.get() <= room.get(),
+            "200 rows tower over the canvas, yet the stage took {} of {}",
+            took.get(),
+            room.get()
+        );
     }
 }

@@ -37,7 +37,7 @@ mod perf;
 mod svg;
 mod tree;
 mod update;
-pub use context::{SceneCtx, Stage};
+pub use context::{SceneCtx, Stage, StageSpec};
 pub use hot::HotDylib;
 pub use knobs::{ChoiceStyle, Knob, Pad2DSpec};
 use knobs::{KnobStore, render_knobs};
@@ -50,7 +50,9 @@ use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, vis
 
 /// Common imports for scene files: `use gallery::prelude::*;` then bare `scene_meta!` / `#[scene]`.
 pub mod prelude {
-    pub use crate::{Offscreen, Pad2DSpec, SceneCtx, SceneEntry, Stage, scene, scene_meta, stage};
+    pub use crate::{
+        Offscreen, Pad2DSpec, SceneCtx, SceneEntry, Stage, StageSpec, scene, scene_meta, stage,
+    };
 }
 
 /// A discoverable component state, authored with [`macro@scene`] and joined to its group by
@@ -106,6 +108,7 @@ macro_rules! scene_meta {
 /// stage!(ctx, (300, 200), |ui| scroll(ui));       // ...however the numbers are written
 /// stage!(ctx, 200, |ui| avatar(ui));              // a square
 /// stage!(ctx, fill, |ui| dashboard(ui));          // the whole canvas
+/// stage!(ctx, scroll, |ui| sheet(ui));            // ...and scrolls once it overflows
 /// ```
 #[macro_export]
 macro_rules! stage {
@@ -115,6 +118,9 @@ macro_rules! stage {
     };
     ($ctx:expr, fill, $add:expr $(,)?) => {
         $ctx.stage($crate::Stage::Fill, $add)
+    };
+    ($ctx:expr, scroll, $add:expr $(,)?) => {
+        $ctx.stage($crate::Stage::Fill.scrollable(), $add)
     };
     ($ctx:expr, $size:expr, $add:expr $(,)?) => {
         $ctx.stage($size, $add)
