@@ -6,15 +6,6 @@ all-features = true
 
 [advisories]
 version = 2
-# quick-xml (v0.39.4) is pulled ONLY by wayland-scanner, a build-time proc-macro that parses trusted
-# Wayland-protocol XML to generate bindings — never untrusted runtime input. Both advisories are XML DoS
-# (quadratic parse / unbounded allocation) that require attacker-controlled input, so neither applies
-# here, and wayland-scanner 0.31 semver-pins quick-xml 0.39 so there's no downstream fix.
-# Re-check when the winit/wayland stack moves to quick-xml >= 0.41.
-ignore = [
-  "RUSTSEC-2026-0194", # quadratic time checking a start tag for duplicate attributes
-  "RUSTSEC-2026-0195", # unbounded NsReader namespace-declaration allocation
-]
 
 [licenses]
 version = 2

@@ -48,6 +48,7 @@ mod launcher;
 mod offscreen;
 mod perf;
 mod render;
+mod style;
 mod svg;
 mod tree;
 mod update;

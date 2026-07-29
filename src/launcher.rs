@@ -3,6 +3,7 @@
 
 use std::{
     fs,
+    io::{IsTerminal as _, Write as _},
     process::Command,
     sync::{Arc, Mutex},
 };
@@ -77,7 +78,7 @@ pub fn launch(
         .map(|glob| resolve_glob(base, glob))
         .collect();
 
-    build_lib(manifest_dir, &globs);
+    build_lib(manifest_dir, &globs, headless(&cli));
     // The dylib is `lib<crate>.so`; the crate's lib name is the package name with dashes as underscores.
     let mut source = HotDylib::new(&package.replace('-', "_"), cli.hot)
         .expect("load the freshly built scenes dylib");
@@ -121,21 +122,26 @@ fn fail(problem: &Diagnostic) -> ! {
     std::process::exit(1)
 }
 
+/// Whether this run writes to stdout and exits instead of opening a window.
+fn headless(cli: &Cli) -> bool {
+    cli.capture.is_some() || cli.render.is_some() || cli.list_knobs || cli.init_capture
+}
+
 /// The shots this invocation asks for, or `None` when it wants the window.
 ///
 /// A recipe describes its own. The single-scene flags describe one shot between them,
 /// so asking for several at once stays coherent — a listing or a generated recipe
 /// then says what the image beside it was set to.
 fn shots(cli: &Cli, config: &Utf8Path) -> Option<Vec<render::Shot>> {
+    if !headless(cli) {
+        return None;
+    }
     if let Some(recipe) = &cli.capture {
         // Relative to the config, like the scene globs: both describe the instance, not the shell.
         let recipe = config.parent().unwrap_or(Utf8Path::new(".")).join(recipe);
         return Some(
             render::read_recipe(&recipe, cli.out.as_deref()).unwrap_or_else(|reason| fail(&reason)),
         );
-    }
-    if cli.render.is_none() && !cli.list_knobs && !cli.init_capture {
-        return None;
     }
     let scene = cli.scene.clone().expect("clap requires --scene for these");
     Some(vec![render::Shot {
@@ -235,14 +241,49 @@ fn resolve_glob(config_dir: &Utf8Path, glob: &str) -> String {
 }
 
 /// Build the scenes dylib once, blocking, so the loader finds a `.so` on first launch.
-fn build_lib(manifest_dir: &str, globs: &[String]) {
+///
+/// A headless run's entire output is the paths it wrote, which a screen of `Compiling` lines
+/// buries. `--quiet` drops that progress and still lets errors through.
+fn build_lib(manifest_dir: &str, globs: &[String], quiet: bool) {
     let mut command = cargo(manifest_dir, globs);
     command.args(["build", "--lib"]);
+    if quiet {
+        command.arg("--quiet");
+    }
     if let Some(profile) = host_profile() {
         command.args(["--profile", &profile]);
     }
+    let progress = Progress::start(quiet);
     let built = command.status().is_ok_and(|status| status.success());
+    progress.clear();
     assert!(built, "`cargo build --lib` for the scenes dylib failed");
+}
+
+/// A line saying the scenes are compiling, rubbed out again when they are.
+///
+/// A quiet build prints nothing for as long as it takes, which reads as a hang.
+/// This goes on stderr, so `--init-capture`'s TOML on stdout stays pipeable, and only to a terminal,
+/// since a CI log has no cursor to move back over.
+struct Progress(bool);
+
+impl Progress {
+    const LINE: &'static str = "gallery: compiling scenes…";
+
+    fn start(quiet: bool) -> Self {
+        let shown = quiet && std::io::stderr().is_terminal();
+        if shown {
+            eprint!("{}", Self::LINE);
+            let _ = std::io::stderr().flush();
+        }
+        Self(shown)
+    }
+
+    fn clear(self) {
+        if self.0 {
+            eprint!("\r{:width$}\r", "", width = Self::LINE.chars().count());
+            let _ = std::io::stderr().flush();
+        }
+    }
 }
 
 /// The cargo profile this binary was built under, read off its own path: cargo drops the host binary

@@ -65,4 +65,13 @@ if [ "$variant" = femtovg ]; then
 fi
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/target}/demo-$variant"
-exec cargo run --manifest-path "$demo/Cargo.toml" -- "$@"
+
+# Built before it is run so the compile can go quiet without silencing the run itself:
+# a headless `--render` prints the paths it wrote, which a screen of `Compiling` lines buries.
+# The stand-in line is for a terminal only — a CI log has no cursor to move back over.
+building="demo: building demo-$variant…"
+if [ -t 2 ]; then printf '%s' "$building" >&2; fi
+cargo build --quiet --manifest-path "$demo/Cargo.toml"
+if [ -t 2 ]; then printf '\r%*s\r' "${#building}" '' >&2; fi
+
+exec cargo run --quiet --manifest-path "$demo/Cargo.toml" -- "$@"

@@ -40,6 +40,8 @@ anstyle = "1"
 egui_kittest = { version = "0.35", features = ["wgpu", "eframe"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 glutin = { version = "0.32", default-features = false, features = ["egl"] }
+supports-hyperlinks = "3"
+percent-encoding = "2"
 
 [dev-dependencies]
 indoc = "2"

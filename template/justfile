@@ -19,16 +19,16 @@ update:
 
 # Render SCENE's canvas to OUT as a PNG, at its default knobs — no window.
 render SCENE OUT SIZE="1280x720":
-    cargo run -- --scene {{ SCENE }} --render {{ OUT }} --size {{ SIZE }}
+    cargo run --quiet -- --scene {{ SCENE }} --render {{ OUT }} --size {{ SIZE }}
 
 # Render every shot in a capture recipe (render with knobs set).
 capture FILE="capture.toml" OUT="":
-    cargo run -- --capture {{ FILE }} {{ if OUT == "" { "" } else { "--out " + OUT } }}
+    cargo run --quiet -- --capture {{ FILE }} {{ if OUT == "" { "" } else { "--out " + OUT } }}
 
 # List SCENE's knobs, their kinds and their values — the labels a capture recipe sets.
 knobs SCENE:
-    cargo run -- --scene {{ SCENE }} --list-knobs
+    cargo run --quiet -- --scene {{ SCENE }} --list-knobs
 
 # Print a capture recipe for SCENE with its knobs filled in — redirect it into a file to start one.
 capture-init SCENE:
-    cargo run -- --scene {{ SCENE }} --init-capture
+    cargo run --quiet -- --scene {{ SCENE }} --init-capture

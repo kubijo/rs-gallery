@@ -9,6 +9,7 @@
 
 use std::{collections::BTreeMap, fmt::Write as _};
 
+use anstyle::{AnsiColor, Style};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use eframe::{egui_glow, glow};
@@ -22,6 +23,7 @@ use crate::{
     install_context,
     offscreen::GlDeps,
     render_canvas,
+    style::{frame, link, paint},
     tree::{resolve_scene, scene_key},
 };
 
@@ -67,10 +69,84 @@ pub(crate) fn render(
     setup: &impl Fn(&egui::Context),
     shots: &[Shot],
 ) -> Result<(), Diagnostic> {
+    let mut written = Vec::new();
+    let mut outcome = Ok(());
     for shot in shots {
-        shoot(manifest, renderer, setup, shot)?;
+        match shoot(manifest, renderer, setup, shot) {
+            Ok(image) => written.extend(image),
+            Err(failure) => {
+                outcome = Err(failure);
+                break;
+            }
+        }
     }
-    Ok(())
+    // Reported before the failure is returned: the shots that did run are on disk either way,
+    // and an unlisted stale PNG is one a reader will trust.
+    report(&written);
+    outcome
+}
+
+/// A PNG this run produced, held back so the whole set can be reported in one block.
+struct Written {
+    path: Utf8PathBuf,
+    size: (u32, u32),
+    bytes: u64,
+}
+
+fn report(written: &[Written]) {
+    if written.is_empty() {
+        return;
+    }
+    let good = Style::new().bold().fg_color(Some(AnsiColor::Green.into()));
+    let headline = format!(
+        "{} {} image{}",
+        paint(good, "Gallery wrote"),
+        written.len(),
+        if written.len() == 1 { "" } else { "s" }
+    );
+    let total = human(written.iter().map(|w| w.bytes).sum());
+    anstream::println!("\n{}\n", frame(&headline, &rows(written), Some(&total)));
+}
+
+/// A byte count the way a reader wants it: a figure and a unit, not eight digits to count through.
+fn human(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ => format!("{size:.1} {}", UNITS[unit]),
+    }
+}
+
+/// One row per image: the path, then its size in a column of its own,
+/// so a set of shots can be scanned for the odd one out rather than read line by line.
+fn rows(written: &[Written]) -> Vec<String> {
+    let aside = Style::new().dimmed();
+    let column = written
+        .iter()
+        .map(|w| w.path.as_str().chars().count())
+        .max()
+        .unwrap_or_default();
+    // The width is padded on its own account, so the `×` holds still
+    // instead of drifting with the number of digits ahead of it.
+    let digits = written
+        .iter()
+        .map(|w| w.size.0.to_string().len())
+        .max()
+        .unwrap_or_default();
+    written
+        .iter()
+        .map(|w| {
+            let pad = " ".repeat(column - w.path.as_str().chars().count());
+            let size = format!("{:>digits$}×{}", w.size.0, w.size.1);
+            format!("{}{pad}   {}", link(&w.path), paint(aside, &size))
+        })
+        .collect()
 }
 
 /// Draw one shot: resolve its scene, pump frames while applying its knobs, then capture.
@@ -79,7 +155,7 @@ fn shoot(
     renderer: Renderer,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
-) -> Result<(), Diagnostic> {
+) -> Result<Option<Written>, Diagnostic> {
     let scene = *resolve_scene(&manifest.scenes, &shot.scene)?;
     let builder = egui_kittest::Harness::builder()
         .with_size(shot.size)
@@ -146,13 +222,13 @@ fn shoot(
             .render()
             .map_err(|reason| format!("render `{}`: {reason}", scene.name))?;
         write_png(&image, out)?;
-        println!(
-            "gallery: wrote {out} ({}×{})",
-            image.width(),
-            image.height()
-        );
+        return Ok(Some(Written {
+            path: landed(out),
+            size: (image.width(), image.height()),
+            bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
+        }));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// The canvas as the entire app: one panel filled like the shell's, and the scene in it. No sidebar,
@@ -427,6 +503,13 @@ fn write_png(image: &image::RgbaImage, out: &Utf8Path) -> Result<(), String> {
         .map_err(|e| format!("write `{out}`: {e}"))
 }
 
+/// Where a written file actually is, so a recipe's `out = "../renders"` is reported
+/// as the place its bytes landed rather than as the way it was spelled.
+/// Only correct once the file exists, since resolving it reads the filesystem.
+fn landed(out: &Utf8Path) -> Utf8PathBuf {
+    out.canonicalize_utf8().unwrap_or_else(|_| out.to_owned())
+}
+
 /// Parse a `WxH` size, in points — which at the pinned scale are the PNG's pixels.
 ///
 /// # Errors
@@ -649,6 +732,48 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    #[test]
+    fn a_byte_count_is_stated_in_the_largest_unit_it_fills() {
+        assert_eq!(human(0), "0 B");
+        assert_eq!(human(1023), "1023 B");
+        assert_eq!(human(1024), "1.0 KiB");
+        assert_eq!(human(1_572_864), "1.5 MiB");
+    }
+
+    #[test]
+    fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
+        let written = [
+            Written {
+                path: "/tmp/a.png".into(),
+                size: (640, 360),
+                bytes: 1,
+            },
+            Written {
+                path: "/tmp/a-much-longer-name.png".into(),
+                size: (1280, 720),
+                bytes: 1,
+            },
+        ];
+        let columns: Vec<_> = rows(&written)
+            .iter()
+            .map(|row| {
+                crate::style::plain(row)
+                    .chars()
+                    .take_while(|c| *c != '×')
+                    .count()
+            })
+            .collect();
+        assert_eq!(columns[0], columns[1], "the sizes start in the same column");
+    }
+
+    #[test]
+    fn a_written_path_is_reported_absolute_with_its_detours_resolved_away() {
+        let landed = landed(Utf8Path::new("src/../Cargo.toml"));
+        assert!(landed.is_absolute(), "`{landed}` is absolute");
+        assert!(!landed.as_str().contains(".."), "`{landed}` kept no detour");
+        assert!(landed.ends_with("Cargo.toml"), "`{landed}` names the file");
+    }
 
     /// The `(key, value)` pairs a recipe or the CLI would have produced.
     fn knobs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
