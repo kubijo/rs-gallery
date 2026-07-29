@@ -15,21 +15,18 @@ An instance is one flat crate plus a config — nothing else. Scaffold one into 
 cargo generate --git kubijo/rs-gallery template --name my-gallery --no-workspace
 ```
 
-`--name` picks the directory; `--no-workspace` keeps cargo-generate from splicing the instance into an enclosing
-workspace's members, so it's safe to run inside an existing Cargo workspace — the instance stays a standalone crate (it
-carries its own `[workspace]`). The command prompts for the gallery git URL, scene glob, and title; or copy
-[`template/`](template) and fill the `{{ … }}` markers by hand. It ships a runnable `example.scene.rs` and a standalone
-`justfile`, so the first `just run` already shows something. The files it lays down are the whole contract, so they stay
-the source of truth as the shape evolves.
+`--name` picks the directory; `--no-workspace` stops cargo-generate splicing the instance into an enclosing workspace,
+so it is safe to run inside one — the instance carries its own `[workspace]`. It prompts for the gallery git URL, scene
+glob and title, or copy [`template/`](template) and fill the `{{ … }}` markers by hand. It ships a runnable
+`example.scene.rs` and a standalone `justfile`, so the first `just run` already shows something.
 
 `just run` opens the window; `just hot` rebuilds and hot-swaps scenes as you edit them. (Both wrap `cargo run`, so plain
 `cargo run` / `cargo run -- --hot` work too.) Without a window at all, `just render` and `just capture` write scenes to
 PNGs — see [Rendering scenes to images](#rendering-scenes-to-images).
 
-> The instance package must not be named `gallery` — its scenes dylib would clash with the framework crate at link time.
-> (The binary and directory still can.) The scaffold names it `app-gallery`; that one field is a plain literal, not a
-> generated placeholder, so rename it by hand — a git dependency's tree is parsed by every consumer, and an invalid
-> package name would error there.
+> The instance package must not be named `gallery` — its scenes dylib would clash with the framework crate at link time
+> (the binary and directory still can). The scaffold names it `app-gallery`; that field is a plain literal rather than a
+> placeholder, so rename it by hand.
 
 ## Authoring scenes
 
@@ -58,9 +55,9 @@ fn disabled(ctx: &mut SceneCtx) {
 ```
 
 The canvas is plain, so a scene reads as a **document**: headings and prose go straight onto `ctx.ui`, and each thing
-you are demonstrating goes in a **stage** — which puts it on the checkerboard (so transparency and bounds read against
-the shell), captions it with its size, and lets you collapse it. A bare closure fits the content; `fill` takes the rest
-of the canvas; anything else is a size, written however the call site already has it:
+you are demonstrating goes in a **stage** — on the checkerboard, so transparency and bounds read against the shell,
+captioned with its size and collapsible. A pinned size is for a component that behaves differently depending on how much
+room it has — a wrapping layout, anything with a breakpoint:
 
 | `stage!`'s size argument | the stage is sized              |
 | ------------------------ | ------------------------------- |
@@ -69,51 +66,27 @@ of the canvas; anything else is a size, written however the call site already ha
 | `(300, 200)`             | the same — integers convert too |
 | `200`                    | to a 200×200 square             |
 | `fill`                   | to whatever canvas is left      |
+| `scroll`                 | to the canvas, and it scrolls   |
 
-`fill` measures what is left where it is called, so a scene that is a single `fill` gets the whole canvas — the shape
-every scene had before stages — while one placed after other content takes only the remainder.
+`fill` measures what is left where it is called, so a single `fill` gets the whole canvas while one placed after other
+content takes only the remainder.
 
-A pinned size is for components that behave differently depending on how much room they have — a scroll area, a wrapping
-layout, anything with a breakpoint:
+A stage whose content runs past it scrolls rather than growing — `scroll` is `fill` that scrolls, and any other size
+takes `.scrollable()`, as in `Stage::Fixed(egui::vec2(300.0, 200.0)).scrollable()`. The box stays the size it declared
+and the content scrolls inside it; [`example.scene.rs`](template/example.scene.rs) shows them running.
 
-```rust
-#[scene("scrolling")]
-fn scrolling(ctx: &mut SceneCtx) {
-    ctx.ui.heading("Vertical scroll (200px viewport)");
-    stage!(ctx, (300, 200), |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for i in 0..40 {
-                ui.label(format!("Item {i}"));
-            }
-        });
-    });
-}
-```
-
-A scene takes a \[`SceneCtx`\]: `ctx.ui` is the egui `Ui` to draw into, and `ctx.slider(...)`, `ctx.toggle(...)`,
-`ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare **controls** (knobs). Calling one both registers the
-control in the right-hand panel and returns its current value, so tweaking it re-renders the scene:
-
-```rust
-#[scene("label")]
-fn label(ctx: &mut SceneCtx) {
-    let text = ctx.text("text", "Save");
-    let wide = ctx.toggle("wide", false);
-    let mut button = egui::Button::new(text);
-    if wide {
-        button = button.min_size(egui::vec2(120.0, 0.0));
-    }
-    ctx.ui.add(button);
-}
-```
+A scene takes a `SceneCtx`: `ctx.ui` is the egui `Ui` to draw into, and `ctx.slider(...)`, `ctx.toggle(...)`,
+`ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare **controls** (knobs). Calling one registers the control in
+the right-hand panel *and* returns its current value, so tweaking it re-renders the scene —
+[`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind.
 
 The title's slashes build the sidebar tree; the scenes are children:
 
 ```text
 Components
-  Button
-    enabled
-    disabled
+╰─ Button
+   ├─ enabled
+   ╰─ disabled
 ```
 
 A file with a single scene can mark it `#[scene(default)]` (or bare `#[scene]`); its group then shows as one flat entry
@@ -145,6 +118,7 @@ That uses the scene's default knobs, rarely the state worth seeing. Other states
 ```toml
 out = "renders" # relative to this file; `just capture <file> <dir>` overrides it
 size = "640x360" # for any shot that doesn't state its own
+sheet = "sheet.png" # optional; gathers the run onto one captioned image as well
 
 [[shot]]
 name = "night" # the shot's identity, and its filename: renders/night.png
@@ -170,18 +144,11 @@ color   "accent" = #4caf50ff
 A pattern or label matching none or several, or a value its kind won't take, stops the run: a clean render of the wrong
 state is worse than none.
 
-A recipe with several shots can also gather them onto one image, so a change across a whole set is one thing to look at
-rather than a directory to click through:
-
-```toml
-sheet = "sheet.png" # beside the shots, wherever `out` put them
-```
-
-The shots still write their own PNGs; the sheet is an extra, and each capture is captioned with the shot that made it.
-The packing is tight but not at any cost: a tall column and a long strip hold the same panels over much the same area,
-and scaled to fit a screen either one leaves every panel too small to read. So a sheet is scored on its area *and* on
-how near it lands to a screen's proportions. A run that produced one capture writes no sheet and says so, since a sheet
-of one image is the image.
+`sheet` gathers the run onto one image beside the shots, so a change across a whole set is one thing to look at rather
+than a directory to click through. The shots still write their own PNGs, and each panel is captioned with the shot that
+made it. Packing is tight but not at any cost — a tall column and a long strip cover much the same area, and scaled to a
+screen either leaves every panel unreadable — so a sheet is scored on its area *and* on how near it lands to a screen's
+proportions. One capture writes no sheet and says so, a sheet of one image being the image.
 
 Capture follows the renderer the instance configures. Under `Renderer::Glow` it paints through an OpenGL context taken
 off an EGL device — no window, no display server — so a scene drawing with `ctx.offscreen(...)` captures its real
@@ -190,47 +157,18 @@ picture the window would never show.
 
 ## How it works
 
-- **`#[scene("name")]`** registers a `fn(&mut SceneCtx)` via [`inventory`], keyed by its `module_path`. With no argument
-  the name defaults to the title-cased function name; `default` marks the group's default scene; `order = N` sets its
-  sort position within the group (unset sorts last, by name).
-- **Controls (knobs)** are declarative-by-use: `ctx.slider(...)` etc. register a control and return its value. Values
-  persist per scene in the host, so they survive hot-reloads.
-- **`scene_meta! { title: "A / B" }`** (once per file) sets the group's place in the tree. Scenes join their group by
-  `module_path` (longest prefix); the title's slashes nest.
-- **Discovery** — `build.rs` calls `gallery_build::discover_from_env()`, which globs `scene_globs` (handed down by the
-  launcher) for `*.scene.rs`, compiles each in, and lets its `#[scene]`s self-register.
-- **`gallery::launch!(setup, settings)`** reads `gallery.toml`, builds the scenes into the crate's dylib, loads it, and
-  runs the shell. `settings` is a `Settings` whose required `Renderer` (`Wgpu` or `Glow`) picks the eframe backend;
-  under `Glow` a scene can draw non-egui content — femtovg, raw OpenGL — into an offscreen framebuffer with
-  `ctx.offscreen(...)`, or reach the raw `ctx.gl_loader()` / `ctx.register_native_texture(...)` beneath it. `--hot`
-  rebuilds `--lib` on change and swaps it in live; the loader finds the dylib next to the running binary, so it tracks
-  any `CARGO_TARGET_DIR`.
+`#[scene]` self-registers through [`inventory`]; `build.rs` globs the scene files and compiles them in; `launch!` reads
+`gallery.toml`, builds them into the crate's dylib and runs the shell. The dylib is what `--hot` swaps without
+restarting — still one crate.
 
-The scenes compile into a `dylib` target so hot mode can swap them without restarting the host — but it's still one
-crate: `--hot` rebuilds only the library, and the host loads its own crate's `.so`.
-
-## Crates
-
-- **`gallery`** — the framework: the egui shell, the `#[scene]`/`scene_meta!` re-exports, `SceneSource` (`Linked`
-  compiled-in, `HotDylib` reloaded), and the `launch!` / `scenes_dylib!` macros.
-- **`gallery-macros`** — the `#[scene]` proc-macro (its own crate, as proc-macros must be).
-- **`gallery-build`** — the `build.rs` discovery helper, kept light (`glob` + `camino`) so it's a cheap
-  build-dependency.
+Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` proc-macro), `gallery-build` (the
+`build.rs` helper).
 
 ## Status & roadmap
 
-Working: discovery, the title tree, hot-reload, controls (slider/toggle/text/color/select/pad2d/group), the sidebar
-fuzzy filter + keyboard navigation, per-scene source view, selection preserved across reloads, SVG icons, a required
-`Renderer` choice (`wgpu` or `glow`), offscreen non-egui rendering under glow (`ctx.offscreen`, exercised by the femtovg
-demo), and headless capture to PNG on either backend, driven by a capture recipe.
-
-What's left is genuinely new design, not more porting:
-
-- a **wgpu-native** offscreen path — non-egui rendering already works under the glow backend, where `ctx.offscreen`
-  draws femtovg or raw OpenGL into an FBO, but the wgpu backend has no equivalent yet;
-- a preview→control interaction layer (drive a knob by clicking/dragging the component) — immediate-mode scenes handle
-  interactions inline today, so this would be a fresh design rather than a copy;
-- publishing to crates.io.
+Discovery, the tree, hot-reload, knobs, source view, SVG icons and headless capture all work, on either renderer. Open:
+a wgpu-native offscreen path (glow has `ctx.offscreen`), driving a knob by interacting with the preview, and publishing
+to crates.io.
 
 ## License
 
