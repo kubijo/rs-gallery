@@ -9,7 +9,9 @@ First public pre-release — it all lands in the initial commit, so there's noth
 changes from the first tagged release on. Highlights (the [README](README.md) has the detail):
 
 - **Discovery** — `#[scene]` / `scene_meta!` self-register via `inventory`; `build.rs` globs `*.scene.rs` from config.
-  Scenes reach the shell `Linked` (compiled in) or via `HotDylib` (rebuilt and hot-swapped on `--hot`).
+  Scenes reach the shell `Linked` (compiled in) or via `HotDylib` (rebuilt and hot-swapped on `--hot`). A `**` glob from
+  a crate root walks into `target/`, so a match found there is skipped as build output, and an entry that goes missing
+  mid-walk — cargo writes and removes temp files as it builds — is skipped rather than failing the build.
 - **Controls** — `text`, `slider`, `toggle`, `color`, `select` / `radio` / `buttons`, `pad2d`, `group`;
   declarative-by-use, with values persisted per scene across reloads.
 - **Scenes read as documents** — the canvas is plain, so headings and prose drawn onto `ctx.ui` look like headings and
@@ -31,7 +33,13 @@ changes from the first tagged release on. Highlights (the [README](README.md) ha
   than parked on the event loop, reporting how many that excluded.
 - **Headless render** — `--render <path.png> --scene <pattern>` writes a scene's canvas with no window, so an agent or
   CI can look at a component instead of asking someone for a screenshot. Drawn by the same code the shell draws with, so
-  the image is the canvas alone and holds still as the chrome around it changes.
+  the image is the canvas alone and holds still as the chrome around it changes. The size is where the scene lays itself
+  out rather than a crop of it: one that comes out bigger is captured whole, at the size it turned out to need.
+- **Sheets** — a recipe's root-level `sheet = "sheet.png"` also gathers that run's captures onto one captioned image, so
+  a change across a whole set is one thing to look at rather than a directory to click through. `rectangle-pack` places
+  the panels; the sheet size is searched over candidate widths and scored on area *and* proportions, since a column and
+  a strip cover the same page and both leave every panel unreadable once scaled to a screen. The shots still write their
+  own PNGs. One capture writes no sheet: a sheet of one image is the image.
 - **Capture recipes** — the defaults are rarely the state worth seeing, so `--capture <file.toml>` renders a list of
   shots, each naming its scene, size and knobs. A file rather than flags: labels contain spaces that shell wrappers
   drop, and a set of states is worth committing. Knobs go by label (or a regex over them), choices by option label —

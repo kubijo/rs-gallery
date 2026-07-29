@@ -4,6 +4,9 @@
 # Sizes are roomy because the canvas scrolls, and an image cut off at the edge hides the layout change
 # it exists to catch. Look at a new one before committing it.
 
+# Gathers the shots below, so the packing and the captions are covered by the same comparison.
+sheet = "sheet.png"
+
 [[shot]]
 name = "documented-stage"
 scene = "documented-stage"

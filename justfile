@@ -35,6 +35,10 @@ format *args:
 validate:
     @just in-shell validate
 
+# Take the current renders as the committed references in `tests/snapshots/` — look at them first.
+snapshots:
+    @UPDATE_SNAPSHOTS=1 just in-shell gallery-test the_reference_images_match
+
 # Report direct dependencies with a newer version available.
 outdated:
     @just in-shell cargo outdated --root-deps-only

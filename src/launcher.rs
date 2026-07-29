@@ -86,8 +86,8 @@ pub fn launch(
 
     // Everything above is how scenes get here at all, so a headless run branches only where the window
     // would have opened — before any watcher, which nothing would be left to shut down.
-    if let Some(shots) = shots(&cli, &config_path) {
-        return match render::render(&manifest, settings.renderer, &setup, &shots) {
+    if let Some(capture) = shots(&cli, &config_path) {
+        return match render::render(&manifest, settings.renderer, &setup, &capture) {
             Ok(()) => Ok(()),
             Err(reason) => fail(&reason),
         };
@@ -132,7 +132,7 @@ fn headless(cli: &Cli) -> bool {
 /// A recipe describes its own. The single-scene flags describe one shot between them,
 /// so asking for several at once stays coherent — a listing or a generated recipe
 /// then says what the image beside it was set to.
-fn shots(cli: &Cli, config: &Utf8Path) -> Option<Vec<render::Shot>> {
+fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
     if !headless(cli) {
         return None;
     }
@@ -144,19 +144,23 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<Vec<render::Shot>> {
         );
     }
     let scene = cli.scene.clone().expect("clap requires --scene for these");
-    Some(vec![render::Shot {
-        scene,
-        out: cli.render.clone(),
-        size: cli
-            .size
-            .as_deref()
-            .map_or(Ok(render::DEFAULT_SIZE), render::parse_size)
-            .unwrap_or_else(|reason| fail(&reason.into())),
-        knobs: Vec::new(),
-        frames: cli.frames,
-        list: cli.list_knobs,
-        template: cli.init_capture,
-    }])
+    Some(render::Capture {
+        shots: vec![render::Shot {
+            scene,
+            out: cli.render.clone(),
+            size: cli
+                .size
+                .as_deref()
+                .map_or(Ok(render::DEFAULT_SIZE), render::parse_size)
+                .unwrap_or_else(|reason| fail(&reason.into())),
+            knobs: Vec::new(),
+            frames: cli.frames,
+            list: cli.list_knobs,
+            template: cli.init_capture,
+        }],
+        // A sheet gathers a recipe's shots; one shot on the command line has nothing to gather.
+        sheet: None,
+    })
 }
 
 // This doc comment is the `--help` text, so it reads as instructions rather than as rationale; why

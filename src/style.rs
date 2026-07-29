@@ -22,7 +22,8 @@ pub(crate) fn frame(headline: &str, rows: &[String], footer: Option<&str>) -> St
         let _ = write!(out, "\n{}{row}", paint(edge, stem));
     }
     if let Some(footer) = footer {
-        let corner = if rows.is_empty() { "  " } else { "  ╰─  " };
+        // Nothing to hang off with no rows above it, so the footer brings its own indent.
+        let corner = if rows.is_empty() { "" } else { "  ╰─  " };
         let _ = write!(out, "\n{}{footer}", paint(edge, corner));
     }
     out

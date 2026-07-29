@@ -8,6 +8,8 @@
 out = "renders"
 # The canvas each shot renders at, unless it says otherwise.
 size = "640x360"
+# Gather every shot onto one captioned image too. Drop the line to write only the shots themselves.
+sheet = "sheet.png"
 
 [[shot]]
 # The name is the shot's identity and its filename — here `renders/knobs-choice.png`.

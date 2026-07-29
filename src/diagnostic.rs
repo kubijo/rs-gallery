@@ -5,21 +5,40 @@
 //! disappears for a pipe or `NO_COLOR`; the frame is not styling and stays, which is what keeps a
 //! twenty-scene listing legible in a CI log.
 
+use std::io::Write as _;
+
 use anstyle::{AnsiColor, Style};
 
 use crate::style::{frame, paint};
 
 /// What went wrong, which names were in play, and what to do about it.
 pub(crate) struct Diagnostic {
+    severity: Severity,
     headline: String,
     /// Names a pattern matched, or the ones it could have matched instead.
     candidates: Vec<String>,
     hint: Option<String>,
 }
 
+/// Whether the run stops here. A warning reports and carries on,
+/// so it says what it did instead of what it wanted.
+enum Severity {
+    Error,
+    Warning,
+}
+
 impl Diagnostic {
     pub(crate) fn new(headline: impl Into<String>) -> Self {
+        Self::at(Severity::Error, headline)
+    }
+
+    pub(crate) fn warning(headline: impl Into<String>) -> Self {
+        Self::at(Severity::Warning, headline)
+    }
+
+    fn at(severity: Severity, headline: impl Into<String>) -> Self {
         Self {
+            severity,
             headline: headline.into(),
             candidates: Vec::new(),
             hint: None,
@@ -40,24 +59,38 @@ impl Diagnostic {
 
     /// The whole report, escapes and all, for `anstream` to strip as the environment demands.
     fn render(&self) -> String {
-        let bad = Style::new().bold().fg_color(Some(AnsiColor::Red.into()));
+        let (word, colour) = match self.severity {
+            Severity::Error => ("error", AnsiColor::Red),
+            Severity::Warning => ("warning", AnsiColor::Yellow),
+        };
+        let bad = Style::new().bold().fg_color(Some(colour.into()));
         let help = Style::new().bold().fg_color(Some(AnsiColor::Cyan.into()));
 
-        let headline = format!("{}: {}", paint(bad, "error"), self.headline);
+        let headline = format!("{}: {}", paint(bad, word), self.headline);
+        // With no candidates between them the two labels sit one above the other,
+        // so they line up on their colons — near-alignment reads as a missed indent.
+        let lead = match self.candidates.is_empty() {
+            true => " ".repeat(word.len().saturating_sub("help".len())),
+            false => String::new(),
+        };
         let hint = self
             .hint
             .as_ref()
-            .map(|hint| format!("{}: {hint}", paint(help, "help")));
+            .map(|hint| format!("{lead}{}: {hint}", paint(help, "help")));
         frame(&headline, &self.candidates, hint.as_deref())
     }
 
-    /// Report to stderr, with a blank line either side: this lands under whatever cargo was last
-    /// saying, and wants separating from it. Callers exit afterwards; this only writes.
+    /// Report to stderr, opening on a blank line: this lands under whatever cargo was last saying,
+    /// and wants separating from it. Nothing closes it — whatever comes next brings its own space.
+    /// Callers exit afterwards; this only writes.
     ///
     /// The margin is presentation, so it stays out of [`render`](Self::render):
     /// what tests assert on is the block itself.
     pub(crate) fn report(&self) {
-        anstream::eprintln!("\n{}\n", self.render());
+        // stdout goes first: this lands on stderr, and anything still held in stdout's buffer would
+        // otherwise surface after the report that refers to it.
+        let _ = std::io::stdout().flush();
+        anstream::eprintln!("\n{}", self.render());
     }
 
     /// The report as a pipe or a CI log sees it — `anstream` strips the escapes there,
@@ -105,6 +138,19 @@ mod tests {
                   ├─  two
                   ╰─  help: narrow the pattern"}
         );
+    }
+
+    #[test]
+    fn a_hint_with_nothing_between_it_and_the_headline_lines_up_on_the_colon() {
+        let colon = |line: &str| line.find(':').expect("a labelled line");
+        for report in [
+            Diagnostic::new("it broke").hint("try the other one"),
+            Diagnostic::warning("it was skipped").hint("try the other one"),
+        ] {
+            let plain = report.plain();
+            let (headline, hint) = plain.split_once('\n').expect("a headline and a hint");
+            assert_eq!(colon(headline), colon(hint), "the labels line up:\n{plain}");
+        }
     }
 
     #[test]

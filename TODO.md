@@ -125,6 +125,9 @@ past a handful of images, and a structural target beside the pixel one.
   way to say so — `--capture --verify`, against references beside the recipe — and once it exists the differ moves from
   a dev-dependency to an optional feature, so only those who ask for it link it (and inherit its MPL-2.0 corner; see
   `deny.toml`).
+- [x] **A run's captures on one sheet.** A recipe's `sheet = "sheet.png"` packs them into a single captioned image
+  (`rectangle-pack`, over a search for a size worth looking at), so reviewing a set is one image rather than a
+  directory. That covers looking over what a run produced; reviewing a wall of *failures* is the separate problem below.
 - [ ] It scales to a handful of images, not hundreds. Past that, the shape that works is a persistent differ fed image
   pairs over a pipe (`odiff --server`) rather than a process per image, and an HTML report putting before/after/diff
   side by side — reviewing a wall of failures in a browser beats opening `*.diff.png` by hand. Worth porting when the

@@ -48,6 +48,7 @@ mod launcher;
 mod offscreen;
 mod perf;
 mod render;
+mod sheet;
 mod style;
 mod svg;
 mod tree;
@@ -523,7 +524,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         }),
                         _ => None,
                     };
-                    render_canvas(ui, scene, store, gl_deps);
+                    let _ = render_canvas(ui, scene, store, gl_deps);
                 }
             });
 
@@ -559,19 +560,21 @@ pub(crate) fn render_canvas(
     scene: &SceneEntry,
     store: &mut Vec<Knob>,
     gl_deps: Option<GlDeps<'_>>,
-) {
-    egui::ScrollArea::both().show(ui, |ui| {
-        let declared = egui::Frame::new()
-            .inner_margin(egui::Margin::same(16))
-            .show(ui, |ui| {
-                let mut ctx = SceneCtx::new(ui, store, gl_deps);
-                (scene.render)(&mut ctx);
-                ctx.declared()
-            })
-            .inner;
-        // Drop knobs the scene stopped declaring this frame.
-        store.truncate(declared);
-    });
+) -> egui::Vec2 {
+    egui::ScrollArea::both()
+        .show(ui, |ui| {
+            let declared = egui::Frame::new()
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    let mut ctx = SceneCtx::new(ui, store, gl_deps);
+                    (scene.render)(&mut ctx);
+                    ctx.declared()
+                })
+                .inner;
+            // Drop knobs the scene stopped declaring this frame.
+            store.truncate(declared);
+        })
+        .content_size
 }
 
 /// Gold folders, blue scene markers.

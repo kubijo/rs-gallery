@@ -11,6 +11,7 @@ use std::{collections::BTreeMap, fmt::Write as _};
 
 use anstyle::{AnsiColor, Style};
 use camino::{Utf8Path, Utf8PathBuf};
+use indoc::formatdoc;
 
 use eframe::{egui_glow, glow};
 
@@ -22,7 +23,8 @@ use crate::{
     diagnostic::Diagnostic,
     install_context,
     offscreen::GlDeps,
-    render_canvas,
+    render_canvas, sheet,
+    sheet::Panel,
     style::{frame, link, paint},
     tree::{resolve_scene, scene_key},
 };
@@ -67,23 +69,79 @@ pub(crate) fn render(
     manifest: &Manifest,
     renderer: Renderer,
     setup: &impl Fn(&egui::Context),
-    shots: &[Shot],
+    capture: &Capture,
 ) -> Result<(), Diagnostic> {
     let mut written = Vec::new();
+    let mut panels = Vec::new();
     let mut outcome = Ok(());
-    for shot in shots {
+    for shot in &capture.shots {
         match shoot(manifest, renderer, setup, shot) {
-            Ok(image) => written.extend(image),
+            Ok(None) => {}
+            Ok(Some((made, image))) => {
+                // Held only for a sheet, so a run without one keeps a single capture in memory
+                // rather than every capture it has taken.
+                if capture.sheet.is_some() {
+                    panels.push(Panel {
+                        name: made.path.file_stem().unwrap_or("shot").to_owned(),
+                        image,
+                    });
+                }
+                written.push(made);
+            }
             Err(failure) => {
                 outcome = Err(failure);
                 break;
             }
         }
     }
+    // Two is the fewest that gather into anything: a sheet of one panel is that panel
+    // with a caption, so it is worth saying nothing was written rather than writing it.
+    let mut skipped = None;
+    if let (Ok(()), Some(out)) = (&outcome, &capture.sheet) {
+        if panels.len() < 2 {
+            skipped = Some(
+                Diagnostic::warning(format!(
+                    "a sheet gathers a run's captures, and this run made {}",
+                    panels.len()
+                ))
+                .hint(format!(
+                    "`{out}` was not written; drop `sheet` or add another `[[shot]]`"
+                )),
+            );
+        } else {
+            match gather(panels, out, renderer, setup) {
+                Ok(sheet) => written.push(sheet),
+                Err(failure) => outcome = Err(failure),
+            }
+        }
+    }
     // Reported before the failure is returned: the shots that did run are on disk either way,
     // and an unlisted stale PNG is one a reader will trust.
-    report(&written);
+    report(&written, skipped.as_ref());
     outcome
+}
+
+/// What one invocation asks for.
+pub(crate) struct Capture {
+    pub(crate) shots: Vec<Shot>,
+    /// Where to gather the captures. `None` unless a recipe asked for a sheet.
+    pub(crate) sheet: Option<Utf8PathBuf>,
+}
+
+/// Draw the run's captures onto one sheet and write it.
+fn gather(
+    panels: Vec<Panel>,
+    out: &Utf8Path,
+    renderer: Renderer,
+    setup: &impl Fn(&egui::Context),
+) -> Result<Written, Diagnostic> {
+    let image = sheet::compose(panels, renderer, setup)?;
+    write_png(&image, out)?;
+    Ok(Written {
+        path: landed(out),
+        size: (image.width(), image.height()),
+        bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
+    })
 }
 
 /// A PNG this run produced, held back so the whole set can be reported in one block.
@@ -93,19 +151,26 @@ struct Written {
     bytes: u64,
 }
 
-fn report(written: &[Written]) {
-    if written.is_empty() {
-        return;
+/// The images the run wrote, and anything it has to say about one it didn't.
+///
+/// Each block opens on a blank line and closes on none.
+/// A note under the list is then set off by one line rather than two,
+/// and the shell prompt lands one line under whichever block came last.
+fn report(written: &[Written], skipped: Option<&Diagnostic>) {
+    if !written.is_empty() {
+        let good = Style::new().bold().fg_color(Some(AnsiColor::Green.into()));
+        let headline = format!(
+            "{} {} image{}",
+            paint(good, "Gallery wrote"),
+            written.len(),
+            if written.len() == 1 { "" } else { "s" }
+        );
+        let total = human(written.iter().map(|w| w.bytes).sum());
+        anstream::println!("\n{}", frame(&headline, &rows(written), Some(&total)));
     }
-    let good = Style::new().bold().fg_color(Some(AnsiColor::Green.into()));
-    let headline = format!(
-        "{} {} image{}",
-        paint(good, "Gallery wrote"),
-        written.len(),
-        if written.len() == 1 { "" } else { "s" }
-    );
-    let total = human(written.iter().map(|w| w.bytes).sum());
-    anstream::println!("\n{}\n", frame(&headline, &rows(written), Some(&total)));
+    if let Some(note) = skipped {
+        note.report();
+    }
 }
 
 /// A byte count the way a reader wants it: a figure and a unit, not eight digits to count through.
@@ -149,21 +214,29 @@ fn rows(written: &[Written]) -> Vec<String> {
         .collect()
 }
 
-/// Draw one shot: resolve its scene, pump frames while applying its knobs, then capture.
-fn shoot(
-    manifest: &Manifest,
+/// The painter a glow capture draws with, which is the one a scene has to register
+/// its offscreen texture on. `None` under wgpu, whose capture needs no GL context.
+pub(crate) type GlPainter = std::rc::Rc<std::cell::RefCell<egui_glow::Painter>>;
+
+/// A harness drawing `app` headlessly at `size`, on the renderer the consumer configured.
+///
+/// The renderer is set before the app is built: the harness runs `setup_eframe` first,
+/// and that is what leaves a GL context on the `CreationContext` the closure reads.
+/// The painter comes out alongside it: a scene registers its offscreen texture
+/// with the very one that draws it.
+///
+/// # Errors
+/// On a platform with no headless glow capture, when glow is what was configured.
+pub(crate) fn open<A: eframe::App + 'static>(
+    size: egui::Vec2,
     renderer: Renderer,
     setup: &impl Fn(&egui::Context),
-    shot: &Shot,
-) -> Result<Option<Written>, Diagnostic> {
-    let scene = *resolve_scene(&manifest.scenes, &shot.scene)?;
+    app: impl FnOnce(&eframe::CreationContext<'_>, Option<GlPainter>) -> A,
+) -> Result<egui_kittest::Harness<'static, A>, Diagnostic> {
     let builder = egui_kittest::Harness::builder()
-        .with_size(shot.size)
+        .with_size(size)
         // Pinned, so the PNG's pixel dimensions are the requested size rather than a scaled one.
         .with_pixels_per_point(1.0);
-    // The renderer is set before the app is built: the harness runs `setup_eframe` first, and that is
-    // what leaves a GL context on the `CreationContext` the closure below reads. The painter comes out
-    // alongside it, because a scene registers its offscreen texture with the very one that draws it.
     #[cfg(not(target_vendor = "apple"))]
     let (painter, builder) = match renderer {
         Renderer::Glow => {
@@ -182,20 +255,36 @@ fn shoot(
         }
         Renderer::Wgpu => (None, builder),
     };
-    let mut harness = builder.build_eframe(|cc| {
+    Ok(builder.build_eframe(|cc| {
         install_context(cc, setup);
-        Canvas {
-            scene,
-            knobs: Vec::new(),
-            gl: cc.gl.clone(),
-            loader: cc.get_proc_address.clone(),
-            painter,
-            target: None,
-        }
-    });
+        app(cc, painter)
+    }))
+}
 
-    // Frame one declares the knobs at their defaults; each later frame gets another chance to apply
-    // overrides, because setting one knob can be what makes the next one exist.
+/// Draw `scene` at `size`, applying the shot's knobs as the frames go by.
+///
+/// Frame one declares the knobs at their defaults; each later frame
+/// gets another chance to apply overrides, because setting one knob
+/// can be what makes the next one exist.
+///
+/// # Errors
+/// For a key that named no knob by the last frame.
+fn draw(
+    scene: SceneEntry,
+    renderer: Renderer,
+    setup: &impl Fn(&egui::Context),
+    shot: &Shot,
+    size: egui::Vec2,
+) -> Result<egui_kittest::Harness<'static, Canvas>, Diagnostic> {
+    let mut harness = open(size, renderer, setup, |cc, painter| Canvas {
+        scene,
+        knobs: Vec::new(),
+        gl: cc.gl.clone(),
+        loader: cc.get_proc_address.clone(),
+        painter,
+        target: None,
+        wanted: egui::Vec2::ZERO,
+    })?;
     harness.run_steps(1);
     let mut pending: Vec<&(String, String)> = shot.knobs.iter().collect();
     for _ in 1..shot.frames.unwrap_or(DEFAULT_FRAMES).max(2) {
@@ -204,6 +293,34 @@ fn shoot(
     }
     if !pending.is_empty() {
         return Err(unknown_knobs(&pending, &harness.state().knobs));
+    }
+    Ok(harness)
+}
+
+/// Draw one shot: resolve its scene, draw it at a size that holds it, then capture.
+fn shoot(
+    manifest: &Manifest,
+    renderer: Renderer,
+    setup: &impl Fn(&egui::Context),
+    shot: &Shot,
+) -> Result<Option<(Written, image::RgbaImage)>, Diagnostic> {
+    let scene = *resolve_scene(&manifest.scenes, &shot.scene)?;
+    let mut harness = draw(scene, renderer, setup, shot, shot.size)?;
+
+    // The canvas scrolls, so a scene that outgrew its size would be cropped to it.
+    // A shot names the size to lay out at, not how much of the result to keep,
+    // so the second drawing gets the size the first one asked for.
+    let wanted = harness.state().wanted;
+    let fitting = egui::vec2(
+        shot.size.x.max(wanted.x.ceil()),
+        shot.size.y.max(wanted.y.ceil()),
+    );
+    if fitting != shot.size {
+        // Let go of the first before asking for the second:
+        // a glow capture holds an EGL context, and two
+        // of them alive at once takes the process down.
+        drop(harness);
+        harness = draw(scene, renderer, setup, shot, fitting)?;
     }
 
     if shot.list {
@@ -222,26 +339,33 @@ fn shoot(
             .render()
             .map_err(|reason| format!("render `{}`: {reason}", scene.name))?;
         write_png(&image, out)?;
-        return Ok(Some(Written {
+        let written = Written {
             path: landed(out),
             size: (image.width(), image.height()),
             bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
-        }));
+        };
+        return Ok(Some((written, image)));
     }
     Ok(None)
 }
 
-/// The canvas as the entire app: one panel filled like the shell's, and the scene in it. No sidebar,
-/// no controls, no header — a render stays stable when chrome that isn't the component changes.
+/// The canvas as the entire app: one panel filled like
+/// the shell's, and the scene in it.
 ///
-/// The `gl` fields are `Some` only under a glow capture, and mirror what `Gallery` holds in a window.
+/// No sidebar, no controls, no header — a render stays stable
+/// when chrome that isn't the component changes.
+///
+/// The `gl` fields are `Some` only under a glow capture,
+/// and mirror what `Gallery` holds in a window.
 struct Canvas {
     scene: SceneEntry,
     knobs: Vec<Knob>,
     gl: Option<std::sync::Arc<glow::Context>>,
     loader: Option<GlLoader>,
-    painter: Option<std::rc::Rc<std::cell::RefCell<egui_glow::Painter>>>,
+    painter: Option<GlPainter>,
     target: Option<RenderTarget>,
+    /// What the last frame's canvas came to — the size a shot has to be at least as big as.
+    wanted: egui::Vec2,
 }
 
 impl eframe::App for Canvas {
@@ -254,6 +378,7 @@ impl eframe::App for Canvas {
             loader,
             painter,
             target,
+            wanted,
         } = self;
         let gl_deps = match (loader.clone(), gl.as_deref(), painter.as_ref()) {
             (Some(loader), Some(gl), Some(painter)) => Some(GlDeps {
@@ -270,15 +395,16 @@ impl eframe::App for Canvas {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(PANEL_BG))
             .show(ui, |ui| {
-                render_canvas(ui, scene, knobs, gl_deps);
+                *wanted = render_canvas(ui, scene, knobs, gl_deps);
             });
     }
 }
 
-/// Apply each pending override whose knob the scene has now declared, and leave the rest pending.
+/// Apply each pending override whose knob the scene has now declared,
+/// and leave the rest pending.
 ///
-/// A key matching nothing yet is not an error — it may name a knob
-/// that appears only once another is set.
+/// A key matching nothing yet is not an error
+/// — it may name a knob that appears only once another is set.
 ///
 /// A key matching a knob that can't take the value fails straight away,
 /// as does one matching several knobs, which no later frame can disambiguate.
@@ -540,6 +666,8 @@ struct Recipe {
     out: Option<Utf8PathBuf>,
     /// Canvas size for any shot that doesn't state its own.
     size: Option<String>,
+    /// Gather every shot onto one image here, alongside their own PNGs. Off unless asked for.
+    sheet: Option<Utf8PathBuf>,
     #[serde(default, rename = "shot")]
     shots: Vec<RecipeShot>,
 }
@@ -563,10 +691,7 @@ struct RecipeShot {
 /// If the file can't be read or parsed, declares no shots,
 /// gives two shots the same name, leaves a shot with no size,
 /// or has nowhere to write.
-pub(crate) fn read_recipe(
-    path: &Utf8Path,
-    out: Option<&Utf8Path>,
-) -> Result<Vec<Shot>, Diagnostic> {
+pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Capture, Diagnostic> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read `{path}`: {e}"))?;
     let recipe: Recipe = toml::from_str(&text).map_err(|e| format!("parse `{path}`: {e}"))?;
     if recipe.shots.is_empty() {
@@ -585,7 +710,7 @@ pub(crate) fn read_recipe(
             ));
         }
     };
-    recipe
+    let shots = recipe
         .shots
         .iter()
         .enumerate()
@@ -620,7 +745,12 @@ pub(crate) fn read_recipe(
             })
         })
         .collect::<Result<Vec<_>, String>>()
-        .map_err(Diagnostic::from)
+        .map_err(Diagnostic::from)?;
+    Ok(Capture {
+        shots,
+        // Beside the shots it gathers, wherever those landed.
+        sheet: recipe.sheet.map(|name| base.join(name)),
+    })
 }
 
 /// A knob value as TOML holds it, flattened to the text the per-kind
@@ -649,19 +779,20 @@ fn scalar(key: &str, value: &toml::Value) -> Result<String, String> {
 /// so the first edit is the state you were after — nothing has to be looked up.
 /// Labels arrive already quoted the way TOML needs them.
 fn capture_template(scene: &SceneEntry, knobs: &[Knob], size: egui::Vec2) -> String {
-    let mut out = format!(
-        "# Generated by `--init-capture`: every knob at the value its scene declared.\n\
-         # Renders what `--render` alone would — change a value and it renders something else.\n\
-         out = \"renders\"\n\
-         size = \"{}x{}\"\n\n\
-         [[shot]]\n\
-         name = {:?}\n\
-         scene = {:?}\n",
-        size.x,
-        size.y,
-        slug(scene.name),
-        scene_key(scene),
-    );
+    let (width, height) = (size.x, size.y);
+    let (name, key) = (slug(scene.name), scene_key(scene));
+    let mut out = formatdoc! {r#"
+        # Generated by `--init-capture`: every knob at the value its scene declared.
+        # Renders what `--render` alone would — change a value and it renders something else.
+        out = "renders"
+        size = "{width}x{height}"
+        # Uncomment once there is a second shot: gathers them onto one captioned image.
+        # sheet = "sheet.png"
+
+        [[shot]]
+        name = {name:?}
+        scene = {key:?}
+    "#};
     // A `[shot.knobs]` table rather than an inline one,
     // so a long list stays one knob per line and any single knob can be commented out.
     // Groups are headings carrying no value, so they don't count towards needing the table at all.
@@ -1002,6 +1133,8 @@ mod tests {
                 # Renders what `--render` alone would — change a value and it renders something else.
                 out = "renders"
                 size = "480x480"
+                # Uncomment once there is a second shot: gathers them onto one captioned image.
+                # sheet = "sheet.png"
 
                 [[shot]]
                 name = "orbit"
@@ -1063,7 +1196,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join("capture.toml");
         std::fs::write(&path, &generated).expect("write recipe");
-        let shots = read_recipe(&path, None).expect("the generated recipe parses");
+        let shots = read_recipe(&path, None)
+            .expect("the generated recipe parses")
+            .shots;
 
         // Applied to knobs sitting at other values,
         // every one comes back to where it started.
@@ -1196,10 +1331,15 @@ mod tests {
         }
     }
 
-    /// The one test that asserts what a capture *looks like*; the rest check that a value arrived.
+    /// The one test that asserts what a capture *looks like*;
+    /// the rest check that a value arrived.
     ///
-    /// Through [`read_recipe`] rather than hand-built [`Shot`]s, so it covers what someone writes.
-    /// Comparable between machines only because the tests pin a software rasteriser (`nix/test.nix`).
+    /// Through [`read_recipe`] rather than hand-built [`Shot`]s,
+    /// so it covers what someone writes.
+    ///
+    /// Comparable between machines only because the tests pin
+    /// a software rasteriser.
+    ///
     /// `UPDATE_SNAPSHOTS=1` takes an intended change.
     #[cfg(not(target_vendor = "apple"))]
     #[test]
@@ -1208,20 +1348,24 @@ mod tests {
             .expect("a UTF-8 temp dir")
             .join("gallery-reference");
         let recipe = Utf8Path::new("tests/reference.toml");
-        let shots = read_recipe(recipe, Some(&out)).expect("the reference recipe");
+        let capture = read_recipe(recipe, Some(&out)).expect("the reference recipe");
         render(
             &reference_scenes(),
             Renderer::Glow,
             &|_: &egui::Context| {},
-            &shots,
+            &capture,
         )
         .expect("every reference shot renders");
 
         // Collected, not asserted one at a time: a layout change moves several images, and seeing all
         // of them beats fixing them one run apiece.
         let mut results = egui_kittest::SnapshotResults::new();
-        for shot in &shots {
-            let path = shot.out.as_ref().expect("a recipe shot writes a file");
+        for path in capture
+            .shots
+            .iter()
+            .filter_map(|shot| shot.out.as_ref())
+            .chain(capture.sheet.as_ref())
+        {
             let name = path.file_stem().expect("a PNG filename");
             let png = std::fs::read(path).expect("the capture was written");
             let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
@@ -1230,6 +1374,50 @@ mod tests {
             results.add(egui_kittest::try_image_snapshot(&image, name));
         }
         results.unwrap();
+    }
+
+    /// A canvas scrolls, so a scene bigger than the size asked for used to come back cropped to it —
+    /// losing, at the least, the margin that shows where the stage ends.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_scene_too_big_for_the_size_asked_for_is_captured_whole() {
+        let asked = egui::vec2(120.0, 80.0);
+        let out = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-overflow")
+            .join("stage-forms.png");
+        let capture = Capture {
+            shots: vec![Shot {
+                scene: "stage-forms".to_owned(),
+                out: Some(out.clone()),
+                size: asked,
+                knobs: Vec::new(),
+                frames: None,
+                list: false,
+                template: false,
+            }],
+            sheet: None,
+        };
+        render(
+            &reference_scenes(),
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &capture,
+        )
+        .expect("the shot renders");
+
+        let png = std::fs::read(&out).expect("the capture was written");
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("a PNG")
+            .to_rgba8();
+        assert!(
+            image.width() > asked.x as u32 && image.height() > asked.y as u32,
+            "{}×{} holds the whole scene, not the {}×{} asked for",
+            image.width(),
+            image.height(),
+            asked.x,
+            asked.y
+        );
     }
 
     #[test]
@@ -1244,7 +1432,7 @@ mod tests {
     /// and read it back. Its own, because a recipe's `out`
     /// resolves against the file, so the directory is part
     /// of what's under test.
-    fn recipe(name: &str, text: &str, out: Option<&str>) -> Result<Vec<Shot>, Diagnostic> {
+    fn recipe(name: &str, text: &str, out: Option<&str>) -> Result<Capture, Diagnostic> {
         let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
             .expect("a UTF-8 temp dir")
             .join(format!("gallery-recipe-{name}"));
@@ -1274,7 +1462,8 @@ mod tests {
             "#,
             None,
         )
-        .expect("valid recipe");
+        .expect("valid recipe")
+        .shots;
 
         assert_eq!(shots.len(), 2);
         assert!(
@@ -1307,7 +1496,8 @@ mod tests {
             "#,
             Some("/tmp/elsewhere"),
         )
-        .expect("valid recipe");
+        .expect("valid recipe")
+        .shots;
         assert_eq!(
             shots[0].out.as_deref(),
             Some(Utf8Path::new("/tmp/elsewhere/one.png"))

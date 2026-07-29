@@ -135,6 +135,10 @@ just render Button /tmp/button.png 480x320    # ...or at a size you pick
 The scene is a whole key (`module_path::name`) or a case-insensitive regex over the keys, and must match exactly one.
 The image is the canvas alone — no sidebar, controls or header — so it stays put when unrelated chrome moves.
 
+A size is where the scene lays itself out, not a crop of the result. A scene that comes out bigger than the size asked
+for — a wide table, a tall list — is captured whole, at the size it turned out to need, rather than cut off at the edge
+the way the window would scroll it.
+
 That uses the scene's default knobs, rarely the state worth seeing. Other states go in a capture recipe;
 `just capture-init <scene>` writes one with the knobs already filled in, and `just capture` renders every shot in it:
 
@@ -165,6 +169,19 @@ color   "accent" = #4caf50ff
 
 A pattern or label matching none or several, or a value its kind won't take, stops the run: a clean render of the wrong
 state is worse than none.
+
+A recipe with several shots can also gather them onto one image, so a change across a whole set is one thing to look at
+rather than a directory to click through:
+
+```toml
+sheet = "sheet.png" # beside the shots, wherever `out` put them
+```
+
+The shots still write their own PNGs; the sheet is an extra, and each capture is captioned with the shot that made it.
+The packing is tight but not at any cost: a tall column and a long strip hold the same panels over much the same area,
+and scaled to fit a screen either one leaves every panel too small to read. So a sheet is scored on its area *and* on
+how near it lands to a screen's proportions. A run that produced one capture writes no sheet and says so, since a sheet
+of one image is the image.
 
 Capture follows the renderer the instance configures. Under `Renderer::Glow` it paints through an OpenGL context taken
 off an EGL device — no window, no display server — so a scene drawing with `ctx.offscreen(...)` captures its real

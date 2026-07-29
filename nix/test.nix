@@ -30,6 +30,8 @@ pkgs.writeShellApplication {
     GALLERY_CAPTURE_RENDERER = "llvmpipe";
   };
   text = ''
-    exec cargo llvm-cov --no-report nextest "$@"
+    # `--workspace`: the root manifest is both a package and the workspace root, so cargo on its own
+    # runs `gallery`'s tests alone and never reaches `gallery-build` or `gallery-macros`.
+    exec cargo llvm-cov --no-report nextest --workspace "$@"
   '';
 }
