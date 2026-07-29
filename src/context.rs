@@ -216,15 +216,37 @@ impl<'a> SceneCtx<'a> {
                 // Clamped: a stage squeezed thinner than its own padding would otherwise
                 // ask for a negative box, which egui rejects outright.
                 let inside = (available - padding.sum()).max(egui::Vec2::ZERO);
-                let scrolled = egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Frame::new()
-                        .inner_margin(padding)
-                        .show(ui, |ui| sized(ui, inside))
-                        .inner
-                });
-                // The badge reports the stage itself, not the run of content it scrolls over
-                // — a viewport of 200 rows is 200 rows tall, which says nothing about the stage.
-                scrolled.inner_rect
+                let scrolling = |ui: &mut egui::Ui| {
+                    egui::ScrollArea::vertical()
+                        .show(ui, |ui| {
+                            egui::Frame::new()
+                                .inner_margin(padding)
+                                .show(ui, |ui| sized(ui, inside))
+                                .inner
+                        })
+                        // The badge reports the stage itself, not the run of content it scrolls
+                        // over — a viewport of 200 rows is 200 rows tall, which says nothing.
+                        .inner_rect
+                };
+                match size {
+                    // A fixed stage claims its box first and scrolls inside it. A scroll area sizes
+                    // itself to what is available, so left to ask for its own room it takes only
+                    // what the canvas had left — reporting that as the stage, and leaving nothing
+                    // underneath for the checkerboard. Claiming it first also lets the box outgrow
+                    // the canvas, which is what tells a capture to come back bigger.
+                    Stage::Fixed(wanted) => {
+                        let boxed = wanted + padding.sum();
+                        let claimed = ui
+                            .allocate_ui(boxed, |ui| {
+                                ui.set_min_size(boxed);
+                                scrolling(ui);
+                            })
+                            .response
+                            .rect;
+                        claimed.shrink2(padding.sum() / 2.0)
+                    }
+                    Stage::Fit | Stage::Fill => scrolling(ui),
+                }
             });
 
         if open {
@@ -631,6 +653,40 @@ mod tests {
         // Stepped rather than run to quiescence: scroll area fades its bar in
         // over time and so keeps asking for frames, which `run` treats as a runaway UI.
         harness.run_steps(2);
+    }
+
+    /// A fixed stage states its box, and `.scrollable()` says
+    /// the content may run past it — not that the box gives way.
+    ///
+    /// Taking the whole canvas instead reports the canvas as the stage's size,
+    /// and leaves no room beneath it for the checkerboard —
+    /// which is how a capture loses its bottom edge.
+    #[test]
+    fn a_fixed_scrolling_stage_keeps_to_its_own_box_rather_than_the_canvas() {
+        let took = std::cell::Cell::new(0.0);
+        let room = std::cell::Cell::new(0.0);
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+            room.set(ctx.ui.available_height());
+            let before = ctx.ui.min_rect().height();
+            ctx.stage(Stage::Fixed(egui::vec2(120.0, 80.0)).scrollable(), |ui| {
+                for row in 0..200 {
+                    ui.label(format!("Row {row}"));
+                }
+            });
+            took.set(ctx.ui.min_rect().height() - before);
+        });
+        harness.run_steps(2);
+
+        // The box and its padding, plus the badge above it — nowhere near the canvas it sits on.
+        let box_and_padding = 80.0 + 2.0 * f32::from(PADDING);
+        assert!(
+            took.get() < room.get() && took.get() < box_and_padding * 2.0,
+            "a 120×80 stage took {} of {} available",
+            took.get(),
+            room.get()
+        );
     }
 
     /// The canvas a scene draws on is itself a scroll area, so a scrolling stage that grew to its

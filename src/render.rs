@@ -1288,10 +1288,21 @@ mod tests {
         crate::stage!(ctx, 64, |ui: &mut egui::Ui| {
             ui.label("64");
         });
+        // Content past its box, so the reference shows a fixed scrolling stage keeping to the size
+        // it declared. The checkerboard closing underneath is the whole point of the picture.
+        ctx.ui.label("scrolling");
+        ctx.stage(
+            crate::Stage::Fixed(egui::vec2(150.0, 48.0)).scrollable(),
+            |ui: &mut egui::Ui| {
+                for row in 0..12 {
+                    ui.label(format!("row {row}"));
+                }
+            },
+        );
     }
 
-    /// Glyphs the default faces lack: without the bundled Noto fallbacks these are tofu, which no
-    /// structural assertion would notice and no reader of the reference could miss.
+    /// Glyphs the default faces lack: without the bundled Noto fallbacks these are tofu,
+    /// which no structural assertion would notice and no reader of the reference could miss.
     fn glyphs_past_the_default_faces(ctx: &mut crate::SceneCtx<'_>) {
         ctx.ui.heading("→ ∑ ≈ ± °");
         ctx.ui.label("arrows ← ↑ ↓ →");
@@ -1418,6 +1429,74 @@ mod tests {
             asked.x,
             asked.y
         );
+    }
+
+    /// The consumer's layout: a fixed scrolling stage holding more rows than it can show,
+    /// on a canvas picked to sit just over it.
+    ///
+    /// Their captures came back with the checkerboard running off the bottom edge
+    /// — the stage had taken the canvas, so there was no canvas left under it.
+    ///
+    /// The bottom row of the picture is the thing that says whether it still does.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_capture_ends_in_canvas_under_a_fixed_scrolling_stage() {
+        fn scrolling_box(ctx: &mut crate::SceneCtx<'_>) {
+            ctx.stage(
+                crate::Stage::Fixed(egui::vec2(900.0, 460.0)).scrollable(),
+                |ui: &mut egui::Ui| {
+                    for row in 0..40 {
+                        ui.label(format!("row {row}"));
+                    }
+                },
+            );
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: scrolling_box,
+                name: "scrolling-box",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let out = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-margin")
+            .join("scrolling-box.png");
+        let capture = Capture {
+            shots: vec![Shot {
+                scene: "scrolling-box".to_owned(),
+                out: Some(out.clone()),
+                // The consumer's own numbers: a canvas picked
+                // to sit just over a 900×460 stage.
+                size: egui::vec2(964.0, 520.0),
+                knobs: Vec::new(),
+                frames: None,
+                list: false,
+                template: false,
+            }],
+            sheet: None,
+        };
+        render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+            .expect("the shot renders");
+
+        let png = std::fs::read(&out).expect("the capture was written");
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("a PNG")
+            .to_rgba8();
+        let bottom = image.height() - 1;
+        for x in 0..image.width() {
+            assert_eq!(
+                image.get_pixel(x, bottom).0,
+                PANEL_BG.to_array(),
+                "({x}, {bottom}) of {}×{} is canvas under the stage, not the stage itself",
+                image.width(),
+                image.height()
+            );
+        }
     }
 
     #[test]
