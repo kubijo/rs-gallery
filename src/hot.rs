@@ -1,6 +1,6 @@
 //! Scenes read from a dylib the launcher builds, and — under `--hot` — rebuilds and swaps live.
 
-use std::time::Duration;
+use std::{mem::ManuallyDrop, time::Duration};
 
 use hot_lib_reloader::LibReloader;
 
@@ -11,7 +11,14 @@ use crate::{Manifest, SceneSource};
 /// the running executable, so it follows any `CARGO_TARGET_DIR`. Both sides must share one
 /// gallery/egui version — a single workspace lock guarantees it.
 pub struct HotDylib {
-    reloader: LibReloader,
+    /// Never unloaded, hence `ManuallyDrop`.
+    ///
+    /// A widget's `ui.data_mut(..)` state is a `Box<dyn Any>` whose drop glue lives in the library
+    /// that built it. egui's `Memory` holds those boxes until its `Context` drops, and eframe drops
+    /// the owning app first — so unloading here left those destructors jumping into unmapped memory.
+    /// A `SIGSEGV` in `drop_glue` on window close, for any scene that keeps state between frames.
+    /// The process is exiting, so keeping the mapping costs nothing.
+    reloader: ManuallyDrop<LibReloader>,
     watching: bool,
 }
 
@@ -31,7 +38,10 @@ impl HotDylib {
             .ok_or("current executable has no parent directory")?;
         let dir = camino::Utf8Path::from_path(dir).ok_or("executable path is not UTF-8")?;
         let reloader = LibReloader::new(dir, lib_name, Some(Duration::from_millis(200)), None)?;
-        Ok(Self { reloader, watching })
+        Ok(Self {
+            reloader: ManuallyDrop::new(reloader),
+            watching,
+        })
     }
 }
 
