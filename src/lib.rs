@@ -562,6 +562,7 @@ pub(crate) fn render_canvas(
     gl_deps: Option<GlDeps<'_>>,
 ) -> egui::Vec2 {
     egui::ScrollArea::both()
+        .auto_shrink(false)
         .show(ui, |ui| {
             let declared = egui::Frame::new()
                 .inner_margin(egui::Margin::same(16))
