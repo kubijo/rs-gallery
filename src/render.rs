@@ -39,6 +39,8 @@ pub(crate) struct Shot {
     /// Knob key (exact label, else a case-insensitive regex) to the value it should take.
     pub(crate) knobs: Vec<(String, String)>,
     pub(crate) frames: Option<u32>,
+    /// Crop the PNG to what the canvas drew.
+    pub(crate) trim: bool,
     /// Print the scene's knobs, their kinds and their values.
     pub(crate) list: bool,
     /// Print a capture recipe for this scene, its knobs written out at the values found.
@@ -335,9 +337,11 @@ fn shoot(
         );
     }
     if let Some(out) = &shot.out {
+        let drawn = harness.state().wanted;
         let image = harness
             .render()
             .map_err(|reason| format!("render `{}`: {reason}", scene.name))?;
+        let image = if shot.trim { trim(image, drawn) } else { image };
         write_png(&image, out)?;
         let written = Written {
             path: landed(out),
@@ -347,6 +351,24 @@ fn shoot(
         return Ok(Some((written, image)));
     }
     Ok(None)
+}
+
+/// Crop the background a roomy `size` leaves around the canvas.
+///
+/// The size stays as asked — `Fill` stages and any breakpoint lay out against it —
+/// so only the image is cut. [`open`] pins the scale, so a point is a pixel.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a canvas is a few thousand non-negative pixels at most"
+)]
+fn trim(image: image::RgbaImage, drawn: egui::Vec2) -> image::RgbaImage {
+    let width = (drawn.x.ceil() as u32).clamp(1, image.width());
+    let height = (drawn.y.ceil() as u32).clamp(1, image.height());
+    if (width, height) == image.dimensions() {
+        return image;
+    }
+    image::imageops::crop_imm(&image, 0, 0, width, height).to_image()
 }
 
 /// The canvas as the entire app: one panel filled like
@@ -668,6 +690,8 @@ struct Recipe {
     size: Option<String>,
     /// Gather every shot onto one image here, alongside their own PNGs. Off unless asked for.
     sheet: Option<Utf8PathBuf>,
+    /// Crop each PNG to what its canvas drew. On by default, and a shot can override it.
+    trim: Option<bool>,
     #[serde(default, rename = "shot")]
     shots: Vec<RecipeShot>,
 }
@@ -680,6 +704,7 @@ struct RecipeShot {
     scene: String,
     size: Option<String>,
     frames: Option<u32>,
+    trim: Option<bool>,
     #[serde(default)]
     knobs: BTreeMap<String, toml::Value>,
 }
@@ -740,6 +765,7 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                     .map(|(key, value)| Ok((key.clone(), scalar(key, value)?)))
                     .collect::<Result<_, String>>()?,
                 frames: shot.frames,
+                trim: shot.trim.or(recipe.trim).unwrap_or(true),
                 list: false,
                 template: false,
             })
@@ -1404,6 +1430,7 @@ mod tests {
                 size: asked,
                 knobs: Vec::new(),
                 frames: None,
+                trim: true,
                 list: false,
                 template: false,
             }],
@@ -1428,6 +1455,65 @@ mod tests {
             image.height(),
             asked.x,
             asked.y
+        );
+    }
+
+    /// A roomy `size` keeps a scrolling canvas from cutting the scene off,
+    /// so the slack it leaves around the drawing is not worth writing out.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_shot_is_cropped_to_what_it_drew_unless_trim_is_off() {
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-trim");
+        let shot = |name: &str, trim: bool| Shot {
+            scene: "documented-stage".to_owned(),
+            out: Some(dir.join(format!("{name}.png"))),
+            size: egui::vec2(900.0, 700.0),
+            knobs: Vec::new(),
+            frames: None,
+            trim,
+            list: false,
+            template: false,
+        };
+        let capture = Capture {
+            shots: vec![shot("cropped", true), shot("whole", false)],
+            sheet: None,
+        };
+        render(
+            &reference_scenes(),
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &capture,
+        )
+        .expect("both shots render");
+
+        let read = |name: &str| {
+            let png =
+                std::fs::read(dir.join(format!("{name}.png"))).expect("the capture was written");
+            image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .expect("a PNG")
+                .to_rgba8()
+        };
+        let (cropped, whole) = (read("cropped"), read("whole"));
+
+        assert_eq!(
+            (whole.width(), whole.height()),
+            (900, 700),
+            "trim off writes the size asked for"
+        );
+        assert!(
+            cropped.width() < whole.width() && cropped.height() < whole.height(),
+            "{}×{} should sit inside the {}×{} it laid out in",
+            cropped.width(),
+            cropped.height(),
+            whole.width(),
+            whole.height()
+        );
+        assert_eq!(
+            cropped.get_pixel(0, 0),
+            whole.get_pixel(0, 0),
+            "the crop keeps the origin, so the drawing itself is untouched"
         );
     }
 
@@ -1475,6 +1561,7 @@ mod tests {
                 size: egui::vec2(964.0, 520.0),
                 knobs: Vec::new(),
                 frames: None,
+                trim: true,
                 list: false,
                 template: false,
             }],
@@ -1555,11 +1642,43 @@ mod tests {
         );
         assert_eq!(shots[0].size, egui::vec2(1280.0, 720.0), "root default");
         assert_eq!(shots[1].size, egui::vec2(800.0, 600.0), "own size wins");
+        assert!(
+            shots[0].trim,
+            "a recipe that never mentions trim still gets it"
+        );
         assert_eq!(
             shots[0].knobs,
             knobs(&[("body style", "SUV"), ("night", "true"), ("speed", "1.5")]),
             "TOML scalars flatten to the text the per-kind parser reads"
         );
+    }
+
+    /// `trim` follows `size`: a root default that a shot can override.
+    #[test]
+    fn trim_is_on_unless_the_recipe_or_the_shot_turns_it_off() {
+        let shots = recipe(
+            "trim",
+            r#"
+            out = "renders"
+            size = "1280x720"
+            trim = false
+
+            [[shot]]
+            name = "whole"
+            scene = "vehicle"
+
+            [[shot]]
+            name = "cropped"
+            scene = "map"
+            trim = true
+            "#,
+            None,
+        )
+        .expect("valid recipe")
+        .shots;
+
+        assert!(!shots[0].trim, "the recipe's own default");
+        assert!(shots[1].trim, "the shot's own wins");
     }
 
     #[test]

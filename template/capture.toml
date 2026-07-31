@@ -8,6 +8,7 @@
 out = "renders"
 # The canvas each shot renders at, unless it says otherwise.
 size = "640x360"
+# Each PNG is cropped to what its scene drew; `trim = false` here or on a shot keeps the whole canvas.
 # Gather every shot onto one captioned image too. Drop the line to write only the shots themselves.
 sheet = "sheet.png"
 
@@ -30,6 +31,11 @@ scene = "knobs::group"
 size = "480x240"
 # Numbers and booleans are written as themselves; `x` and `y` are two knobs, matched exactly.
 knobs = { x = 0.6, y = -0.4, tint = "#7FD4A0", bold = true }
+
+# Far smaller than the canvas it lays out in, so trim takes most of the PNG.
+[[shot]]
+name = "badge"
+scene = "badge"
 
 [[shot]]
 name = "orbit-mid-spin"

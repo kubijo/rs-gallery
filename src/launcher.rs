@@ -155,6 +155,7 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
                 .unwrap_or_else(|reason| fail(&reason.into())),
             knobs: Vec::new(),
             frames: cli.frames,
+            trim: !cli.no_trim,
             list: cli.list_knobs,
             template: cli.init_capture,
         }],
@@ -200,6 +201,10 @@ struct Cli {
     #[arg(long, value_name = "WxH")]
     size: Option<String>,
 
+    /// Keep the whole canvas, rather than cropping the PNG to what the scene drew
+    #[arg(long)]
+    no_trim: bool,
+
     /// Print the scene's knobs, their kinds and their values, and exit
     #[arg(long, requires = "scene")]
     list_knobs: bool,
@@ -209,7 +214,7 @@ struct Cli {
     init_capture: bool,
 
     /// Render every shot in a capture recipe (TOML, relative to the config) and exit
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["render", "scene", "list_knobs", "init_capture", "size"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["render", "scene", "list_knobs", "init_capture", "size", "no_trim"])]
     capture: Option<Utf8PathBuf>,
 
     /// Where --capture writes, overriding the recipe's own `out`
