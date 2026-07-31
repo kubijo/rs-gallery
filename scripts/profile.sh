@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
-# Records a CPU profile of one scene into reports/<REPORT>/, by scaffolding the template into a
-# git-ignored demo-profile/, building it with symbols, and running it under samply.
+# Records a CPU profile of one scene into .tmp/reports/<REPORT>/,
+# by scaffolding the template into a git-ignored .tmp/demo-profile/,
+# building it with symbols, and running it under samply.
 #
 # The fixed frame count is what makes two runs comparable — profile before a change and after, into
 # differently named reports, and the sample counts mean the same thing. It is also the only way to get
@@ -14,8 +15,8 @@ report="${2:-00-latest}"
 frames="${3:-600}"
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-demo="$repo/demo-profile"
-out="$repo/reports/$report"
+demo="$repo/.tmp/demo-profile"
+out="$repo/.tmp/reports/$report"
 
 for tool in cargo-generate samply uv addr2line; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -34,14 +35,14 @@ fi
 
 # `00-latest` is the scratch name and gets replaced; a named report is something you meant to keep.
 if [ -d "$out" ] && [ "$report" != "00-latest" ]; then
-    echo "profile: reports/$report already exists — name it differently or remove it." >&2
+    echo "profile: .tmp/reports/$report already exists — name it differently or remove it." >&2
     exit 1
 fi
 
 rm -rf "$demo" "$out"
 mkdir -p "$out"
 
-cargo generate --path "$repo/template" --destination "$repo" --name demo-profile --no-workspace \
+cargo generate --path "$repo/template" --destination "$repo/.tmp" --name demo-profile --no-workspace \
     --vcs none --silent --define gallery_git=LOCAL --define scene_globs='*.scene.rs' \
     --define title='gallery profile'
 
@@ -59,11 +60,12 @@ inherits = "release"
 debug = true
 TOML
 
-# Its own target dir, so a profiling build never evicts the dev cache, nested under whatever the
-# environment already asked for — a globally exported `CARGO_TARGET_DIR` points off this disk on
-# purpose. A `[build] target-dir` in `~/.cargo/config.toml` is invisible to the shell and gets
-# overridden; reading it would take `cargo metadata --format-version 1 | jq -r .target_directory`.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/target}/profile"
+# Its own target dir, so a profiling build never evicts the dev cache.
+# It nests under whatever the environment asked for: an exported `CARGO_TARGET_DIR`
+# points off this disk on purpose, and wins over the repo's `[build] target-dir`.
+# The fallback repeats that path, since reading it takes
+# `cargo metadata --format-version 1 | jq -r .target_directory`.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/.tmp/target}/profile"
 
 # The launcher rebuilds the scenes dylib at startup, under its own profile and with globs it resolves
 # against the config dir. Pre-building the same profile with the same globs makes that a cache hit,
@@ -75,7 +77,7 @@ export GALLERY_SCENE_GLOBS="$demo_abs/*.scene.rs"
 args=(--frames "$frames")
 [ -n "$scene" ] && args+=(--scene "$scene")
 
-echo "profile: recording $frames frames${scene:+ of $scene} → reports/$report"
+echo "profile: recording $frames frames${scene:+ of $scene} → .tmp/reports/$report"
 samply record --save-only -o "$out/profile.json.gz" -- \
     "$CARGO_TARGET_DIR/profiling/gallery" "${args[@]}"
 

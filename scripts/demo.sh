@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # `just demo-<variant>` runs the consumer init command against THIS checkout: scaffold template/ straight
-# into a git-ignored demo-<variant>/ with --no-workspace (so it never touches this repo's own workspace),
+# into a git-ignored .tmp/demo-<variant>/ with --no-workspace (so it never touches this repo's own workspace),
 # repoint the gallery deps at the working tree, and run it. Any trailing arguments go to the gallery
-# binary (e.g. --hot). Re-run (or delete the dir) to reset; the build cache lives in target/demo-<variant>
+# binary (e.g. --hot). Re-run (or delete the dir) to reset; the build cache lives in .tmp/target/demo-<variant>
 # so the per-run wipe stays cheap.
 #
 # Two variants prove the shell is renderer-independent:
@@ -22,7 +22,7 @@ wgpu | femtovg) shift ;;
 esac
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-demo="$repo/demo-$variant"
+demo="$repo/.tmp/demo-$variant"
 
 if ! command -v cargo-generate >/dev/null 2>&1; then
     # Single quotes are deliberate: the backticks are literal hint punctuation, not a command
@@ -36,7 +36,8 @@ fi
 # local template. --no-workspace is what stops it from splicing the dir into this repo's workspace; the
 # template's own [workspace] then keeps the instance standalone.
 rm -rf "$demo"
-cargo generate --path "$repo/template" --destination "$repo" --name "demo-$variant" --no-workspace \
+mkdir -p "$repo/.tmp"
+cargo generate --path "$repo/template" --destination "$repo/.tmp" --name "demo-$variant" --no-workspace \
     --vcs none --silent --define gallery_git=LOCAL --define scene_globs='*.scene.rs' \
     --define title="gallery demo ($variant)"
 
@@ -64,7 +65,7 @@ if [ "$variant" = femtovg ]; then
         | grep -oE '\bglow v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | sed 's/^/  /' >&2
 fi
 
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/target}/demo-$variant"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/.tmp/target}/demo-$variant"
 
 # Built before it is run so the compile can go quiet without silencing the run itself:
 # a headless `--render` prints the paths it wrote, which a screen of `Compiling` lines buries.

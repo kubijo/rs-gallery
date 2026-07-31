@@ -387,4 +387,114 @@ mod tests {
         assert!(resolved.contains("a/b"));
         assert!(resolved.ends_with("*.scene.rs"));
     }
+
+    /// Through clap rather than a hand-built `Cli`, so the flags themselves are part of what is tested.
+    fn cli(args: &[&str]) -> Cli {
+        Cli::parse_from(args)
+    }
+
+    fn one_shot(args: &[&str]) -> render::Shot {
+        let capture = shots(&cli(args), Utf8Path::new("gallery.toml")).expect("a headless run");
+        assert!(capture.sheet.is_none(), "one shot has nothing to gather");
+        assert_eq!(capture.shots.len(), 1, "one scene is one shot");
+        capture.shots.into_iter().next().expect("the one shot")
+    }
+
+    #[test]
+    fn a_run_is_headless_only_when_it_asks_for_something_written() {
+        for (args, headless_run) in [
+            (&["gallery"][..], false),
+            (
+                &["gallery", "--scene", "orbit", "--render", "o.png"][..],
+                true,
+            ),
+            (&["gallery", "--scene", "orbit", "--list-knobs"][..], true),
+            (&["gallery", "--scene", "orbit", "--init-capture"][..], true),
+            (&["gallery", "--capture", "capture.toml"][..], true),
+        ] {
+            assert_eq!(headless(&cli(args)), headless_run, "{args:?}");
+        }
+        assert!(
+            shots(&cli(&["gallery"]), Utf8Path::new("gallery.toml")).is_none(),
+            "a windowed run asks for no shots"
+        );
+    }
+
+    #[test]
+    fn one_scene_on_the_command_line_becomes_one_shot_at_the_defaults() {
+        let shot = one_shot(&["gallery", "--scene", "orbit", "--render", "orbit.png"]);
+        assert_eq!(shot.scene, "orbit");
+        assert_eq!(shot.out.as_deref(), Some(Utf8Path::new("orbit.png")));
+        assert_eq!(shot.size, render::DEFAULT_SIZE);
+        assert!(shot.trim, "a command-line render crops like a recipe does");
+        assert!(!shot.list && !shot.template, "a render only renders");
+    }
+
+    /// A recipe-less run has nowhere to write `trim = false`, so the flag is the only way to keep the canvas.
+    #[test]
+    fn no_trim_keeps_the_whole_canvas_that_a_render_would_otherwise_crop() {
+        let shot = one_shot(&[
+            "gallery",
+            "--scene",
+            "orbit",
+            "--render",
+            "orbit.png",
+            "--no-trim",
+            "--size",
+            "800x600",
+        ]);
+        assert!(!shot.trim, "--no-trim leaves the size asked for");
+        assert_eq!(
+            shot.size,
+            egui::vec2(800.0, 600.0),
+            "--size replaces the default"
+        );
+    }
+
+    #[test]
+    fn watch_dirs_are_the_crate_and_each_globs_base_deduped() {
+        let globs = [
+            "/work/app/*.scene.rs".to_owned(),
+            "/work/parts/src/**/*.scene.rs".to_owned(),
+            // Same base as the one above, reached without a wildcard.
+            "/work/parts/src/one.scene.rs".to_owned(),
+            // Relative, so there is no directory in it to watch.
+            "*.scene.rs".to_owned(),
+        ];
+        assert_eq!(
+            watch_dirs("/work/app", &globs),
+            ["/work/app", "/work/parts/src"],
+            "the crate dir and each glob's base, sorted and deduped"
+        );
+    }
+
+    #[test]
+    fn a_cargo_command_runs_in_the_crate_and_carries_the_globs_in_its_environment() {
+        let globs = ["/a/*.scene.rs".to_owned(), "/b/*.scene.rs".to_owned()];
+        let command = cargo("/work/app", &globs);
+
+        assert_eq!(command.get_program(), "cargo");
+        assert_eq!(
+            command.get_current_dir(),
+            Some(std::path::Path::new("/work/app")),
+            "cargo runs in the scenes crate, not wherever the shell was"
+        );
+        let carried = command
+            .get_envs()
+            .find(|(key, _)| key.to_str() == Some("GALLERY_SCENE_GLOBS"))
+            .and_then(|(_, value)| value)
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("the globs reach `build.rs` through the environment");
+        assert_eq!(
+            carried, "/a/*.scene.rs\n/b/*.scene.rs",
+            "newline-separated, the way `discover_from_env` splits them"
+        );
+    }
+
+    #[test]
+    fn list_knobs_asks_for_a_listing_rather_than_a_png() {
+        let shot = one_shot(&["gallery", "--scene", "orbit", "--list-knobs"]);
+        assert!(shot.list, "the listing is what was asked for");
+        assert!(shot.out.is_none(), "and it writes no image");
+    }
 }

@@ -1,0 +1,3 @@
+[build]
+# Build output belongs with the other scratch files.
+target-dir = ".tmp/target"

@@ -2,11 +2,8 @@
 result**
 target/
 
-# Scaffolded local demo instances
-/demo*/
-
-# Recorded CPU profiles (`just profile`)
-/reports/
+# Everything generated: builds, coverage, demo scaffolds, profiles, tool caches
+.tmp/
 
 # uv's resolved environment and python caches
 *.pyc

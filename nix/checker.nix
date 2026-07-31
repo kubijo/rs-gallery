@@ -46,6 +46,9 @@ pkgs.writeShellApplication {
       exit 1
     fi
 
+    # Keeps ruff's cache out of the repo root, with the rest of the scratch.
+    export RUFF_CACHE_DIR="$tree_root/.tmp/ruff"
+
     echo "checker root: $tree_root"
     failed=0
     checked=0

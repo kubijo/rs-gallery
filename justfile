@@ -19,11 +19,11 @@ in-shell +cmd:
 demo-wgpu *args:
     @scripts/demo.sh wgpu {{ args }}
 
-# Scaffold + run the glow/femtovg demo into demo-femtovg/.
+# Scaffold + run the glow/femtovg demo into .tmp/demo-femtovg/.
 demo-femtovg *args:
     @scripts/demo.sh femtovg {{ args }}
 
-# Record a CPU profile of SCENE (a key fragment, e.g. `orbit`) into reports/REPORT.
+# Record a CPU profile of SCENE (a key fragment, e.g. `orbit`) into .tmp/reports/REPORT.
 profile SCENE="" REPORT="00-latest" FRAMES="600":
     @scripts/profile.sh {{ SCENE }} {{ REPORT }} {{ FRAMES }}
 

@@ -1,5 +1,5 @@
 # `validate`: the full local gate — formatting, repo lint, clippy, and the tests under coverage
-# (text + HTML for humans, lcov + cobertura for CI, into target/llvm-cov).
+# (text + HTML for humans, lcov + cobertura for CI, into .tmp/coverage).
 { pkgs, formatter, checker, test }:
 pkgs.writeShellApplication {
   name = "validate";
@@ -33,8 +33,10 @@ pkgs.writeShellApplication {
     # Through the wrapper, which carries the GL stack the capture tests render on.
     gallery-test
     cargo llvm-cov report
-    cargo llvm-cov report --html
-    cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
-    cargo llvm-cov report --cobertura --output-path target/llvm-cov/cobertura.xml
+    # Coverage is a report to read rather than build output,
+    # so it sits with the other scratch instead of under the target dir it would default into.
+    cargo llvm-cov report --html --output-dir .tmp/coverage
+    cargo llvm-cov report --lcov --output-path .tmp/coverage/lcov.info
+    cargo llvm-cov report --cobertura --output-path .tmp/coverage/cobertura.xml
   '';
 }

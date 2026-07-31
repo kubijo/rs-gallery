@@ -369,6 +369,105 @@ mod tests {
         );
     }
 
+    /// One render over every variant: `render_knob` is a match with an arm per kind,
+    /// and a kind that panicked or drew nothing would otherwise only show up in the shell.
+    #[test]
+    fn every_knob_kind_renders_under_its_own_label() {
+        use egui_kittest::kittest::Queryable;
+
+        let options = |a: &str, b: &str| vec![a.to_owned(), b.to_owned()];
+        let mut knobs = vec![
+            Knob::Group {
+                label: "section".to_owned(),
+            },
+            Knob::Text {
+                label: "note".to_owned(),
+                value: "hello".to_owned(),
+            },
+            Knob::Slider {
+                label: "size".to_owned(),
+                value: 2.0,
+                min: 0.0,
+                max: 4.0,
+                step: 0.5,
+            },
+            Knob::Toggle {
+                label: "enabled".to_owned(),
+                value: true,
+            },
+            Knob::Color {
+                label: "tint".to_owned(),
+                value: egui::Color32::from_rgb(0x6C, 0x9C, 0xD8),
+            },
+            Knob::Select {
+                label: "dropdown".to_owned(),
+                value: 0,
+                options: options("alpha", "beta"),
+                style: ChoiceStyle::Dropdown,
+            },
+            Knob::Select {
+                label: "radio".to_owned(),
+                value: 1,
+                options: options("gamma", "delta"),
+                style: ChoiceStyle::Radio,
+            },
+            Knob::Select {
+                label: "buttons".to_owned(),
+                value: 0,
+                options: options("epsilon", "zeta"),
+                style: ChoiceStyle::Buttons,
+            },
+            Knob::Pad2D {
+                label: "aim".to_owned(),
+                x: 0.0,
+                y: 0.0,
+                min_x: -1.0,
+                max_x: 1.0,
+                min_y: -1.0,
+                max_y: 1.0,
+                invert_y: true,
+            },
+        ];
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            render_knobs(ui, &mut knobs);
+        });
+        harness.run();
+        harness.run();
+
+        for label in [
+            "section", "note", "size", "enabled", "tint", "dropdown", "radio", "buttons", "aim",
+        ] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "`{label}` should render"
+            );
+        }
+        // Only the styles that draw their options inline: a collapsed dropdown
+        // holds its selection as a value rather than a label, and its options until it opens.
+        for option in ["gamma", "delta", "epsilon", "zeta"] {
+            assert!(
+                harness.query_by_label(option).is_some(),
+                "option `{option}` should render"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scene_with_no_knobs_says_so_rather_than_drawing_an_empty_grid() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            assert!(!render_knobs(ui, &mut []), "nothing to change");
+        });
+        harness.run();
+        assert!(
+            harness
+                .query_by_label("This scene has no controls.")
+                .is_some(),
+            "the panel says why it is empty"
+        );
+    }
+
     #[test]
     fn step_decimals_counts_the_fractional_digits_of_the_step() {
         assert_eq!(step_decimals(1.0), 0);
