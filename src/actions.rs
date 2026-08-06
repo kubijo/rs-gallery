@@ -17,7 +17,7 @@ thread_local! {
 /// Report that something happened, for the shell's Actions panel.
 ///
 /// ```ignore
-/// picker(ctx.ui, |row| gallery::action(format!("picked {}", row.name)));
+/// picker(ui, |row| gallery::action(format!("picked {}", row.name)));
 /// ```
 ///
 /// Only heard while a scene renders — from a spawned thread or a headless capture it goes nowhere.

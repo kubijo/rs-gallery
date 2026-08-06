@@ -11,7 +11,7 @@ use rectangle_pack::{
     volume_heuristic,
 };
 
-use crate::{HEADER_BG, PANEL_BG, Renderer, diagnostic::Diagnostic, render::open};
+use crate::{HEADER_BG, PANEL_BG, diagnostic::Diagnostic, render::open};
 
 /// One capture, waiting to be placed.
 pub(crate) struct Panel {
@@ -213,12 +213,12 @@ fn place(cells: &[(u32, u32)], width: u32, height: u32) -> Option<Vec<Cell>> {
 /// If the panels can't be packed, or the sheet can't be drawn on this renderer.
 pub(crate) fn compose(
     panels: Vec<Panel>,
-    renderer: Renderer,
+    session: &crate::render::Session,
     setup: &impl Fn(&egui::Context),
 ) -> Result<image::RgbaImage, Diagnostic> {
     let packed = pack(&panels).ok_or_else(|| Diagnostic::new("these captures will not pack"))?;
     let size = egui::vec2(packed.width as f32, packed.height as f32);
-    let mut harness = open(size, renderer, setup, |cc, _| {
+    let mut harness = open(size, session, setup, |cc, _| {
         Sheet::new(&cc.egui_ctx, panels, packed)
     })?;
     harness.run_steps(1);

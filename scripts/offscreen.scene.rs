@@ -26,7 +26,7 @@ thread_local! {
 }
 
 #[scene("vector shapes")]
-fn vector_shapes(ctx: &mut SceneCtx) {
+fn vector_shapes(ctx: &mut SceneCtx, ui: &mut Ui) {
     let accent = ctx.color("accent", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
     let radius = ctx.slider("corner radius", 28.0, 0.0, 80.0, 1.0);
     let stroke = ctx.slider("stroke width", 3.0, 0.5, 12.0, 0.5);
@@ -44,10 +44,10 @@ fn vector_shapes(ctx: &mut SceneCtx) {
         },
     );
 
-    ctx.ui.heading("femtovg, drawn into gallery's FBO");
+    ui.heading("femtovg, drawn into gallery's FBO");
     // Staged, so the femtovg frame carries the checkerboard, size caption and collapse toggle
     // an egui component gets — and folding it away costs no GL at all.
-    let staged = ctx.offscreen_input_stage(Stage::Fit, SIZE, |o| {
+    let staged = ctx.offscreen_input_stage(ui, Stage::Fit, SIZE, |o| {
         let loader = o.gl_loader();
         let fbo = o.fbo();
         let [w, h] = o.size();
@@ -102,7 +102,6 @@ fn vector_shapes(ctx: &mut SceneCtx) {
         }
     }
 
-    ctx.ui.add_space(6.0);
-    ctx.ui
-        .weak("femtovg → offscreen FBO → egui texture · drag the image to move the centre");
+    ui.add_space(6.0);
+    ui.weak("femtovg → offscreen FBO → egui texture · drag the image to move the centre");
 }

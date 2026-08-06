@@ -6,7 +6,8 @@
 //! names its place in the sidebar tree, `#[scene]` functions show
 //! the component in each state.
 //!
-//! The canvas is plain, so headings and prose go straight onto `ctx.ui`;
+//! A scene takes two things: `ctx` for the knobs, and the `ui` to draw into.
+//! The canvas is plain, so headings and prose go straight onto `ui`;
 //! whatever you are demonstrating goes in a `stage!`, which puts it
 //! on the checkerboard and captions its size.
 
@@ -16,24 +17,24 @@ scene_meta! { title: "Example / Greeting" }
 
 /// The simplest scene: one component, fitted.
 #[scene("plain")]
-fn plain(ctx: &mut SceneCtx) {
-    stage!(ctx, |ui| {
+fn plain(ctx: &mut SceneCtx, ui: &mut Ui) {
+    stage!(ctx, ui, |ui| {
         ui.heading("Hello, world");
     });
 }
 
 /// Controls (knobs) are declarative-by-use: each `ctx.<knob>` call
 /// adds a control to the right-hand panel and returns its value.
-/// Read them before the stage, whose closure borrows only the `Ui`.
+/// Read them before the stage, which holds `ctx` for the call.
 #[scene("with controls")]
-fn with_controls(ctx: &mut SceneCtx) {
+fn with_controls(ctx: &mut SceneCtx, ui: &mut Ui) {
     let name = ctx.text("name", "world");
     let size = ctx.slider("size", 24.0, 12.0, 64.0, 1.0);
     let shout = ctx.toggle("uppercase", false);
     let color = ctx.color("color", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
 
     let name = if shout { name.to_uppercase() } else { name };
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(
             egui::RichText::new(format!("Hello, {name}"))
                 .size(size)
@@ -45,21 +46,20 @@ fn with_controls(ctx: &mut SceneCtx) {
 /// Several demos with prose between them
 /// — what the plain canvas is for.
 #[scene("document")]
-fn document(ctx: &mut SceneCtx) {
-    ctx.ui.heading("Sized to its content");
-    ctx.ui
-        .label("A bare closure wraps whatever you draw, and the badge reports the result.");
-    stage!(ctx, |ui| {
+fn document(ctx: &mut SceneCtx, ui: &mut Ui) {
+    ui.heading("Sized to its content");
+    ui.label("A bare closure wraps whatever you draw, and the badge reports the result.");
+    stage!(ctx, ui, |ui| {
         ui.label("A short label takes only the room it needs.");
     });
 
-    ctx.ui.add_space(12.0);
-    ctx.ui.heading("A fixed viewport");
-    ctx.ui.label(
+    ui.add_space(12.0);
+    ui.heading("A fixed viewport");
+    ui.label(
         "A size pins it, for a component that behaves differently depending on how much room \
          it has — a scroll area, a wrapping layout, anything with a breakpoint.",
     );
-    stage!(ctx, (300, 120), |ui| {
+    stage!(ctx, ui, (300, 120), |ui| {
         ui.horizontal_wrapped(|ui| {
             for i in 0..12 {
                 ui.label(format!("Item {i}"));
@@ -67,25 +67,27 @@ fn document(ctx: &mut SceneCtx) {
         });
     });
 
-    ctx.ui.add_space(12.0);
-    ctx.ui.heading("More than fits");
-    ctx.ui.label(
+    ui.add_space(12.0);
+    ui.heading("More than fits");
+    ui.label(
         "`scrollable()` hands the scroll area to the stage, which is what keeps the bar and the \
          clipped edge on the checkerboard with the padding inside them. It is a modifier, not a \
          size, so it goes on a pinned stage as readily as on `fill`.",
     );
-    ctx.stage(Stage::Fixed(egui::vec2(300.0, 120.0)).scrollable(), |ui| {
-        for i in 0..40 {
-            ui.label(format!("Line {i}"));
-        }
-    });
-
-    ctx.ui.add_space(12.0);
-    ctx.ui.heading("Whatever is left");
-    ctx.ui.label(
-        "`fill` takes the rest of the canvas — here, what the sections above have not used.",
+    ctx.stage(
+        ui,
+        Stage::Fixed(egui::vec2(300.0, 120.0)).scrollable(),
+        |ui| {
+            for i in 0..40 {
+                ui.label(format!("Line {i}"));
+            }
+        },
     );
-    stage!(ctx, fill, |ui| {
+
+    ui.add_space(12.0);
+    ui.heading("Whatever is left");
+    ui.label("`fill` takes the rest of the canvas — here, what the sections above have not used.");
+    stage!(ctx, ui, fill, |ui| {
         ui.centered_and_justified(|ui| ui.label("Filling the rest"));
     });
 }
@@ -93,8 +95,8 @@ fn document(ctx: &mut SceneCtx) {
 /// One component on the whole canvas — what `fill` exists for, and how every scene looked before
 /// stages.
 #[scene("full canvas")]
-fn full_canvas(ctx: &mut SceneCtx) {
-    stage!(ctx, fill, |ui| {
+fn full_canvas(ctx: &mut SceneCtx, ui: &mut Ui) {
+    stage!(ctx, ui, fill, |ui| {
         ui.centered_and_justified(|ui| ui.heading("The whole canvas, one component"));
     });
 }
@@ -112,17 +114,15 @@ fn full_canvas(ctx: &mut SceneCtx) {
 /// the whole canvas, so anything after one pushes the canvas past
 /// its own viewport and you get a second scrollbar around the first.
 #[scene("scrolling")]
-fn scrolling(ctx: &mut SceneCtx) {
+fn scrolling(ctx: &mut SceneCtx, ui: &mut Ui) {
     let rows = ctx.slider("rows", 200.0, 0.0, 1000.0, 1.0) as usize;
-    let row_height =
-        ctx.ui.text_style_height(&egui::TextStyle::Body) + ctx.ui.spacing().item_spacing.y;
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
     // Last frame's count: this frame's is not known until the stage below has drawn.
     let drawn_id = egui::Id::new("scrolling-drawn");
-    let drawn = ctx.ui.data(|d| d.get_temp::<usize>(drawn_id).unwrap_or(0));
-    ctx.ui
-        .label(format!("{drawn} of {rows} rows drawn last frame"));
+    let drawn = ui.data(|d| d.get_temp::<usize>(drawn_id).unwrap_or(0));
+    ui.label(format!("{drawn} of {rows} rows drawn last frame"));
 
-    stage!(ctx, scroll, |ui| {
+    stage!(ctx, ui, scroll, |ui| {
         let top = ui.cursor().top();
         let clip = ui.clip_rect();
         let first = (((clip.top() - top) / row_height).floor().max(0.0) as usize).min(rows);
@@ -140,7 +140,7 @@ fn scrolling(ctx: &mut SceneCtx) {
 /// Demonstrates the `buttons` knob. `weight` is a compact tri-state; `step`'s long labels wrap
 /// onto further rows, and `size` and `note` follow the wrapped row to drive the scene preview.
 #[scene("segmented buttons")]
-fn segmented_buttons(ctx: &mut SceneCtx) {
+fn segmented_buttons(ctx: &mut SceneCtx, ui: &mut Ui) {
     const WEIGHTS: &[&str] = &["light", "regular", "bold"];
     const STEPS: &[&str] = &[
         "idle",
@@ -164,7 +164,7 @@ fn segmented_buttons(ctx: &mut SceneCtx) {
         2 => text.strong(),
         _ => text,
     };
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(text);
         if !note.is_empty() {
             ui.weak(note);

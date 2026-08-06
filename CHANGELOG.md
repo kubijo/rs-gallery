@@ -5,6 +5,38 @@ so a minor release may carry a breaking change.
 
 ## 2026-08-06
 
+- **Sidebar folding** — `Settings::collapsed(..)` says which folders a gallery opens with folded: `true` for all of
+  them, or a list of top-level names (compared without case) for those and no others. A starting state rather than a
+  fixed one — opening a folder keeps it open for the session, and a filter still reaches into one that started folded. A
+  name matching no root folds nothing, as does one naming a title of a single segment, which the sidebar shows as a
+  scene rather than a folder.
+- **Fixed** — only the first shot of a `--capture` run drew, for any scene holding a GL object between frames. Each shot
+  built its own EGL context and dropped it with its harness, while the scene's cache lives in a thread-local in the
+  scenes dylib that outlives every harness — so from the second shot on a scene painted with textures and framebuffers
+  belonging to a context that was gone, and the image came back empty. The context is opened once now and lent to every
+  shot, including the sheet. Scenes need no change, and could not have worked around it: a fresh context reissues GL
+  names from 1 and a freed handle's address is commonly reused, so neither a name nor a pointer tells a scene its
+  context has been replaced.
+- **Breaking: a scene takes its `Ui` as an argument** — `fn(&mut SceneCtx)` becomes `fn(&mut SceneCtx, &mut Ui)`,
+  `ctx.ui` is gone, and the five methods that draw take the `Ui` to draw into: `stage`, `offscreen`, `offscreen_input`,
+  `offscreen_stage`, `offscreen_input_stage`. `stage!` gains a second argument, `stage!(ctx, ui, ..)`. Migrating a scene
+  is three mechanical edits: add `ui: &mut Ui` to the signature, drop the `ctx.` from every `ctx.ui.…`, and pass `ui` to
+  the calls above. **The knob API is untouched** — no accessor or `set_*` ever drew anything, so
+  `ctx.slider("count", ..)` and friends are unchanged, as is `gallery::action`.
+- **Stages go wherever widgets go** — which is the point of the above. A stage sits in `egui::Grid`, `ui.columns(..)`, a
+  `Frame`, a `CollapsingHeader` or a `ScrollArea`, and anything egui adds later works without gallery knowing about it.
+  One limit worth stating: a stage does **not** wrap in `ui.horizontal_wrapped(..)`. egui breaks a row on a size the
+  widget declares before it draws, and a stage's size isn't known until its content has drawn, so a row of them runs off
+  the pane rather than wrapping. Use `matrix` below.
+- **`SceneCtx::matrix`** — one stage per size, in as many columns as the pane holds, aligned in a grid; the column count
+  is measured against the widest of them, so resizing the window reflows the set (CSS's `repeat(auto-fit, ..)`). A grid
+  rather than a wrapping row because the point is comparison — columns line up, where a row of differing sizes leaves
+  every cell at its own offset. Nothing is packed: the order given is the order shown, a size matrix reading smallest to
+  largest. The scaffold gains `matrix.scene.rs`.
+- **Fixed** — a stage put the badge row and its content into the parent layout as two separate items, so in any
+  horizontal layout the collapse arrow and the size caption landed beside the component instead of above it. A stage is
+  one block now, whatever it is placed in. Invisible before this release, since the canvas only ever stacked them.
+- **`Ui` joins the prelude**, since every scene signature names it.
 - **Knob writeback** — `SceneCtx::set_slider`, `set_toggle`, `set_text`, `set_color`, `set_select`, `set_select_index`
   and `set_pad2d` write a knob back from the scene, for rendered content that does its own hit-testing. Each takes the
   first knob of its kind carrying exactly that label and returns whether one matched — an unknown label writes nothing

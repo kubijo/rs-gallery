@@ -1,6 +1,7 @@
 //! The per-scene rendering context.
 //!
-//! [`SceneCtx`] is what a scene receives each frame. Its knob accessors are **declarative by use**:
+//! [`SceneCtx`] is what a scene receives each frame beside the [`Ui`](egui::Ui) it draws into.
+//! Its knob accessors are **declarative by use**:
 //! calling `ctx.slider(...)` both registers the control and returns its current value — the first frame
 //! creates it at its default, later frames return the value set in the controls panel. Values persist in
 //! the host per scene, so they survive hot-reloads. Under the glow renderer it also exposes offscreen GL
@@ -11,17 +12,18 @@ use eframe::glow;
 use crate::knobs::{ChoiceStyle, Knob, Pad2DSpec};
 use crate::offscreen::{GlDeps, Offscreen, Pointer};
 
-/// What a scene receives each frame: the egui [`Ui`](egui::Ui) to draw into, plus the knob accessors.
+/// What a scene receives each frame alongside its [`Ui`](egui::Ui): the knob accessors,
+/// and the methods that draw. Those take the `Ui` to draw into rather than holding one,
+/// so a scene can stage into any layout egui offers.
 ///
 /// ```ignore
 /// #[scene("greeting")]
-/// fn greeting(ctx: &mut SceneCtx) {
+/// fn greeting(ctx: &mut SceneCtx, ui: &mut egui::Ui) {
 ///     let name = ctx.text("name", "world");
-///     ctx.ui.heading(format!("Hello, {name}"));
+///     ui.heading(format!("Hello, {name}"));
 /// }
 /// ```
 pub struct SceneCtx<'a> {
-    pub ui: &'a mut egui::Ui,
     knobs: &'a mut Vec<Knob>,
     cursor: usize,
     stages: usize,
@@ -131,13 +133,8 @@ stage_from!(f32, f64, u16, i16, u32, i32, usize, isize);
 const PADDING: i8 = 16;
 
 impl<'a> SceneCtx<'a> {
-    pub(crate) fn new(
-        ui: &'a mut egui::Ui,
-        knobs: &'a mut Vec<Knob>,
-        gl: Option<GlDeps<'a>>,
-    ) -> Self {
+    pub(crate) fn new(knobs: &'a mut Vec<Knob>, gl: Option<GlDeps<'a>>) -> Self {
         Self {
-            ui,
             knobs,
             cursor: 0,
             stages: 0,
@@ -150,16 +147,72 @@ impl<'a> SceneCtx<'a> {
     /// The canvas is plain, so headings and prose drawn onto `ui` read as headings and prose.
     ///
     /// [`stage!`](crate::stage) spells the common cases shorter.
-    pub fn stage(&mut self, size: impl Into<StageSpec>, add: impl FnOnce(&mut egui::Ui)) {
+    pub fn stage(
+        &mut self,
+        ui: &mut egui::Ui,
+        size: impl Into<StageSpec>,
+        add: impl FnOnce(&mut egui::Ui),
+    ) {
         let StageSpec { size, scroll } = size.into();
-        let id = self.ui.id().with(("gallery-stage", self.stages));
+        let id = Self::stage_id(ui, self.stages);
         self.stages += 1;
-        let mut open = self.ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
+        // One block wherever it is placed: the badge and the content are two items,
+        // and a parent laying out in a row would otherwise set them beside each other.
+        ui.vertical(|ui| self.staging(ui, id, size, scroll, add));
+    }
+
+    /// One stage per size, in as many columns as fit across `ui`, aligned in a grid.
+    /// `add` draws the stage at that index.
+    ///
+    /// The column count is measured from the widest of them against the room available,
+    /// so the matrix reflows as the pane resizes — CSS's `repeat(auto-fit, ..)`.
+    /// Hence `sizes` up front rather than a stage at a time.
+    ///
+    /// A grid rather than a wrapping row: the columns line up for comparison,
+    /// and nothing is packed — the order given is the order shown.
+    pub fn matrix(
+        &mut self,
+        ui: &mut egui::Ui,
+        sizes: &[egui::Vec2],
+        mut add: impl FnMut(&mut egui::Ui, usize),
+    ) {
+        let Some(widest) = sizes.iter().map(|size| size.x).reduce(f32::max) else {
+            return;
+        };
+        let id = ui.id().with(("gallery-matrix", self.stages));
+        // What one cell costs the row: the stage's own width, the checkerboard padding
+        // either side of it, and the gap before the next column.
+        let cell = widest + 2.0 * f32::from(PADDING) + ui.spacing().item_spacing.x;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to at least one column, and a pane never holds enough to overflow"
+        )]
+        let across = (ui.available_width() / cell).floor().max(1.0) as usize;
+
+        egui::Grid::new(id).show(ui, |ui| {
+            for (at, size) in sizes.iter().enumerate() {
+                self.stage(ui, *size, |ui| add(ui, at));
+                if (at + 1) % across == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    }
+
+    fn staging(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        size: Stage,
+        scroll: bool,
+        add: impl FnOnce(&mut egui::Ui),
+    ) {
+        let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
 
         // The badge sits above the stage but reports a size `Fit` only knows
         // once drawn, so keep the position and paint the text in afterwards.
-        let badge_at = self
-            .ui
+        let badge_at = ui
             .horizontal(|ui| {
                 let arrow = if open { "▾" } else { "▸" };
                 if ui
@@ -199,12 +252,12 @@ impl<'a> SceneCtx<'a> {
         let padding = egui::Margin::same(PADDING);
 
         // Reserved before the content, so the checkerboard lands beneath it.
-        let backdrop = self.ui.painter().add(egui::Shape::Noop);
+        let backdrop = ui.painter().add(egui::Shape::Noop);
         let framed = egui::Frame::new()
             // A scrolling stage pads inside its viewport instead, so the bar and the clipped edge
             // reach the checkerboard rather than stopping a margin short of it.
             .inner_margin(if scroll { egui::Margin::ZERO } else { padding })
-            .show(self.ui, |ui| {
+            .show(ui, |ui| {
                 if !open {
                     return ui.min_rect();
                 }
@@ -254,27 +307,31 @@ impl<'a> SceneCtx<'a> {
 
         if open {
             let backdrop_rect = framed.response.rect;
-            self.ui.painter().set(
+            ui.painter().set(
                 backdrop,
                 egui::Shape::Vec(crate::checkerboard(backdrop_rect)),
             );
         }
         // The component's own size, not the padded box around it.
         let content = framed.inner;
-        self.ui.painter().text(
+        ui.painter().text(
             badge_at,
             egui::Align2::LEFT_TOP,
             format!("{:.0}×{:.0}", content.width(), content.height()),
             egui::FontId::proportional(10.0),
-            self.ui.visuals().weak_text_color(),
+            ui.visuals().weak_text_color(),
         );
+    }
+
+    fn stage_id(ui: &egui::Ui, at: usize) -> egui::Id {
+        ui.id().with(("gallery-stage", at))
     }
 
     /// Whether the stage this call is about to make is open — the id [`stage`](Self::stage)
     /// will derive, read before it does.
-    fn staging_open(&self) -> bool {
-        let id = self.ui.id().with(("gallery-stage", self.stages));
-        self.ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true)
+    fn staging_open(&self, ui: &egui::Ui) -> bool {
+        let id = Self::stage_id(ui, self.stages);
+        ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true)
     }
 
     /// [`offscreen`](Self::offscreen) on a stage: the checkerboard, size caption and collapse toggle
@@ -285,11 +342,12 @@ impl<'a> SceneCtx<'a> {
     /// `size` is the texture's own, in pixels.
     pub fn offscreen_stage(
         &mut self,
+        ui: &mut egui::Ui,
         stage: impl Into<StageSpec>,
         size: impl Into<[u32; 2]>,
         draw: impl FnOnce(&Offscreen),
     ) -> Option<egui::Response> {
-        self.staged(stage.into(), size.into(), draw, egui::Sense::hover())
+        self.staged(ui, stage.into(), size.into(), draw, egui::Sense::hover())
     }
 
     /// [`offscreen_input`](Self::offscreen_input) on a stage — see
@@ -297,13 +355,14 @@ impl<'a> SceneCtx<'a> {
     /// `None` while the stage is collapsed: nothing is drawn, so nothing can be pointed at.
     pub fn offscreen_input_stage(
         &mut self,
+        ui: &mut egui::Ui,
         stage: impl Into<StageSpec>,
         size: impl Into<[u32; 2]>,
         draw: impl FnOnce(&Offscreen),
     ) -> Option<(egui::Response, Vec<Pointer>)> {
         let size = size.into();
-        let response = self.staged(stage.into(), size, draw, egui::Sense::click_and_drag())?;
-        let events = crate::offscreen::pointer(self.ui, response.id, response.rect, size);
+        let response = self.staged(ui, stage.into(), size, draw, egui::Sense::click_and_drag())?;
+        let events = crate::offscreen::pointer(ui, response.id, response.rect, size);
         Some((response, events))
     }
 
@@ -317,6 +376,7 @@ impl<'a> SceneCtx<'a> {
     )]
     fn staged(
         &mut self,
+        ui: &mut egui::Ui,
         stage: StageSpec,
         size: [u32; 2],
         draw: impl FnOnce(&Offscreen),
@@ -327,11 +387,11 @@ impl<'a> SceneCtx<'a> {
         let at = self.offscreens;
         self.offscreens += 1;
         let drawn = self
-            .staging_open()
+            .staging_open(ui)
             .then(|| self.gl.as_mut().map(|deps| deps.render(at, size, draw)));
 
         let mut shown = None;
-        self.stage(stage, |ui| {
+        self.stage(ui, stage, |ui| {
             shown = Some(match drawn.flatten() {
                 Some(tex_id) => {
                     // GL textures are bottom-left origin; flip V so the image reads upright.
@@ -387,10 +447,11 @@ impl<'a> SceneCtx<'a> {
     /// several images gives each its own; one behind a toggle shifts the ones after it to new targets.
     pub fn offscreen(
         &mut self,
+        ui: &mut egui::Ui,
         size: impl Into<[u32; 2]>,
         draw: impl FnOnce(&Offscreen),
     ) -> egui::Response {
-        self.shown(size.into(), draw, egui::Sense::hover())
+        self.shown(ui, size.into(), draw, egui::Sense::hover())
     }
 
     /// Like [`offscreen`](Self::offscreen), and reports the pointer that landed on the image
@@ -401,15 +462,16 @@ impl<'a> SceneCtx<'a> {
     /// a scene that would rather leave the canvas scrolling calls [`offscreen`](Self::offscreen).
     pub fn offscreen_input(
         &mut self,
+        ui: &mut egui::Ui,
         size: impl Into<[u32; 2]>,
         draw: impl FnOnce(&Offscreen),
     ) -> (egui::Response, Vec<Pointer>) {
         let size = size.into();
-        let response = self.shown(size, draw, egui::Sense::click_and_drag());
+        let response = self.shown(ui, size, draw, egui::Sense::click_and_drag());
         if self.gl.is_none() {
             return (response, Vec::new());
         }
-        let events = crate::offscreen::pointer(self.ui, response.id, response.rect, size);
+        let events = crate::offscreen::pointer(ui, response.id, response.rect, size);
         (response, events)
     }
 
@@ -419,6 +481,7 @@ impl<'a> SceneCtx<'a> {
     )]
     fn shown(
         &mut self,
+        ui: &mut egui::Ui,
         size: [u32; 2],
         draw: impl FnOnce(&Offscreen),
         sense: egui::Sense,
@@ -428,15 +491,13 @@ impl<'a> SceneCtx<'a> {
         let at = self.offscreens;
         self.offscreens += 1;
         let Some(deps) = self.gl.as_mut() else {
-            return self
-                .ui
-                .colored_label(egui::Color32::YELLOW, "offscreen() needs the glow renderer");
+            return ui.colored_label(egui::Color32::YELLOW, "offscreen() needs the glow renderer");
         };
         let tex_id = deps.render(at, size, draw);
         // GL textures are bottom-left origin; flip V so the image reads upright in egui.
         let sized =
             egui::load::SizedTexture::new(tex_id, egui::vec2(size[0] as f32, size[1] as f32));
-        self.ui.add(
+        ui.add(
             egui::Image::new(sized)
                 .uv(egui::Rect::from_min_max(
                     egui::pos2(0.0, 1.0),
@@ -765,308 +826,267 @@ impl<'a> SceneCtx<'a> {
 mod tests {
     use super::*;
 
-    // The accessors don't draw; a throwaway `Ui` (egui_kittest) just builds the `SceneCtx`.
-
     #[test]
     fn slider_declares_at_its_default_then_returns_the_stored_value() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            assert_eq!(
-                SceneCtx::new(ui, &mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
-                0.5
-            );
-            assert_eq!(knobs.len(), 1);
-            if let Knob::Slider { value, .. } = &mut knobs[0] {
-                *value = 0.8;
-            }
-            assert_eq!(
-                SceneCtx::new(ui, &mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
-                0.8
-            );
-            assert_eq!(knobs.len(), 1);
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        assert_eq!(
+            SceneCtx::new(&mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
+            0.5
+        );
+        assert_eq!(knobs.len(), 1);
+        if let Knob::Slider { value, .. } = &mut knobs[0] {
+            *value = 0.8;
+        }
+        assert_eq!(
+            SceneCtx::new(&mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
+            0.8
+        );
+        assert_eq!(knobs.len(), 1);
     }
 
     #[test]
     fn a_knob_is_recreated_when_its_label_changes() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            SceneCtx::new(ui, &mut knobs, None).slider("a", 0.5, 0.0, 1.0, 0.1);
-            if let Knob::Slider { value, .. } = &mut knobs[0] {
-                *value = 0.9;
-            }
-            assert_eq!(
-                SceneCtx::new(ui, &mut knobs, None).slider("b", 0.2, 0.0, 1.0, 0.1),
-                0.2
-            );
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        SceneCtx::new(&mut knobs, None).slider("a", 0.5, 0.0, 1.0, 0.1);
+        if let Knob::Slider { value, .. } = &mut knobs[0] {
+            *value = 0.9;
+        }
+        assert_eq!(
+            SceneCtx::new(&mut knobs, None).slider("b", 0.2, 0.0, 1.0, 0.1),
+            0.2
+        );
     }
 
     #[test]
     fn declared_counts_the_knobs_used_this_frame() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-            ctx.slider("a", 0.0, 0.0, 1.0, 0.1);
-            ctx.toggle("b", false);
-            assert_eq!(ctx.declared(), 2);
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        let mut ctx = SceneCtx::new(&mut knobs, None);
+        ctx.slider("a", 0.0, 0.0, 1.0, 0.1);
+        ctx.toggle("b", false);
+        assert_eq!(ctx.declared(), 2);
     }
 
     #[test]
     fn select_clamps_an_out_of_range_default_to_the_last_option() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            assert_eq!(
-                SceneCtx::new(ui, &mut knobs, None).select("s", &["x", "y"], 9),
-                1
-            );
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        assert_eq!(
+            SceneCtx::new(&mut knobs, None).select("s", &["x", "y"], 9),
+            1
+        );
     }
 
     #[test]
     fn buttons_declares_a_select_knob_in_the_buttons_style() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            assert_eq!(
-                SceneCtx::new(ui, &mut knobs, None).buttons("mode", &["a", "b", "c"], 1),
-                1
-            );
-            assert!(matches!(
-                &knobs[0],
-                Knob::Select {
-                    style: ChoiceStyle::Buttons,
-                    value: 1,
-                    ..
-                }
-            ));
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        assert_eq!(
+            SceneCtx::new(&mut knobs, None).buttons("mode", &["a", "b", "c"], 1),
+            1
+        );
+        assert!(matches!(
+            &knobs[0],
+            Knob::Select {
+                style: ChoiceStyle::Buttons,
+                value: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn changing_a_choice_style_at_the_same_label_recreates_the_knob() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            SceneCtx::new(ui, &mut knobs, None).radio("m", &["a", "b"], 0);
-            if let Knob::Select { value, .. } = &mut knobs[0] {
-                *value = 1;
-            }
-            assert_eq!(
-                SceneCtx::new(ui, &mut knobs, None).buttons("m", &["a", "b"], 0),
-                0,
-                "switching style at the same label drops the stored value"
-            );
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        SceneCtx::new(&mut knobs, None).radio("m", &["a", "b"], 0);
+        if let Knob::Select { value, .. } = &mut knobs[0] {
+            *value = 1;
+        }
+        assert_eq!(
+            SceneCtx::new(&mut knobs, None).buttons("m", &["a", "b"], 0),
+            0,
+            "switching style at the same label drops the stored value"
+        );
     }
 
     #[test]
     fn every_knob_kind_takes_a_scene_write_and_reads_it_back() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
-                ctx.toggle("on", false);
-                ctx.text("name", "before");
-                ctx.color("tint", egui::Color32::BLACK);
-                ctx.select("gear", &["p", "d", "r"], 0);
-                ctx.pad2d("aim", Pad2DSpec::default());
-            }
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                assert!(ctx.set_slider("amt", 0.75));
-                assert!(ctx.set_toggle("on", true));
-                assert!(ctx.set_text("name", "after"));
-                assert!(ctx.set_color("tint", egui::Color32::from_rgb(0x11, 0x22, 0x33)));
-                assert!(ctx.set_select("gear", "d"));
-                assert!(ctx.set_pad2d("aim", 0.25, -0.5));
-            }
-            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-            assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.75);
-            assert!(ctx.toggle("on", false));
-            assert_eq!(ctx.text("name", "before"), "after");
-            assert_eq!(
-                ctx.color("tint", egui::Color32::BLACK),
-                egui::Color32::from_rgb(0x11, 0x22, 0x33)
-            );
-            assert_eq!(ctx.select("gear", &["p", "d", "r"], 0), 1);
-            assert_eq!(ctx.pad2d("aim", Pad2DSpec::default()), (0.25, -0.5));
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
+            ctx.toggle("on", false);
+            ctx.text("name", "before");
+            ctx.color("tint", egui::Color32::BLACK);
+            ctx.select("gear", &["p", "d", "r"], 0);
+            ctx.pad2d("aim", Pad2DSpec::default());
+        }
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            assert!(ctx.set_slider("amt", 0.75));
+            assert!(ctx.set_toggle("on", true));
+            assert!(ctx.set_text("name", "after"));
+            assert!(ctx.set_color("tint", egui::Color32::from_rgb(0x11, 0x22, 0x33)));
+            assert!(ctx.set_select("gear", "d"));
+            assert!(ctx.set_pad2d("aim", 0.25, -0.5));
+        }
+        let mut ctx = SceneCtx::new(&mut knobs, None);
+        assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.75);
+        assert!(ctx.toggle("on", false));
+        assert_eq!(ctx.text("name", "before"), "after");
+        assert_eq!(
+            ctx.color("tint", egui::Color32::BLACK),
+            egui::Color32::from_rgb(0x11, 0x22, 0x33)
+        );
+        assert_eq!(ctx.select("gear", &["p", "d", "r"], 0), 1);
+        assert_eq!(ctx.pad2d("aim", Pad2DSpec::default()), (0.25, -0.5));
     }
 
     #[test]
     fn a_written_value_clamps_to_the_knob_and_snaps_to_its_step() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                ctx.slider("amt", 0.5, 0.0, 1.0, 0.25);
-                // A step the range is not a multiple of, so its last stop overshoots the end.
-                ctx.slider("odd", 0.0, 0.0, 1.0, 0.6);
-                ctx.select("gear", &["p", "d", "r"], 0);
-                ctx.pad2d("aim", Pad2DSpec::default());
-            }
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                assert!(ctx.set_slider("amt", 7.0), "an overshoot still lands");
-                assert_eq!(
-                    ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
-                    1.0,
-                    "clamped to the range"
-                );
-                assert!(ctx.set_slider("amt", 0.6));
-                assert!(ctx.set_slider("odd", 1.0));
-                assert!(ctx.set_select_index("gear", 9));
-                assert!(ctx.set_pad2d("aim", 5.0, -5.0));
-            }
-            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+        let mut knobs = Vec::new();
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            ctx.slider("amt", 0.5, 0.0, 1.0, 0.25);
+            // A step the range is not a multiple of, so its last stop overshoots the end.
+            ctx.slider("odd", 0.0, 0.0, 1.0, 0.6);
+            ctx.select("gear", &["p", "d", "r"], 0);
+            ctx.pad2d("aim", Pad2DSpec::default());
+        }
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            assert!(ctx.set_slider("amt", 7.0), "an overshoot still lands");
             assert_eq!(
                 ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
-                0.5,
-                "0.6 snaps to the 0.25 grid, as the panel widget would"
-            );
-            assert_eq!(
-                ctx.slider("odd", 0.0, 0.0, 1.0, 0.6),
                 1.0,
-                "snapping never rounds past the end it was just clamped to"
+                "clamped to the range"
             );
-            assert_eq!(
-                ctx.select("gear", &["p", "d", "r"], 0),
-                2,
-                "an index past the end clamps to the last option"
-            );
-            assert_eq!(
-                ctx.pad2d("aim", Pad2DSpec::default()),
-                (1.0, -1.0),
-                "each axis clamps to its own range"
-            );
-        });
-        harness.run();
+            assert!(ctx.set_slider("amt", 0.6));
+            assert!(ctx.set_slider("odd", 1.0));
+            assert!(ctx.set_select_index("gear", 9));
+            assert!(ctx.set_pad2d("aim", 5.0, -5.0));
+        }
+        let mut ctx = SceneCtx::new(&mut knobs, None);
+        assert_eq!(
+            ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
+            0.5,
+            "0.6 snaps to the 0.25 grid, as the panel widget would"
+        );
+        assert_eq!(
+            ctx.slider("odd", 0.0, 0.0, 1.0, 0.6),
+            1.0,
+            "snapping never rounds past the end it was just clamped to"
+        );
+        assert_eq!(
+            ctx.select("gear", &["p", "d", "r"], 0),
+            2,
+            "an index past the end clamps to the last option"
+        );
+        assert_eq!(
+            ctx.pad2d("aim", Pad2DSpec::default()),
+            (1.0, -1.0),
+            "each axis clamps to its own range"
+        );
     }
 
     #[test]
     fn a_select_write_takes_an_option_label_but_not_a_stranger() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                ctx.select("gear", &["p", "d", "r"], 0);
-                ctx.select("empty", &[], 0);
-            }
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                assert!(ctx.set_select("gear", "r"));
-                assert!(
-                    !ctx.set_select("gear", "x"),
-                    "an option the knob doesn't carry is dropped"
-                );
-                assert!(
-                    !ctx.set_select_index("empty", 3),
-                    "no options means nothing to clamp to"
-                );
-            }
-            assert_eq!(
-                SceneCtx::new(ui, &mut knobs, None).select("gear", &["p", "d", "r"], 0),
-                2,
-                "the dropped writes left the landed one alone"
+        let mut knobs = Vec::new();
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            ctx.select("gear", &["p", "d", "r"], 0);
+            ctx.select("empty", &[], 0);
+        }
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            assert!(ctx.set_select("gear", "r"));
+            assert!(
+                !ctx.set_select("gear", "x"),
+                "an option the knob doesn't carry is dropped"
             );
-        });
-        harness.run();
+            assert!(
+                !ctx.set_select_index("empty", 3),
+                "no options means nothing to clamp to"
+            );
+        }
+        assert_eq!(
+            SceneCtx::new(&mut knobs, None).select("gear", &["p", "d", "r"], 0),
+            2,
+            "the dropped writes left the landed one alone"
+        );
     }
 
     #[test]
     fn a_write_to_a_missing_knob_is_dropped_without_a_phantom() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            assert!(
-                !SceneCtx::new(ui, &mut knobs, None).set_slider("amt", 1.0),
-                "nothing is declared yet on the first frame"
-            );
-            assert!(knobs.is_empty(), "a miss creates no control");
+        let mut knobs = Vec::new();
+        assert!(
+            !SceneCtx::new(&mut knobs, None).set_slider("amt", 1.0),
+            "nothing is declared yet on the first frame"
+        );
+        assert!(knobs.is_empty(), "a miss creates no control");
 
-            SceneCtx::new(ui, &mut knobs, None).toggle("amt", false);
-            assert!(
-                !SceneCtx::new(ui, &mut knobs, None).set_slider("amt", 1.0),
-                "the label exists, but on another kind"
-            );
-            assert_eq!(knobs.len(), 1);
-        });
-        harness.run();
+        SceneCtx::new(&mut knobs, None).toggle("amt", false);
+        assert!(
+            !SceneCtx::new(&mut knobs, None).set_slider("amt", 1.0),
+            "the label exists, but on another kind"
+        );
+        assert_eq!(knobs.len(), 1);
     }
 
     #[test]
     fn a_non_finite_write_is_dropped_rather_than_stored() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
-                ctx.pad2d("aim", Pad2DSpec::default());
-            }
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                assert!(!ctx.set_slider("amt", f32::NAN));
-                assert!(!ctx.set_slider("amt", f32::INFINITY));
-                assert!(!ctx.set_pad2d("aim", f32::NAN, 0.0));
-            }
-            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-            assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.5);
-            assert_eq!(ctx.pad2d("aim", Pad2DSpec::default()), (0.0, 0.0));
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
+            ctx.pad2d("aim", Pad2DSpec::default());
+        }
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            assert!(!ctx.set_slider("amt", f32::NAN));
+            assert!(!ctx.set_slider("amt", f32::INFINITY));
+            assert!(!ctx.set_pad2d("aim", f32::NAN, 0.0));
+        }
+        let mut ctx = SceneCtx::new(&mut knobs, None);
+        assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.5);
+        assert_eq!(ctx.pad2d("aim", Pad2DSpec::default()), (0.0, 0.0));
     }
 
     #[test]
     fn a_write_lands_before_an_accessor_later_the_same_frame() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            SceneCtx::new(ui, &mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.0);
-            // It holds last frame's slot, so a write before this frame's declaration finds it.
-            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-            assert!(ctx.set_slider("amt", 0.9));
-            assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.9);
-        });
-        harness.run();
+        let mut knobs = Vec::new();
+        SceneCtx::new(&mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.0);
+        // It holds last frame's slot, so a write before this frame's declaration finds it.
+        let mut ctx = SceneCtx::new(&mut knobs, None);
+        assert!(ctx.set_slider("amt", 0.9));
+        assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.9);
     }
 
     #[test]
     fn a_written_value_survives_exactly_as_long_as_its_knob_stays_declared() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            let mut knobs = Vec::new();
-            {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
-                ctx.toggle("b", false);
-                assert!(ctx.set_slider("a", 0.7));
-                assert!(ctx.set_toggle("b", true), "landing is not surviving");
-            }
-            // The scene stops declaring `b`; the shell truncates as `render_canvas` does.
-            let declared = {
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
-                ctx.declared()
-            };
-            knobs.truncate(declared);
+        let mut knobs = Vec::new();
+        {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
+            ctx.toggle("b", false);
+            assert!(ctx.set_slider("a", 0.7));
+            assert!(ctx.set_toggle("b", true), "landing is not surviving");
+        }
+        // The scene stops declaring `b`; the shell truncates as `render_canvas` does.
+        let declared = {
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
+            ctx.declared()
+        };
+        knobs.truncate(declared);
 
-            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-            assert_eq!(
-                ctx.slider("a", 0.1, 0.0, 1.0, 0.0),
-                0.7,
-                "a still-declared knob keeps its written value"
-            );
-            assert!(
-                !ctx.toggle("b", false),
-                "a truncated knob comes back at its default, write and all"
-            );
-        });
-        harness.run();
+        let mut ctx = SceneCtx::new(&mut knobs, None);
+        assert_eq!(
+            ctx.slider("a", 0.1, 0.0, 1.0, 0.0),
+            0.7,
+            "a still-declared knob keeps its written value"
+        );
+        assert!(
+            !ctx.toggle("b", false),
+            "a truncated knob comes back at its default, write and all"
+        );
     }
 
     #[test]
@@ -1098,41 +1118,45 @@ mod tests {
     fn the_macro_accepts_every_stage_form() {
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None);
             let mut drawn = 0;
 
-            crate::stage!(ctx, |ui| {
+            crate::stage!(ctx, ui, |ui| {
                 ui.label("implicitly fitted");
                 drawn += 1;
             });
-            crate::stage!(ctx, fit, |ui| {
+            crate::stage!(ctx, ui, fit, |ui| {
                 ui.label("explicitly fitted");
                 drawn += 1;
             });
-            crate::stage!(ctx, fill, |ui| {
+            crate::stage!(ctx, ui, fill, |ui| {
                 ui.label("filled");
                 drawn += 1;
             });
-            crate::stage!(ctx, (120.0, 80.0), |ui| {
+            crate::stage!(ctx, ui, (120.0, 80.0), |ui| {
                 ui.label("float pair");
                 drawn += 1;
             });
-            crate::stage!(ctx, (120, 80), |ui| {
+            crate::stage!(ctx, ui, (120, 80), |ui| {
                 ui.label("integer pair");
                 drawn += 1;
             });
-            crate::stage!(ctx, 64, |ui| {
+            crate::stage!(ctx, ui, 64, |ui| {
                 ui.label("square");
                 drawn += 1;
             });
-            crate::stage!(ctx, scroll, |ui| {
+            crate::stage!(ctx, ui, scroll, |ui| {
                 ui.label("scrolling");
                 drawn += 1;
             });
-            ctx.stage(Stage::Fixed(egui::vec2(120.0, 80.0)).scrollable(), |ui| {
-                ui.label("a scrolling stage of its own size");
-                drawn += 1;
-            });
+            ctx.stage(
+                ui,
+                Stage::Fixed(egui::vec2(120.0, 80.0)).scrollable(),
+                |ui| {
+                    ui.label("a scrolling stage of its own size");
+                    drawn += 1;
+                },
+            );
 
             assert_eq!(drawn, 8, "every form ran its body");
         });
@@ -1153,15 +1177,19 @@ mod tests {
         let room = std::cell::Cell::new(0.0);
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-            room.set(ctx.ui.available_height());
-            let before = ctx.ui.min_rect().height();
-            ctx.stage(Stage::Fixed(egui::vec2(120.0, 80.0)).scrollable(), |ui| {
-                for row in 0..200 {
-                    ui.label(format!("Row {row}"));
-                }
-            });
-            took.set(ctx.ui.min_rect().height() - before);
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            room.set(ui.available_height());
+            let before = ui.min_rect().height();
+            ctx.stage(
+                ui,
+                Stage::Fixed(egui::vec2(120.0, 80.0)).scrollable(),
+                |ui| {
+                    for row in 0..200 {
+                        ui.label(format!("Row {row}"));
+                    }
+                },
+            );
+            took.set(ui.min_rect().height() - before);
         });
         harness.run_steps(2);
 
@@ -1175,6 +1203,129 @@ mod tests {
         );
     }
 
+    /// The point of the scene taking its own `Ui`: a stage goes wherever a widget goes.
+    ///
+    /// Side by side only — the row never wraps, since egui breaks a row on a size
+    /// the widget declares before it draws and a stage has none.
+    /// [`matrix`](SceneCtx::matrix) is what reflows.
+    #[test]
+    fn stages_sit_side_by_side_in_a_horizontal_layout() {
+        let corners = std::cell::RefCell::new(Vec::new());
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            ui.horizontal_wrapped(|ui| {
+                for width in [60.0, 60.0, 60.0] {
+                    ctx.stage(ui, Stage::Fixed(egui::vec2(width, 40.0)), |ui| {
+                        corners.borrow_mut().push(ui.min_rect().min);
+                        ui.label("variant");
+                    });
+                }
+            });
+        });
+        harness.run_steps(2);
+
+        let corners = corners.borrow();
+        let corners = &corners[..3];
+        assert!(
+            corners.windows(2).all(|pair| pair[0].y == pair[1].y),
+            "three 60×40 stages fit across the harness, so none of them wrapped: {corners:?}"
+        );
+        assert!(
+            corners.windows(2).all(|pair| pair[0].x < pair[1].x),
+            "and they run left to right in the order the scene staged them: {corners:?}"
+        );
+    }
+
+    /// The matrix takes as many columns as fit and no more,
+    /// so a set too wide for the pane breaks onto further rows.
+    #[test]
+    fn a_matrix_takes_as_many_columns_as_the_pane_holds() {
+        let corners = std::cell::RefCell::new(Vec::new());
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            corners.borrow_mut().clear();
+            // Each a third of the pane, so once the checkerboard padding is counted
+            // at most two fit beside each other and four need more than one row.
+            let third = ui.available_width() / 3.0;
+            let sizes = [egui::vec2(third, 30.0); 4];
+            ctx.matrix(ui, &sizes, |ui, at| {
+                corners.borrow_mut().push((at, ui.min_rect().min));
+                ui.label("cell");
+            });
+        });
+        harness.run_steps(3);
+
+        let corners = corners.borrow();
+        let rows: Vec<f32> = corners.iter().map(|(_, at)| at.y).collect();
+        assert!(
+            rows.iter().any(|y| *y > rows[0]),
+            "four thirds-of-a-pane stages cannot share one row: {corners:?}"
+        );
+        // Column alignment is the reason this is a grid rather than a wrapping row.
+        let first_column: Vec<f32> = corners
+            .iter()
+            .filter(|(at, _)| at % 2 == 0)
+            .map(|(_, corner)| corner.x)
+            .collect();
+        assert!(
+            first_column.windows(2).all(|pair| pair[0] == pair[1]),
+            "every cell starting a row shares the first column's x: {corners:?}"
+        );
+    }
+
+    /// A matrix of one size in a pane that fits them all takes one row,
+    /// so the column count is measured rather than fixed.
+    #[test]
+    fn a_matrix_that_fits_across_the_pane_stays_on_one_row() {
+        let rows = std::cell::RefCell::new(Vec::new());
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            rows.borrow_mut().clear();
+            let sizes = [egui::vec2(40.0, 30.0); 3];
+            ctx.matrix(ui, &sizes, |ui, _| {
+                rows.borrow_mut().push(ui.min_rect().min.y);
+                ui.label("cell");
+            });
+        });
+        harness.run_steps(3);
+
+        let rows = rows.borrow();
+        assert!(
+            rows.windows(2).all(|pair| pair[0] == pair[1]),
+            "three 40-wide stages fit across the pane together: {rows:?}"
+        );
+    }
+
+    /// A fitted stage has no size until its content draws, so a horizontal layout could reasonably
+    /// hand it the whole remaining width and leave every stage on a line of its own.
+    #[test]
+    fn a_fitted_stage_claims_only_its_content_in_a_horizontal_layout() {
+        let corners = std::cell::RefCell::new(Vec::new());
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            ui.horizontal_wrapped(|ui| {
+                for _ in 0..3 {
+                    ctx.stage(ui, Stage::Fit, |ui| {
+                        corners.borrow_mut().push(ui.min_rect().min);
+                        ui.label("fitted");
+                    });
+                }
+            });
+        });
+        harness.run_steps(2);
+
+        let corners = corners.borrow();
+        let corners = &corners[..3];
+        assert!(
+            corners.windows(2).all(|pair| pair[0].y == pair[1].y),
+            "a fitted stage takes its content's width, not the row's: {corners:?}"
+        );
+    }
+
     /// The canvas a scene draws on is itself a scroll area, so a scrolling stage that grew to its
     /// content would scroll the canvas too and leave the viewer two bars around one list.
     #[test]
@@ -1185,15 +1336,15 @@ mod tests {
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             egui::ScrollArea::both().show(ui, |ui| {
                 let mut knobs = Vec::new();
-                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
-                room.set(ctx.ui.available_height());
-                let before = ctx.ui.min_rect().height();
-                ctx.stage(Stage::Fill.scrollable(), |ui| {
+                let mut ctx = SceneCtx::new(&mut knobs, None);
+                room.set(ui.available_height());
+                let before = ui.min_rect().height();
+                ctx.stage(ui, Stage::Fill.scrollable(), |ui| {
                     for row in 0..200 {
                         ui.label(format!("Row {row}"));
                     }
                 });
-                took.set(ctx.ui.min_rect().height() - before);
+                took.set(ui.min_rect().height() - before);
             });
         });
         harness.run_steps(2);

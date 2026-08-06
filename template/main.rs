@@ -2,5 +2,11 @@
 //! What it shows is configured in `gallery.toml`.
 
 fn main() -> gallery::eframe::Result {
-    gallery::launch!(|_| {}, gallery::Settings::new(gallery::Renderer::Wgpu))
+    gallery::launch!(
+        |_| {},
+        gallery::Settings::new(gallery::Renderer::Wgpu)
+            .controls_default_width(260.0)
+            // `true` folds every sidebar folder; a list folds those top-level ones.
+            .collapsed(true)
+    )
 }

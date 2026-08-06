@@ -41,3 +41,16 @@ size = "160x160"
 name = "offscreen-slots"
 scene = "offscreen-slots"
 size = "200x200"
+
+# The same scene twice, holding a GL object between the two. Green only while that object still
+# belongs to the live context — which it does exactly as long as the run keeps one. Two shots
+# because one cannot show a context outliving anything.
+[[shot]]
+name = "offscreen-cached-first"
+scene = "offscreen-cached"
+size = "120x120"
+
+[[shot]]
+name = "offscreen-cached-again"
+scene = "offscreen-cached"
+size = "120x120"

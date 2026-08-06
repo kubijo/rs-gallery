@@ -197,6 +197,50 @@ impl GlowCapture {
     }
 }
 
+/// One [`GlowCapture`] for a whole run, handed to each shot's harness in turn.
+///
+/// A shot builds its own harness, and the harness owns the renderer it was given,
+/// so a capture made per shot takes its GL context down with it.
+/// Scenes are encouraged to cache against that context — building a femtovg canvas
+/// recompiles its shaders — and that cache lives in a thread-local in the scenes dylib,
+/// which outlives every harness.
+///
+/// Each shot after the first would then draw with objects belonging to a dead context,
+/// and come back blank. Nothing a scene could soundly test for, either:
+/// a fresh context reissues GL names from 1, and a freed handle's address is commonly reused.
+#[derive(Clone)]
+pub(crate) struct SharedCapture(Rc<RefCell<GlowCapture>>);
+
+impl SharedCapture {
+    /// # Errors
+    /// As [`GlowCapture::new`] — and once per run rather than once per shot.
+    pub(crate) fn new() -> Result<Self, Diagnostic> {
+        Ok(Self(Rc::new(RefCell::new(GlowCapture::new()?))))
+    }
+
+    pub(crate) fn painter(&self) -> Rc<RefCell<egui_glow::Painter>> {
+        self.0.borrow().painter()
+    }
+}
+
+impl egui_kittest::TestRenderer for SharedCapture {
+    fn setup_eframe(&self, cc: &mut eframe::CreationContext<'_>, frame: &mut eframe::Frame) {
+        self.0.borrow().setup_eframe(cc, frame);
+    }
+
+    fn handle_delta(&mut self, delta: &egui::TexturesDelta) {
+        self.0.borrow_mut().handle_delta(delta);
+    }
+
+    fn render(
+        &mut self,
+        ctx: &egui::Context,
+        output: &egui::FullOutput,
+    ) -> Result<image::RgbaImage, String> {
+        self.0.borrow_mut().render(ctx, output)
+    }
+}
+
 impl egui_kittest::TestRenderer for GlowCapture {
     /// Hand the app the GL a scene draws with. Both fields are `pub` on `CreationContext`, unlike
     /// their counterparts on `Frame` — see `offscreen::RegisterTexture` for what that costs.

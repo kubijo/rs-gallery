@@ -7,51 +7,51 @@ scene_meta! { title: "Example / Knobs" }
 
 /// `text` — a single-line string field.
 #[scene("text")]
-fn text(ctx: &mut SceneCtx) {
+fn text(ctx: &mut SceneCtx, ui: &mut Ui) {
     let value = ctx.text("label", "edit me");
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(format!("value = {value:?}"));
     });
 }
 
 /// `slider` — numeric; `step` snaps the value and sets the readout's decimals (`0.0` is smooth).
 #[scene("slider")]
-fn slider(ctx: &mut SceneCtx) {
+fn slider(ctx: &mut SceneCtx, ui: &mut Ui) {
     let smooth = ctx.slider("smooth", 0.5, 0.0, 1.0, 0.0);
     let whole = ctx.slider("integer", 24.0, 12.0, 64.0, 1.0);
     let tenths = ctx.slider("tenths", 1.0, 0.0, 5.0, 0.1);
     let hundredths = ctx.slider("hundredths", 0.5, 0.0, 1.0, 0.01);
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(format!("{smooth} · {whole} · {tenths} · {hundredths}"));
     });
 }
 
 /// `toggle` — a boolean checkbox.
 #[scene("toggle")]
-fn toggle(ctx: &mut SceneCtx) {
+fn toggle(ctx: &mut SceneCtx, ui: &mut Ui) {
     let enabled = ctx.toggle("enabled", true);
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(if enabled { "enabled" } else { "disabled" });
     });
 }
 
 /// `color` — an sRGBA colour picker.
 #[scene("color")]
-fn color(ctx: &mut SceneCtx) {
+fn color(ctx: &mut SceneCtx, ui: &mut Ui) {
     let tint = ctx.color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(egui::RichText::new("Tinted sample").size(28.0).color(tint));
     });
 }
 
 /// `select` / `radio` / `buttons` — three styles for a one-of-N choice; each returns the index.
 #[scene("choice")]
-fn choice(ctx: &mut SceneCtx) {
+fn choice(ctx: &mut SceneCtx, ui: &mut Ui) {
     const OPTIONS: &[&str] = &["one", "two", "three"];
     let dropdown = ctx.select("select", OPTIONS, 0);
     let radio = ctx.radio("radio", OPTIONS, 1);
     let segmented = ctx.buttons("buttons", OPTIONS, 2);
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(format!(
             "select = {}, radio = {}, buttons = {}",
             OPTIONS[dropdown], OPTIONS[radio], OPTIONS[segmented],
@@ -61,7 +61,7 @@ fn choice(ctx: &mut SceneCtx) {
 
 /// `pad2d` — a 2-axis pad; `Pad2DSpec` sets its ranges and y-orientation.
 #[scene("pad2d")]
-fn pad2d(ctx: &mut SceneCtx) {
+fn pad2d(ctx: &mut SceneCtx, ui: &mut Ui) {
     let (x, y) = ctx.pad2d("centered, -1..1", Pad2DSpec::default());
     let (px, py) = ctx.pad2d(
         "y-up, 0..100",
@@ -74,7 +74,7 @@ fn pad2d(ctx: &mut SceneCtx) {
             ..Pad2DSpec::default()
         },
     );
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(format!("({x:.2}, {y:.2}) · ({px:.0}, {py:.0})"));
     });
 }
@@ -82,10 +82,10 @@ fn pad2d(ctx: &mut SceneCtx) {
 /// The `set_*` family — the write half: content that does its own hit-testing writes the knob back,
 /// and the panel on the right follows. Plain egui buttons stand in for that content here.
 ///
-/// A stage lends only a `Ui` while a write needs the whole `SceneCtx`,
-/// so each click is noted here and applied once the stage has closed.
+/// A stage holds the `SceneCtx` for the call, so each click is noted
+/// here and applied once the stage has closed.
 #[scene("writeback")]
-fn writeback(ctx: &mut SceneCtx) {
+fn writeback(ctx: &mut SceneCtx, ui: &mut Ui) {
     const MODES: &[&str] = &["off", "auto", "on"];
     const TINTS: [(&str, egui::Color32); 3] = [
         ("red", egui::Color32::from_rgb(0xD8, 0x6C, 0x6C)),
@@ -103,7 +103,7 @@ fn writeback(ctx: &mut SceneCtx) {
     let (mut step, mut flip) = (0.0, false);
     let (mut typed, mut picked, mut chose, mut cycled, mut aimed) = (None, None, None, false, None);
 
-    stage!(ctx, (300.0, 190.0), |ui| {
+    stage!(ctx, ui, (300.0, 190.0), |ui| {
         ui.horizontal(|ui| {
             ui.label("count");
             if ui.button("−").clicked() {
@@ -200,7 +200,7 @@ fn writeback(ctx: &mut SceneCtx) {
 
 /// `group` — a labelled separator that splits the knobs beneath it into sections.
 #[scene("group")]
-fn group(ctx: &mut SceneCtx) {
+fn group(ctx: &mut SceneCtx, ui: &mut Ui) {
     ctx.group("position");
     let x = ctx.slider("x", 0.0, -1.0, 1.0, 0.1);
     let y = ctx.slider("y", 0.0, -1.0, 1.0, 0.1);
@@ -208,7 +208,7 @@ fn group(ctx: &mut SceneCtx) {
     let tint = ctx.color("tint", egui::Color32::WHITE);
     let bold = ctx.toggle("bold", false);
     let label = egui::RichText::new(format!("({x:.1}, {y:.1})")).color(tint);
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         ui.label(if bold { label.strong() } else { label });
     });
 }

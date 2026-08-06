@@ -70,6 +70,9 @@ use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, vis
 /// Common imports for scene files: `use gallery::prelude::*;`
 /// then bare `scene_meta!` / `#[scene]`.
 pub mod prelude {
+    /// Every scene signature names it, so it comes bare rather than through `egui::`.
+    pub use egui::Ui;
+
     pub use crate::{
         Offscreen, Pad2DSpec, Pointer, SceneCtx, SceneEntry, Stage, StageSpec, action, scene,
         scene_meta, stage,
@@ -81,7 +84,7 @@ pub mod prelude {
 /// `default` marks the group's default scene.
 #[derive(Clone, Copy)]
 pub struct SceneEntry {
-    pub render: fn(&mut SceneCtx<'_>),
+    pub render: fn(&mut SceneCtx<'_>, &mut egui::Ui),
     pub name: &'static str,
     pub module_path: &'static str,
     pub default: bool,
@@ -127,30 +130,30 @@ macro_rules! scene_meta {
 /// [`SceneCtx::stage`], with the size spelled the short way.
 ///
 /// ```ignore
-/// stage!(ctx, |ui| ui.button("Save"));            // fits its content
-/// stage!(ctx, (300.0, 200.0), |ui| scroll(ui));   // a pinned viewport
-/// stage!(ctx, (300, 200), |ui| scroll(ui));       // ...however the numbers are written
-/// stage!(ctx, 200, |ui| avatar(ui));              // a square
-/// stage!(ctx, fill, |ui| dashboard(ui));          // the whole canvas
-/// stage!(ctx, scroll, |ui| sheet(ui));            // ...and scrolls once it overflows
+/// stage!(ctx, ui, |ui| ui.button("Save"));            // fits its content
+/// stage!(ctx, ui, (300.0, 200.0), |ui| scroll(ui));   // a pinned viewport
+/// stage!(ctx, ui, (300, 200), |ui| scroll(ui));       // ...however the numbers are written
+/// stage!(ctx, ui, 200, |ui| avatar(ui));              // a square
+/// stage!(ctx, ui, fill, |ui| dashboard(ui));          // the whole canvas
+/// stage!(ctx, ui, scroll, |ui| sheet(ui));            // ...and scrolls once it overflows
 /// ```
 #[macro_export]
 macro_rules! stage {
     // Before the size arm: `fit`/`fill` are bare idents, which `$size:expr` would swallow.
-    ($ctx:expr, fit, $add:expr $(,)?) => {
-        $ctx.stage($crate::Stage::Fit, $add)
+    ($ctx:expr, $ui:expr, fit, $add:expr $(,)?) => {
+        $ctx.stage($ui, $crate::Stage::Fit, $add)
     };
-    ($ctx:expr, fill, $add:expr $(,)?) => {
-        $ctx.stage($crate::Stage::Fill, $add)
+    ($ctx:expr, $ui:expr, fill, $add:expr $(,)?) => {
+        $ctx.stage($ui, $crate::Stage::Fill, $add)
     };
-    ($ctx:expr, scroll, $add:expr $(,)?) => {
-        $ctx.stage($crate::Stage::Fill.scrollable(), $add)
+    ($ctx:expr, $ui:expr, scroll, $add:expr $(,)?) => {
+        $ctx.stage($ui, $crate::Stage::Fill.scrollable(), $add)
     };
-    ($ctx:expr, $size:expr, $add:expr $(,)?) => {
-        $ctx.stage($size, $add)
+    ($ctx:expr, $ui:expr, $size:expr, $add:expr $(,)?) => {
+        $ctx.stage($ui, $size, $add)
     };
-    ($ctx:expr, $add:expr $(,)?) => {
-        $ctx.stage($crate::Stage::Fit, $add)
+    ($ctx:expr, $ui:expr, $add:expr $(,)?) => {
+        $ctx.stage($ui, $crate::Stage::Fit, $add)
     };
 }
 
@@ -235,6 +238,8 @@ pub struct Settings {
     /// Initial Controls-panel width; egui's default when `None`.
     /// A hand resize persists over it.
     pub controls_default_width: Option<f32>,
+    /// Which sidebar folders start folded.
+    pub collapsed: Collapsed,
 }
 
 impl Settings {
@@ -244,6 +249,7 @@ impl Settings {
         Self {
             renderer,
             controls_default_width: None,
+            collapsed: Collapsed::default(),
         }
     }
 
@@ -252,6 +258,77 @@ impl Settings {
     pub fn controls_default_width(mut self, width: f32) -> Self {
         self.controls_default_width = Some(width);
         self
+    }
+
+    /// Fold sidebar folders on the first frame: `true` for all of them,
+    /// or the top-level names to fold and leave the rest open.
+    ///
+    /// ```ignore
+    /// Settings::new(Renderer::Glow).collapsed(true)
+    /// Settings::new(Renderer::Glow).collapsed(["Components", "Layout"])
+    /// ```
+    #[must_use]
+    pub fn collapsed(mut self, which: impl Into<Collapsed>) -> Self {
+        self.collapsed = which.into();
+        self
+    }
+}
+
+/// Which sidebar folders a gallery opens with folded — [`Settings::collapsed`] takes it.
+///
+/// A starting state, not a fixed one: egui remembers each folder from the moment it is first
+/// drawn, so opening one keeps it open for the rest of the session. A filter still reveals
+/// everything it matches, folded or not.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Collapsed {
+    /// Every folder starts open.
+    #[default]
+    Nothing,
+    /// Every folder starts folded, at every depth.
+    Everything,
+    /// The top-level folders named here, compared without case. A name matching none of them
+    /// folds nothing — including a one-segment title, which the sidebar shows as a scene.
+    Roots(Vec<String>),
+}
+
+impl From<bool> for Collapsed {
+    fn from(all: bool) -> Self {
+        if all { Self::Everything } else { Self::Nothing }
+    }
+}
+
+impl From<Vec<String>> for Collapsed {
+    fn from(roots: Vec<String>) -> Self {
+        Self::Roots(roots)
+    }
+}
+
+impl From<Vec<&str>> for Collapsed {
+    fn from(roots: Vec<&str>) -> Self {
+        Self::Roots(roots.into_iter().map(ToOwned::to_owned).collect())
+    }
+}
+
+/// So an array literal needs no `vec!` or `.to_vec()` around it.
+impl<const N: usize> From<[&str; N]> for Collapsed {
+    fn from(roots: [&str; N]) -> Self {
+        Self::Roots(roots.into_iter().map(ToOwned::to_owned).collect())
+    }
+}
+
+impl Collapsed {
+    /// Whether a folder called `name` starts folded. `at_root` because
+    /// [`Roots`](Self::Roots) names top-level folders only.
+    fn folds(&self, name: &str, at_root: bool) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Everything => true,
+            Self::Roots(roots) if at_root => {
+                let name = name.to_lowercase();
+                roots.iter().any(|root| root.to_lowercase() == name)
+            }
+            Self::Roots(_) => false,
+        }
     }
 }
 
@@ -413,15 +490,20 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                             });
                             ui.separator();
                             let filter = self.state.filter.clone();
+                            let sidebar = Sidebar {
+                                scenes: &manifest.scenes,
+                                icons,
+                                filter: &filter,
+                                collapsed: &self.settings.collapsed,
+                            };
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 render_node(
                                     ui,
                                     &tree,
-                                    &manifest.scenes,
+                                    &sidebar,
                                     &mut self.state.selected,
-                                    icons,
-                                    &filter,
                                     false,
+                                    true,
                                 );
                             });
                         });
@@ -601,8 +683,8 @@ pub(crate) fn render_canvas(
             let declared = egui::Frame::new()
                 .inner_margin(egui::Margin::same(16))
                 .show(ui, |ui| {
-                    let mut ctx = SceneCtx::new(ui, store, gl_deps);
-                    (scene.render)(&mut ctx);
+                    let mut ctx = SceneCtx::new(store, gl_deps);
+                    (scene.render)(&mut ctx, ui);
                     ctx.declared()
                 })
                 .inner;
@@ -617,6 +699,16 @@ const FOLDER_TINT: egui::Color32 = egui::Color32::from_rgb(0xC8, 0x9B, 0x3C);
 const SCENE_TINT: egui::Color32 = egui::Color32::from_rgb(0x6C, 0x9C, 0xD8);
 const ICON_SIZE: f32 = 12.0;
 
+/// What every level of the sidebar draws against,
+/// gathered because none of it changes on the way down.
+#[derive(Clone, Copy)]
+struct Sidebar<'a> {
+    scenes: &'a [SceneEntry],
+    icons: &'a Icons,
+    filter: &'a str,
+    collapsed: &'a Collapsed,
+}
+
 /// Render a tree node, honouring the filter: a group stays if its name
 /// or a descendant matches, and a matched ancestor shows all its descendants.
 /// Single-scene default groups render as flat leaves;
@@ -625,12 +717,17 @@ const ICON_SIZE: f32 = 12.0;
 fn render_node(
     ui: &mut egui::Ui,
     node: &TreeNode,
-    scenes: &[SceneEntry],
+    sidebar: &Sidebar<'_>,
     selected: &mut Option<String>,
-    icons: &Icons,
-    filter: &str,
     ancestor_matched: bool,
+    at_root: bool,
 ) {
+    let Sidebar {
+        scenes,
+        icons,
+        filter,
+        collapsed,
+    } = *sidebar;
     let filtering = !filter.is_empty();
     for (name, child) in &node.children {
         let name_matches = filtering && fuzzy(name, filter);
@@ -651,10 +748,10 @@ fn render_node(
             header = if filtering {
                 header.open(Some(true))
             } else {
-                header.default_open(true)
+                header.default_open(!collapsed.folds(name, at_root))
             };
             let resp = header.show(ui, |ui| {
-                render_node(ui, child, scenes, selected, icons, filter, descend);
+                render_node(ui, child, sidebar, selected, descend, false);
             });
             let hr = resp.header_response.rect;
             let rect = egui::Rect::from_center_size(
@@ -1060,7 +1157,7 @@ macro_rules! scenes_dylib {
 pub(crate) mod test_support {
     use crate::{SceneCtx, SceneEntry, SceneGroupMeta};
 
-    fn noop(_: &mut SceneCtx) {}
+    fn noop(_: &mut SceneCtx, _: &mut egui::Ui) {}
 
     pub(crate) fn scene(
         name: &'static str,
@@ -1204,7 +1301,7 @@ mod tests {
     #[test]
     fn what_a_scene_reports_reaches_the_actions_panel() {
         // Once, as an event would — a scene reporting every frame is the misuse the docs warn of.
-        fn reports(_ctx: &mut SceneCtx<'_>) {
+        fn reports(_ctx: &mut SceneCtx<'_>, _ui: &mut egui::Ui) {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -1239,6 +1336,16 @@ mod tests {
 
     // Structural (egui_kittest + AccessKit): the rendered sidebar, queried by label.
 
+    /// A sidebar with nothing folded and no filter — what most of these tests want.
+    fn sidebar<'a>(scenes: &'a [SceneEntry], icons: &'a crate::svg::Icons) -> Sidebar<'a> {
+        Sidebar {
+            scenes,
+            icons,
+            filter: "",
+            collapsed: &Collapsed::Nothing,
+        }
+    }
+
     #[test]
     fn sidebar_labels_a_default_scene_by_its_title_not_its_fn_name() {
         let scenes = vec![scene("view", "m", true)];
@@ -1249,7 +1356,14 @@ mod tests {
         let icons = crate::svg::Icons::load();
         let mut selected = None;
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
-            render_node(ui, &tree, &scenes, &mut selected, &icons, "", false);
+            render_node(
+                ui,
+                &tree,
+                &sidebar(&scenes, &icons),
+                &mut selected,
+                false,
+                true,
+            );
         });
         harness.run();
         assert!(
@@ -1273,10 +1387,114 @@ mod tests {
         let icons = crate::svg::Icons::load();
         let mut selected = None;
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
-            render_node(ui, &tree, &scenes, &mut selected, &icons, "", false);
+            render_node(
+                ui,
+                &tree,
+                &sidebar(&scenes, &icons),
+                &mut selected,
+                false,
+                true,
+            );
         });
         harness.run();
         assert!(harness.query_by_label("Grid").is_some());
         assert!(harness.query_by_label("Aerial").is_some());
+    }
+
+    /// Two roots, each with one scene under it.
+    /// Every name is distinct: a label shared by a folder and a leaf would match twice,
+    /// and `query_by_label` takes that as the test's own mistake.
+    fn two_roots() -> (Vec<SceneEntry>, TreeNode) {
+        let scenes = vec![scene("grid", "m", false), scene("spin", "n", false)];
+        let tree = build_tree(&Manifest {
+            scenes: scenes.clone(),
+            groups: vec![group("m", "Components / Map"), group("n", "Motion / Orbit")],
+        });
+        (scenes, tree)
+    }
+
+    /// A folded header draws none of its children, so a label from inside one
+    /// is absent from the tree AccessKit reports.
+    fn labels_under(collapsed: Collapsed, filter: &'static str) -> Vec<bool> {
+        let (scenes, tree) = two_roots();
+        let icons = crate::svg::Icons::load();
+        let mut selected = None;
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            let sidebar = Sidebar {
+                scenes: &scenes,
+                icons: &icons,
+                filter,
+                collapsed: &collapsed,
+            };
+            render_node(ui, &tree, &sidebar, &mut selected, false, true);
+        });
+        harness.run();
+        ["Grid", "Spin"]
+            .into_iter()
+            .map(|label| harness.query_by_label(label).is_some())
+            .collect()
+    }
+
+    #[test]
+    fn every_folder_starts_folded_when_the_setting_says_so() {
+        assert_eq!(
+            labels_under(Collapsed::Everything, ""),
+            [false, false],
+            "neither root shows its scenes"
+        );
+        assert_eq!(
+            labels_under(Collapsed::Nothing, ""),
+            [true, true],
+            "and the default leaves both open"
+        );
+    }
+
+    #[test]
+    fn only_the_named_roots_start_folded_and_the_name_ignores_case() {
+        assert_eq!(
+            labels_under(Collapsed::from(["components"]), ""),
+            [false, true],
+            "the named root folds however it was capitalised; the other is untouched"
+        );
+        assert_eq!(
+            labels_under(Collapsed::from(["Nothing By That Name"]), ""),
+            [true, true],
+            "a name matching no root folds nothing"
+        );
+    }
+
+    /// Folding is a starting state, and a filter is a search — a match has to show
+    /// even when it lives inside a folder that started folded.
+    #[test]
+    fn a_filter_reaches_into_a_folder_that_started_folded() {
+        assert_eq!(
+            labels_under(Collapsed::Everything, "spin"),
+            [false, true],
+            "the match shows and the folder that doesn't match stays out of the way"
+        );
+    }
+
+    #[test]
+    fn a_bool_and_a_list_of_roots_both_convert() {
+        assert_eq!(Collapsed::from(true), Collapsed::Everything);
+        assert_eq!(Collapsed::from(false), Collapsed::Nothing);
+        let roots = Collapsed::Roots(vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(Collapsed::from(["a", "b"]), roots, "an array literal");
+        assert_eq!(Collapsed::from(vec!["a", "b"]), roots, "a vec of strs");
+        assert_eq!(
+            Collapsed::from(vec!["a".to_owned(), "b".to_owned()]),
+            roots,
+            "and a vec of owned strings"
+        );
+    }
+
+    /// Only the top level: `Roots` names the folders the sidebar opens with,
+    /// so a nested folder of the same name keeps its own state.
+    #[test]
+    fn a_nested_folder_is_not_folded_by_a_root_of_the_same_name() {
+        let collapsed = Collapsed::from(["deep"]);
+        assert!(collapsed.folds("deep", true));
+        assert!(!collapsed.folds("deep", false));
+        assert!(Collapsed::Everything.folds("deep", false), "unlike all");
     }
 }

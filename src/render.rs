@@ -17,7 +17,7 @@ use indoc::formatdoc;
 use eframe::{egui_glow, glow};
 
 #[cfg(not(target_vendor = "apple"))]
-use crate::glow_capture::GlowCapture;
+use crate::glow_capture::SharedCapture;
 
 use crate::{
     ChoiceStyle, GlLoader, Knob, Manifest, PANEL_BG, RenderTarget, Renderer, SceneEntry,
@@ -74,11 +74,13 @@ pub(crate) fn render(
     setup: &impl Fn(&egui::Context),
     capture: &Capture,
 ) -> Result<(), Diagnostic> {
+    // Before the loop rather than inside it — [`Session`] has why that matters.
+    let session = Session::open(renderer)?;
     let mut written = Vec::new();
     let mut panels = Vec::new();
     let mut outcome = Ok(());
     for shot in &capture.shots {
-        match shoot(manifest, renderer, setup, shot) {
+        match shoot(manifest, &session, setup, shot) {
             Ok(None) => {}
             Ok(Some((made, image))) => {
                 // Held only for a sheet, so a run without one keeps a single capture in memory
@@ -112,7 +114,7 @@ pub(crate) fn render(
                 )),
             );
         } else {
-            match gather(panels, out, renderer, setup) {
+            match gather(panels, out, &session, setup) {
                 Ok(sheet) => written.push(sheet),
                 Err(failure) => outcome = Err(failure),
             }
@@ -135,10 +137,10 @@ pub(crate) struct Capture {
 fn gather(
     panels: Vec<Panel>,
     out: &Utf8Path,
-    renderer: Renderer,
+    session: &Session,
     setup: &impl Fn(&egui::Context),
 ) -> Result<Written, Diagnostic> {
-    let image = sheet::compose(panels, renderer, setup)?;
+    let image = sheet::compose(panels, session, setup)?;
     write_png(&image, out)?;
     Ok(Written {
         path: landed(out),
@@ -232,7 +234,7 @@ pub(crate) type GlPainter = std::rc::Rc<std::cell::RefCell<egui_glow::Painter>>;
 /// On a platform with no headless glow capture, when glow is what was configured.
 pub(crate) fn open<A: eframe::App + 'static>(
     size: egui::Vec2,
-    renderer: Renderer,
+    session: &Session,
     setup: &impl Fn(&egui::Context),
     app: impl FnOnce(&eframe::CreationContext<'_>, Option<GlPainter>) -> A,
 ) -> Result<egui_kittest::Harness<'static, A>, Diagnostic> {
@@ -240,28 +242,42 @@ pub(crate) fn open<A: eframe::App + 'static>(
         .with_size(size)
         // Pinned, so the PNG's pixel dimensions are the requested size rather than a scaled one.
         .with_pixels_per_point(1.0);
-    #[cfg(not(target_vendor = "apple"))]
-    let (painter, builder) = match renderer {
-        Renderer::Glow => {
-            let capture = GlowCapture::new()?;
-            (Some(capture.painter()), builder.renderer(capture))
-        }
-        Renderer::Wgpu => (None, builder),
-    };
-    #[cfg(target_vendor = "apple")]
-    let (painter, builder) = match renderer {
-        Renderer::Glow => {
-            return Err(
-                Diagnostic::new("this platform has no headless glow capture")
-                    .hint("configure `Renderer::Wgpu`, whose capture needs no GL context"),
-            );
-        }
-        Renderer::Wgpu => (None, builder),
+    let (painter, builder) = match session {
+        #[cfg(not(target_vendor = "apple"))]
+        Session::Glow(capture) => (Some(capture.painter()), builder.renderer(capture.clone())),
+        Session::Wgpu => (None, builder),
     };
     Ok(builder.build_eframe(|cc| {
         install_context(cc, setup);
         app(cc, painter)
     }))
+}
+
+/// The GL a run paints through, opened once and lent to every shot.
+///
+/// A type rather than a convention, because [`SharedCapture`] is only correct
+/// when one of it covers the whole run — its own docs have why.
+pub(crate) enum Session {
+    #[cfg(not(target_vendor = "apple"))]
+    Glow(SharedCapture),
+    Wgpu,
+}
+
+impl Session {
+    /// # Errors
+    /// When glow is configured and the platform has no headless GL to give.
+    pub(crate) fn open(renderer: Renderer) -> Result<Self, Diagnostic> {
+        match renderer {
+            #[cfg(not(target_vendor = "apple"))]
+            Renderer::Glow => Ok(Self::Glow(SharedCapture::new()?)),
+            #[cfg(target_vendor = "apple")]
+            Renderer::Glow => Err(
+                Diagnostic::new("this platform has no headless glow capture")
+                    .hint("configure `Renderer::Wgpu`, whose capture needs no GL context"),
+            ),
+            Renderer::Wgpu => Ok(Self::Wgpu),
+        }
+    }
 }
 
 /// Draw `scene` at `size`, applying the shot's knobs as the frames go by.
@@ -274,12 +290,12 @@ pub(crate) fn open<A: eframe::App + 'static>(
 /// For a key that named no knob by the last frame.
 fn draw(
     scene: SceneEntry,
-    renderer: Renderer,
+    session: &Session,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
     size: egui::Vec2,
 ) -> Result<egui_kittest::Harness<'static, Canvas>, Diagnostic> {
-    let mut harness = open(size, renderer, setup, |cc, painter| Canvas {
+    let mut harness = open(size, session, setup, |cc, painter| Canvas {
         scene,
         knobs: Vec::new(),
         gl: cc.gl.clone(),
@@ -320,12 +336,12 @@ fn settle(
 /// Draw one shot: resolve its scene, draw it at a size that holds it, then capture.
 fn shoot(
     manifest: &Manifest,
-    renderer: Renderer,
+    session: &Session,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
 ) -> Result<Option<(Written, image::RgbaImage)>, Diagnostic> {
     let scene = *resolve_scene(&manifest.scenes, &shot.scene)?;
-    let mut harness = draw(scene, renderer, setup, shot, shot.size)?;
+    let mut harness = draw(scene, session, setup, shot, shot.size)?;
 
     // The canvas scrolls, so a scene that outgrew its size would be cropped to it.
     // A shot names the size to lay out at, not how much of the result to keep,
@@ -1203,7 +1219,7 @@ mod tests {
     #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn each_offscreen_call_in_a_scene_keeps_its_own_target() {
-        fn two(ctx: &mut crate::SceneCtx<'_>) {
+        fn two(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
             fn fill(target: &crate::Offscreen, rgb: (f32, f32, f32)) {
                 let loader = target.gl_loader();
                 // SAFETY: the capture made its context current, and `loader` resolves against it.
@@ -1216,8 +1232,8 @@ mod tests {
                     gl.clear(glow::COLOR_BUFFER_BIT);
                 }
             }
-            ctx.offscreen([64_u32, 32], |target| fill(target, (1.0, 0.0, 0.0)));
-            ctx.offscreen([32_u32, 16], |target| fill(target, (0.0, 0.0, 1.0)));
+            ctx.offscreen(ui, [64_u32, 32], |target| fill(target, (1.0, 0.0, 0.0)));
+            ctx.offscreen(ui, [32_u32, 16], |target| fill(target, (0.0, 0.0, 1.0)));
         }
         let manifest = Manifest {
             scenes: vec![SceneEntry {
@@ -1275,6 +1291,200 @@ mod tests {
         assert!(mostly('b') > 128, "and the second keeps its blue");
     }
 
+    /// A context per shot leaves a scene's cached GL objects dead
+    /// from the second shot on — [`SharedCapture`] has the mechanism.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn every_shot_in_a_run_draws_even_when_the_scene_caches_against_the_context() {
+        /// Distinctive enough that no other texture in the context is this wide by chance.
+        const WIDE: i32 = 37;
+
+        thread_local! {
+            // A GL object made once and reused, standing in for a cached femtovg canvas.
+            static CACHED: std::cell::Cell<Option<glow::NativeTexture>> =
+                const { std::cell::Cell::new(None) };
+        }
+        fn caches_a_texture(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            ctx.offscreen(ui, [40_u32, 40], |target| {
+                let loader = target.gl_loader();
+                // SAFETY: the capture made its context current, and `loader` resolves against it.
+                let gl =
+                    unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) };
+                use eframe::glow::HasContext as _;
+                let texture = CACHED.get().unwrap_or_else(|| {
+                    // SAFETY: a live context; the name is kept, and its width is the mark read back.
+                    let made = unsafe {
+                        let made = gl.create_texture().expect("a texture");
+                        gl.bind_texture(glow::TEXTURE_2D, Some(made));
+                        gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::RGBA as i32,
+                            WIDE,
+                            1,
+                            0,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(None),
+                        );
+                        made
+                    };
+                    CACHED.set(Some(made));
+                    made
+                });
+                // A name proves nothing — a fresh context reissues them from 1, and egui's painter
+                // takes them. The width is what says the object is still the one we made.
+                //
+                // SAFETY: querying a name a dead context issued is the failure under test;
+                // the driver reports it rather than trapping.
+                let ours =
+                    unsafe { gl.get_texture_level_parameter_i32(texture, 0, glow::TEXTURE_WIDTH) };
+                // SAFETY: the target's framebuffer is bound for the duration of this closure.
+                unsafe {
+                    let shade = if ours == WIDE { 1.0 } else { 0.0 };
+                    gl.clear_color(0.0, shade, 0.0, 1.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                }
+            });
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: caches_a_texture,
+                name: "caching",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-every-shot");
+        let shot = |name: &str| Shot {
+            scene: "caching".to_owned(),
+            out: Some(dir.join(format!("{name}.png"))),
+            size: egui::vec2(120.0, 120.0),
+            knobs: Vec::new(),
+            frames: None,
+            trim: true,
+            list: false,
+            template: false,
+        };
+        let capture = Capture {
+            shots: vec![shot("one"), shot("two"), shot("three")],
+            sheet: None,
+        };
+        CACHED.set(None);
+        render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+            .expect("every shot renders");
+
+        let green = |name: &str| {
+            let png = std::fs::read(dir.join(format!("{name}.png"))).expect("a capture");
+            let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .expect("a PNG")
+                .to_rgba8();
+            image
+                .pixels()
+                .filter(|p| {
+                    // Green rather than merely bright, so the stage's pale chrome stays out of it.
+                    let [r, g, b, a] = p.0;
+                    a > 128 && g > 128 && r < 64 && b < 64
+                })
+                .count()
+        };
+        let (one, two, three) = (green("one"), green("two"), green("three"));
+        assert!(one > 512, "the first shot draws: {one} green pixels");
+        assert_eq!(
+            (one, one),
+            (two, three),
+            "and every later shot draws the same, its cached texture still belonging to a live context"
+        );
+    }
+
+    /// The pixels a shot writes have to be the ones its overrides produced, for content drawn
+    /// through `offscreen` as much as for egui's own — otherwise a scene drawn
+    /// entirely in GL captures its declared defaults whatever the recipe says.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_shot_override_reaches_the_pixels_an_offscreen_scene_draws() {
+        fn tinted(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            let red = ctx.slider("red", 0.0, 0.0, 1.0, 0.0);
+            // Staged, as a scene drawn entirely in GL has it — the override has to reach
+            // the texture, not just the egui chrome around it.
+            ctx.offscreen_stage(ui, crate::Stage::Fit, [40_u32, 40], move |target| {
+                let loader = target.gl_loader();
+                // SAFETY: the capture made its context current, and `loader` resolves against it.
+                let gl =
+                    unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) };
+                // SAFETY: the target's framebuffer is bound for the duration of this closure.
+                unsafe {
+                    use eframe::glow::HasContext as _;
+                    gl.clear_color(red, 0.0, 0.0, 1.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                }
+            });
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: tinted,
+                name: "tinted",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-offscreen-override");
+        let shot = |name: &str, knobs: Vec<(String, String)>| Shot {
+            scene: "tinted".to_owned(),
+            out: Some(dir.join(format!("{name}.png"))),
+            size: egui::vec2(120.0, 120.0),
+            knobs,
+            frames: None,
+            trim: true,
+            list: false,
+            template: false,
+        };
+        // The override rides the second shot, where a run that rebuilt its context per shot
+        // would have left nothing to override.
+        let capture = Capture {
+            shots: vec![
+                shot("default", Vec::new()),
+                // The scene declares 0.0, so anything red in this one came from here.
+                shot("overridden", knobs(&[("red", "1")])),
+            ],
+            sheet: None,
+        };
+        render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+            .expect("both shots render");
+
+        let reds = |name: &str| {
+            let png = std::fs::read(dir.join(format!("{name}.png"))).expect("a capture");
+            let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .expect("a PNG")
+                .to_rgba8();
+            image
+                .pixels()
+                .filter(|p| {
+                    // Red rather than merely bright: the stage's own chrome is pale grey,
+                    // which a red channel alone would count.
+                    let [r, g, b, a] = p.0;
+                    a > 128 && r > 128 && g < 64 && b < 64
+                })
+                .count()
+        };
+        assert_eq!(reds("default"), 0, "the declared default is not red at all");
+        assert!(
+            reds("overridden") > 512,
+            "and the override drove the offscreen draw: {} red pixels",
+            reds("overridden")
+        );
+    }
+
     /// A staged image is a call site like any other: its own slot, in the order the scene makes it,
     /// leaving the bare call after it on the slot it already had. The caption reports the image,
     /// which for a fitted stage is the response's own rect.
@@ -1285,11 +1495,11 @@ mod tests {
             static STAGED: std::cell::Cell<Option<egui::Rect>> =
                 const { std::cell::Cell::new(None) };
         }
-        fn staged_and_bare(ctx: &mut crate::SceneCtx<'_>) {
+        fn staged_and_bare(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
             let blank = |_: &crate::Offscreen| {};
-            let shown = ctx.offscreen_stage(crate::Stage::Fit, [48_u32, 24], blank);
+            let shown = ctx.offscreen_stage(ui, crate::Stage::Fit, [48_u32, 24], blank);
             STAGED.set(shown.map(|response| response.rect));
-            ctx.offscreen([16_u32, 16], blank);
+            ctx.offscreen(ui, [16_u32, 16], blank);
         }
         let harness = staged_harness(staged_and_bare, "staged-and-bare");
         assert_eq!(
@@ -1315,8 +1525,8 @@ mod tests {
         thread_local! {
             static DREW: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         }
-        fn counts(ctx: &mut crate::SceneCtx<'_>) {
-            ctx.offscreen_stage(crate::Stage::Fit, [48_u32, 24], |_| {
+        fn counts(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            ctx.offscreen_stage(ui, crate::Stage::Fit, [48_u32, 24], |_| {
                 DREW.set(DREW.get() + 1);
             });
         }
@@ -1336,10 +1546,16 @@ mod tests {
         );
     }
 
+    /// The GL for a test's shots, as a run opens one.
+    #[cfg(not(target_vendor = "apple"))]
+    fn glow() -> Session {
+        Session::open(Renderer::Glow).expect("a headless glow session")
+    }
+
     /// One scene, drawn as a shot would draw it, with the harness left open to poke at.
     #[cfg(not(target_vendor = "apple"))]
     fn staged_harness(
-        render: fn(&mut crate::SceneCtx<'_>),
+        render: fn(&mut crate::SceneCtx<'_>, &mut egui::Ui),
         name: &'static str,
     ) -> egui_kittest::Harness<'static, Canvas> {
         let scene = SceneEntry {
@@ -1360,14 +1576,7 @@ mod tests {
             list: false,
             template: false,
         };
-        draw(
-            scene,
-            Renderer::Glow,
-            &|_: &egui::Context| {},
-            &shot,
-            shot.size,
-        )
-        .expect("the scene draws")
+        draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size).expect("the scene draws")
     }
 
     /// A scene may make fewer calls on a later frame — one behind a toggle — and the targets
@@ -1379,11 +1588,11 @@ mod tests {
         thread_local! {
             static BOTH: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
         }
-        fn sometimes_two(ctx: &mut crate::SceneCtx<'_>) {
+        fn sometimes_two(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
             let blank = |_: &crate::Offscreen| {};
-            ctx.offscreen([32_u32, 32], blank);
+            ctx.offscreen(ui, [32_u32, 32], blank);
             if BOTH.get() {
-                ctx.offscreen([16_u32, 16], blank);
+                ctx.offscreen(ui, [16_u32, 16], blank);
             }
         }
         let manifest = Manifest {
@@ -1409,7 +1618,7 @@ mod tests {
         };
         let mut harness = draw(
             manifest.scenes[0],
-            Renderer::Glow,
+            &glow(),
             &|_: &egui::Context| {},
             &shot,
             shot.size,
@@ -1447,8 +1656,8 @@ mod tests {
                 const { std::cell::RefCell::new(None) };
             static SWAPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         }
-        fn caches_gl(ctx: &mut crate::SceneCtx<'_>) {
-            ctx.offscreen([64_u32, 64], |target| {
+        fn caches_gl(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            ctx.offscreen(ui, [64_u32, 64], |target| {
                 let loader = target.gl_loader();
                 FIRST.with_borrow_mut(|first| match first {
                     Some(seen) if !std::sync::Arc::ptr_eq(seen, &loader) => SWAPPED.set(true),
@@ -1481,7 +1690,7 @@ mod tests {
         };
         let harness = draw(
             manifest.scenes[0],
-            Renderer::Glow,
+            &glow(),
             &|_: &egui::Context| {},
             &shot,
             shot.size,
@@ -1497,7 +1706,7 @@ mod tests {
         FIRST.with_borrow_mut(|first| *first = None);
         SWAPPED.set(false);
 
-        shoot(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &shot).expect("the shot renders");
+        shoot(&manifest, &glow(), &|_: &egui::Context| {}, &shot).expect("the shot renders");
         assert!(
             !SWAPPED.get(),
             "the scene saw one GL context for the whole shot"
@@ -1509,7 +1718,7 @@ mod tests {
     #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn a_recipe_outlives_a_scene_writing_its_own_knob() {
-        fn self_nudging(ctx: &mut crate::SceneCtx<'_>) {
+        fn self_nudging(ctx: &mut crate::SceneCtx<'_>, _ui: &mut egui::Ui) {
             let speed = ctx.slider("speed", 1.0, 0.0, 100.0, 0.0);
             ctx.set_slider("speed", speed + 1.0);
         }
@@ -1531,14 +1740,8 @@ mod tests {
             list: false,
             template: false,
         };
-        let harness = draw(
-            scene,
-            Renderer::Glow,
-            &|_: &egui::Context| {},
-            &shot,
-            shot.size,
-        )
-        .expect("the shot draws");
+        let harness = draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size)
+            .expect("the shot draws");
         assert!(
             matches!(harness.state().knobs[0], Knob::Slider { value, .. } if value == 5.0),
             "every settle frame re-applies the recipe, and one more after the last draw"
@@ -1689,8 +1892,8 @@ mod tests {
     /// A scene that paints through [`crate::SceneCtx::offscreen`]
     /// — the glow-only path, where a GL library draws into a framebuffer
     /// gallery owns and egui shows the result inline.
-    fn draws_offscreen(ctx: &mut crate::SceneCtx<'_>) {
-        ctx.offscreen([32_u32, 32], |target| {
+    fn draws_offscreen(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+        ctx.offscreen(ui, [32_u32, 32], |target| {
             let loader = target.gl_loader();
             // SAFETY: the capture made its context current, and `loader` resolves against it.
             let gl = unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) };
@@ -1712,7 +1915,7 @@ mod tests {
     /// Several offscreen images at different sizes, so the reference catches one call site's target
     /// standing in for another's — which reads as the same picture repeated, at the wrong shape.
     /// The last is staged, which also holds the chrome a rendered frame gets.
-    fn draws_offscreen_slots(ctx: &mut crate::SceneCtx<'_>) {
+    fn draws_offscreen_slots(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
         fn flat(target: &crate::Offscreen, rgb: (f32, f32, f32)) {
             let loader = target.gl_loader();
             // SAFETY: the capture made its context current, and `loader` resolves against it.
@@ -1724,45 +1927,46 @@ mod tests {
                 gl.clear(glow::COLOR_BUFFER_BIT);
             }
         }
-        ctx.ui.label("wide");
-        ctx.offscreen([64_u32, 24], |target| flat(target, (0.9, 0.2, 0.2)));
-        ctx.ui.label("tall");
-        ctx.offscreen([24_u32, 48], |target| flat(target, (0.2, 0.4, 0.9)));
+        ui.label("wide");
+        ctx.offscreen(ui, [64_u32, 24], |target| flat(target, (0.9, 0.2, 0.2)));
+        ui.label("tall");
+        ctx.offscreen(ui, [24_u32, 48], |target| flat(target, (0.2, 0.4, 0.9)));
         // Staged, so the reference also holds the chrome a rendered frame gets:
         // the checkerboard around it, the size caption, the collapse arrow.
-        ctx.ui.label("staged");
-        ctx.offscreen_stage(crate::Stage::Fit, [40_u32, 40], |target| {
+        ui.label("staged");
+        ctx.offscreen_stage(ui, crate::Stage::Fit, [40_u32, 40], |target| {
             flat(target, (0.2, 0.8, 0.4));
         });
     }
 
     /// A scene of the kind the shell is for: prose, and a fixed-size stage on the checkerboard.
-    fn a_documented_stage(ctx: &mut crate::SceneCtx<'_>) {
-        ctx.ui.heading("Snapshot");
-        ctx.ui.label("prose above the stage");
-        crate::stage!(ctx, (96, 40), |ui: &mut egui::Ui| {
+    fn a_documented_stage(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.heading("Snapshot");
+        ui.label("prose above the stage");
+        crate::stage!(ctx, ui, (96, 40), |ui: &mut egui::Ui| {
             ui.label("in the stage");
         });
     }
 
     /// Each way a stage can be sized, so one reference covers the conversions rather than one of them.
-    fn every_stage_form(ctx: &mut crate::SceneCtx<'_>) {
-        ctx.ui.label("fitted");
-        crate::stage!(ctx, |ui: &mut egui::Ui| {
+    fn every_stage_form(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.label("fitted");
+        crate::stage!(ctx, ui, |ui: &mut egui::Ui| {
             ui.label("hugs its content");
         });
-        ctx.ui.label("pinned");
-        crate::stage!(ctx, (150, 36), |ui: &mut egui::Ui| {
+        ui.label("pinned");
+        crate::stage!(ctx, ui, (150, 36), |ui: &mut egui::Ui| {
             ui.label("150×36");
         });
-        ctx.ui.label("square");
-        crate::stage!(ctx, 64, |ui: &mut egui::Ui| {
+        ui.label("square");
+        crate::stage!(ctx, ui, 64, |ui: &mut egui::Ui| {
             ui.label("64");
         });
         // Content past its box, so the reference shows a fixed scrolling stage keeping to the size
         // it declared. The checkerboard closing underneath is the whole point of the picture.
-        ctx.ui.label("scrolling");
+        ui.label("scrolling");
         ctx.stage(
+            ui,
             crate::Stage::Fixed(egui::vec2(150.0, 48.0)).scrollable(),
             |ui: &mut egui::Ui| {
                 for row in 0..12 {
@@ -1774,20 +1978,72 @@ mod tests {
 
     /// Glyphs the default faces lack: without the bundled Noto fallbacks these are tofu,
     /// which no structural assertion would notice and no reader of the reference could miss.
-    fn glyphs_past_the_default_faces(ctx: &mut crate::SceneCtx<'_>) {
-        ctx.ui.heading("→ ∑ ≈ ± °");
-        ctx.ui.label("arrows ← ↑ ↓ →");
-        ctx.ui.label("math ∀ ∈ ∞ √");
-        ctx.ui.label("symbols ✓ ✗ ★ ♦");
+    fn glyphs_past_the_default_faces(_ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.heading("→ ∑ ≈ ± °");
+        ui.label("arrows ← ↑ ↓ →");
+        ui.label("math ∀ ∈ ∞ √");
+        ui.label("symbols ✓ ✗ ★ ♦");
     }
 
     /// Everything drawn here comes from a knob, so its reference is a picture of the override path.
-    fn dressed_by_knobs(ctx: &mut crate::SceneCtx<'_>) {
+    fn dressed_by_knobs(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
         let caption = ctx.text("caption", "the default");
         let tint = ctx.color("tint", egui::Color32::WHITE);
         let width = ctx.slider("width", 70.0, 20.0, 260.0, 1.0);
-        crate::stage!(ctx, (width, 48.0), |ui: &mut egui::Ui| {
+        crate::stage!(ctx, ui, (width, 48.0), |ui: &mut egui::Ui| {
             ui.label(egui::RichText::new(caption).color(tint).size(20.0));
+        });
+    }
+
+    /// Keeps a GL object between frames, as a scene holding a femtovg canvas does,
+    /// and paints by whether that object is still the one it made.
+    /// The recipe takes two shots, since one cannot show a context outliving anything.
+    fn caches_between_shots(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+        /// Wide enough that nothing else in the context is this shape by chance.
+        const WIDE: i32 = 37;
+
+        thread_local! {
+            static KEPT: std::cell::Cell<Option<glow::NativeTexture>> =
+                const { std::cell::Cell::new(None) };
+        }
+        ctx.offscreen(ui, [48_u32, 48], |target| {
+            let loader = target.gl_loader();
+            // SAFETY: the capture made its context current, and `loader` resolves against it.
+            let gl = unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) };
+            use eframe::glow::HasContext as _;
+            let texture = KEPT.get().unwrap_or_else(|| {
+                // SAFETY: a live context; the width is the mark read back on later shots.
+                let made = unsafe {
+                    let made = gl.create_texture().expect("a texture");
+                    gl.bind_texture(glow::TEXTURE_2D, Some(made));
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA as i32,
+                        WIDE,
+                        1,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(None),
+                    );
+                    made
+                };
+                KEPT.set(Some(made));
+                made
+            });
+            // A name proves nothing — a fresh context reissues them from 1. The width is the mark.
+            //
+            // SAFETY: querying a name a dead context issued is the failure this guards;
+            // the driver reports it rather than trapping.
+            let ours =
+                unsafe { gl.get_texture_level_parameter_i32(texture, 0, glow::TEXTURE_WIDTH) };
+            // SAFETY: the target's framebuffer is bound for the duration of this closure.
+            unsafe {
+                let green = f32::from(u8::from(ours == WIDE));
+                gl.clear_color(0.0, green, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+            }
         });
     }
 
@@ -1809,6 +2065,7 @@ mod tests {
                 scene(dressed_by_knobs, "knobs-applied"),
                 scene(draws_offscreen, "offscreen-gl"),
                 scene(draws_offscreen_slots, "offscreen-slots"),
+                scene(caches_between_shots, "offscreen-cached"),
             ],
             groups: Vec::new(),
         }
@@ -1973,8 +2230,9 @@ mod tests {
     #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn a_capture_ends_in_canvas_under_a_fixed_scrolling_stage() {
-        fn scrolling_box(ctx: &mut crate::SceneCtx<'_>) {
+        fn scrolling_box(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
             ctx.stage(
+                ui,
                 crate::Stage::Fixed(egui::vec2(900.0, 460.0)).scrollable(),
                 |ui: &mut egui::Ui| {
                     for row in 0..40 {

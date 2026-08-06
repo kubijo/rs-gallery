@@ -9,7 +9,7 @@ use gallery::prelude::*;
 scene_meta! { title: "Motion / Orbit" }
 
 #[scene(default)]
-fn orbit(ctx: &mut SceneCtx) {
+fn orbit(ctx: &mut SceneCtx, ui: &mut Ui) {
     let animate = ctx.toggle("animate", true);
     let count = ctx.slider("dots", 24.0, 1.0, 400.0, 1.0) as usize;
     let speed = ctx.slider("speed", 1.0, 0.0, 4.0, 0.1);
@@ -19,12 +19,12 @@ fn orbit(ctx: &mut SceneCtx) {
 
     // Ask for the next frame and the shell keeps rendering; off, it falls back to rest.
     if animate {
-        ctx.ui.ctx().request_repaint();
+        ui.ctx().request_repaint();
     }
 
     // Fitted, so the badge tracks `radius`.
     let span = radius * 2.0 + dot * 2.0 + 8.0;
-    stage!(ctx, |ui| {
+    stage!(ctx, ui, |ui| {
         let t = ui.input(|i| i.time) as f32 * speed;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(span, span), egui::Sense::hover());
         let painter = ui.painter_at(rect);

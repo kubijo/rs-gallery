@@ -40,22 +40,22 @@ use gallery::prelude::*;
 scene_meta! { title: "Components / Button" }
 
 #[scene("enabled")]
-fn enabled(ctx: &mut SceneCtx) {
-    stage!(ctx, |ui| {
+fn enabled(ctx: &mut SceneCtx, ui: &mut Ui) {
+    stage!(ctx, ui, |ui| {
         ui.button("Save");
     });
 }
 
 #[scene("disabled")]
-fn disabled(ctx: &mut SceneCtx) {
-    stage!(ctx, |ui| {
+fn disabled(ctx: &mut SceneCtx, ui: &mut Ui) {
+    stage!(ctx, ui, |ui| {
         ui.add_enabled(false, egui::Button::new("Save"));
     });
 }
 ```
 
-The canvas is plain, so a scene reads as a **document**: headings and prose go straight onto `ctx.ui`, and each thing
-you are demonstrating goes in a **stage** — on the checkerboard, so transparency and bounds read against the shell,
+The canvas is plain, so a scene reads as a **document**: headings and prose go straight onto `ui`, and each thing you
+are demonstrating goes in a **stage** — on the checkerboard, so transparency and bounds read against the shell,
 captioned with its size and collapsible. A pinned size is for a component that behaves differently depending on how much
 room it has — a wrapping layout, anything with a breakpoint:
 
@@ -75,12 +75,20 @@ A stage whose content runs past it scrolls rather than growing — `scroll` is `
 takes `.scrollable()`, as in `Stage::Fixed(egui::vec2(300.0, 200.0)).scrollable()`. The box stays the size it declared
 and the content scrolls inside it; [`example.scene.rs`](template/example.scene.rs) shows them running.
 
-A scene takes a `SceneCtx`: `ctx.ui` is the egui `Ui` to draw into, and `ctx.slider(...)`, `ctx.toggle(...)`,
-`ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare **controls** (knobs). Calling one registers the control in
-the right-hand panel *and* returns its current value, so tweaking it re-renders the scene —
-[`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. The `ctx.set_slider(...)` family writes a value back
-by label, so content that does its own hit-testing — a slider drawn inside the preview, a rendered button — drives the
-panel too.
+A scene takes two things: the `Ui` to draw into, and a `SceneCtx`. The `Ui` comes separately rather than on the context
+so that stages go wherever widgets go — inside an `egui::Grid`, `ui.columns(..)`, a `Frame` or a `CollapsingHeader`.
+(One exception: a stage does not wrap in `ui.horizontal_wrapped(..)`, since egui breaks a row on a size the widget
+declares up front and a stage's isn't known until it has drawn.)
+
+For the common case of one component at several sizes, `ctx.matrix(ui, &sizes, |ui, at| ..)` puts each on its own stage
+in as many columns as the pane holds, aligned in a grid and reflowing as the window resizes —
+[`matrix.scene.rs`](template/matrix.scene.rs).
+
+On the context, `ctx.slider(...)`, `ctx.toggle(...)`, `ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare
+**controls** (knobs). Calling one registers the control in the right-hand panel *and* returns its current value, so
+tweaking it re-renders the scene — [`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. The
+`ctx.set_slider(...)` family writes a value back by label, so content that does its own hit-testing — a slider drawn
+inside the preview, a rendered button — drives the panel too.
 
 `gallery::action(...)` reports something worth seeing into the **Actions** panel — a free function, not a method, so a
 scene can call it from inside a callback it hands a component: `picker(ui, |row| action(format!("picked {row}")))`. The
