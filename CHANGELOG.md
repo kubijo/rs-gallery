@@ -3,7 +3,59 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
-## [Unreleased]
+## 2026-08-06
+
+- **Knob writeback** — `SceneCtx::set_slider`, `set_toggle`, `set_text`, `set_color`, `set_select`, `set_select_index`
+  and `set_pad2d` write a knob back from the scene, for rendered content that does its own hit-testing. Each takes the
+  first knob of its kind carrying exactly that label and returns whether one matched — an unknown label writes nothing
+  and creates nothing. Values are clamped as the panel would clamp them and snapped to a slider's `step`, where a
+  recipe's out-of-range value is still an error: a write overshoots by nature, a recipe states its values on purpose. A
+  write lands where a panel edit would, so anything that resets a knob — the scene dropping it, or changing its label or
+  kind at that position — drops the write too.
+- **Capture precedence** — a recipe's overrides are re-applied before every frame and once more after the last, so a
+  scene writing its own knobs cannot outlast them: the image and the store both end on the recipe, and `--list-knobs`
+  and `--init-capture` therefore report what was captured. Two consequences for recipes that predate this. A key is now
+  resolved afresh each frame, so a regex that only turns ambiguous once another override reveals a second matching knob
+  stops the run rather than slipping through on the frame it happened to be unique. A key whose knob applied and then
+  disappeared still counts as honoured, and does not fail the run.
+- **Offscreen input** — `SceneCtx::offscreen_input` shows an offscreen image as `offscreen` does and reports the pointer
+  that landed on it as `Pointer::{Down, Move, Up, Wheel}`, in that image's own pixels: a press captures until its
+  release, so a drag off the edge keeps reporting and never leaves the content held; coordinates come off the whole
+  image, so scrolling part of it out of sight doesn't shift them; and the image takes the drag and the wheel, so neither
+  reaches the canvas behind it. Whatever egui reports as a pointer arrives, so a touchscreen drives it too.
+- **Actions** — `gallery::action(..)` reports a line into a panel of its own, timestamped and scoped to the scene, with
+  a toggle beside Perf and a Clear button. A free function, so it reaches into a callback handed to a component: the
+  component keeps its own event type and never names gallery. Heard only while a scene renders, so a headless capture
+  and a spawned thread both drop it.
+- **Prelude** — `action` and `Pointer` join it, and the scaffold's `knobs.scene.rs` gains a `writeback` scene exercising
+  all seven setters and reporting each write as an action.
+- **Staged offscreen** — `SceneCtx::offscreen_stage` and `offscreen_input_stage` put a rendered frame on a stage, so GL
+  content gets the checkerboard, size caption and collapse toggle egui content has always had; a scene mixing prose,
+  widgets and rendered frames now reads as one document. A folded stage runs no GL at all and returns `None`, and keeps
+  its target for when it opens again. `stage` itself is unchanged — the image is drawn to its texture first, leaving
+  only an image for the stage to hold.
+- **Fixed** — every `offscreen` call in a scene shared one framebuffer, keyed by scene alone, so each image showed
+  whatever the last call drew, stretched to the size its own call had asked for — and two sizes reallocated the target
+  twice a frame. Each call site now keeps its own, told apart by the order the scene makes them, as knobs are. A scene
+  that stops making a call keeps that target for its return rather than freeing a `TextureId` eframe cannot release.
+- **Fixed** — a capture asked for less room than its scene lays out is drawn twice, and the second pass used to run on a
+  rebuilt GL context. A scene that had cached anything against the first — a femtovg canvas, a compiled shader — drew
+  into nothing, so the shot came back with the egui parts and none of the GL. The canvas is resized in place now, and
+  the context lives as long as the shot.
+
+## 2026-07-31
+
+- **Trimmed captures** — a shot's size is the canvas its scene lays out in, and the PNG is now cropped to what the scene
+  actually drew, rather than padded out to that size with background. A recipe's `trim = false`, or `--no-trim`, keeps
+  the whole canvas. This narrows what "Headless render" below says about the size being where the scene lays out: that
+  is still what governs the layout, but no longer what the file ends up measuring.
+
+## 2026-07-30
+
+- **Fixed** — the canvas scrollbar sat at the right edge of the content rather than of the pane, leaving dead space
+  beside it whenever a scene was narrower than the pane and taller than it.
+
+## 2026-07-20
 
 First public pre-release — it all lands in the initial commit, so there's nothing to migrate from yet; this log records
 changes from the first tagged release on. Highlights (the [README](README.md) has the detail):

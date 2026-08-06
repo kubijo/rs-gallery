@@ -9,9 +9,9 @@ use std::collections::HashMap;
 
 use eframe::glow::{self, HasContext};
 
-/// Each scene's cached offscreen render target ([`SceneCtx::offscreen`](crate::SceneCtx::offscreen)),
-/// keyed by scene identity.
-pub(crate) type TargetStore = HashMap<String, Option<RenderTarget>>;
+/// Each scene's cached offscreen render targets ([`SceneCtx::offscreen`](crate::SceneCtx::offscreen)),
+/// keyed by scene identity — one per call site, in the order the scene makes them.
+pub(crate) type TargetStore = HashMap<String, Vec<RenderTarget>>;
 
 /// A scene's cached offscreen framebuffer — a colour texture plus a depth/stencil renderbuffer (femtovg
 /// fills need stencil) — registered with egui once. The shell owns it so scenes needn't manage GL.
@@ -163,6 +163,119 @@ impl Offscreen {
     }
 }
 
+/// One pointer event that landed on an offscreen image, in that image's own pixel space:
+/// `(0, 0)` at its top-left, [`Offscreen::size`] as the extent.
+///
+/// A drag that runs off the edge keeps reporting, so coordinates can fall outside those bounds.
+/// Whatever egui calls a pointer arrives here, so a touchscreen drives this as a mouse does.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Pointer {
+    Down {
+        x: f32,
+        y: f32,
+    },
+    Move {
+        x: f32,
+        y: f32,
+    },
+    Up {
+        x: f32,
+        y: f32,
+    },
+    /// A wheel or trackpad scroll; `delta` is in egui's points rather than image pixels.
+    Wheel {
+        x: f32,
+        y: f32,
+        delta: egui::Vec2,
+    },
+}
+
+/// The pointer input that landed on the image drawn at `rect`, mapped into its pixel space.
+///
+/// Coordinates come off the whole `rect`, even where the canvas scrolled part of it out of sight
+/// — measuring from the visible part would shift them by however much is clipped —
+/// while the visible part is what a press must land on.
+///
+/// A press captures until its release, so a drag off the edge keeps reporting and the release
+/// always arrives; without that, content that saw the press would stay held.
+/// The capture lives in egui's memory under `id`, which is what carries it between frames.
+pub(crate) fn pointer(
+    ui: &egui::Ui,
+    id: egui::Id,
+    rect: egui::Rect,
+    size: [u32; 2],
+) -> Vec<Pointer> {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return Vec::new();
+    }
+    let visible = rect.intersect(ui.clip_rect());
+    let extent = egui::vec2(size[0] as f32, size[1] as f32);
+    // Normalised rather than a bare offset, so the mapping holds at whatever size egui shows it.
+    let to_image = |pos: egui::Pos2| {
+        let at = ((pos - rect.min) / rect.size()) * extent;
+        (at.x, at.y)
+    };
+
+    let mut captured = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let events = ui.input(|input| {
+        let mut events = Vec::new();
+        for event in &input.events {
+            match *event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    ..
+                } => {
+                    if pressed {
+                        if visible.contains(pos) {
+                            let (x, y) = to_image(pos);
+                            events.push(Pointer::Down { x, y });
+                            captured = true;
+                        }
+                    } else if captured {
+                        let (x, y) = to_image(pos);
+                        events.push(Pointer::Up { x, y });
+                        captured = false;
+                    }
+                }
+                egui::Event::PointerMoved(pos)
+                    if input.pointer.primary_down() && (captured || visible.contains(pos)) =>
+                {
+                    let (x, y) = to_image(pos);
+                    events.push(Pointer::Move { x, y });
+                }
+                _ => {}
+            }
+        }
+        let scrolled = input.smooth_scroll_delta;
+        if scrolled != egui::Vec2::ZERO
+            && let Some(pos) = input.pointer.latest_pos()
+            && visible.contains(pos)
+        {
+            let (x, y) = to_image(pos);
+            events.push(Pointer::Wheel {
+                x,
+                y,
+                delta: scrolled,
+            });
+        }
+        // Holding the pointer with nothing pressed means the release went somewhere we never saw
+        // — the image stopped being drawn mid-drag, say. Let go rather than pair the next one.
+        if captured && !input.pointer.any_down() {
+            captured = false;
+        }
+        events
+    });
+    ui.data_mut(|d| d.insert_temp(id, captured));
+    // Taken before the enclosing scroll area reads it, which it does once the canvas closes:
+    // content that scrolls would otherwise scroll the canvas under it too.
+    if events.iter().any(|at| matches!(at, Pointer::Wheel { .. })) {
+        ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
+    }
+    events
+}
+
 /// Hands a GL texture to egui and gets back an id to draw it by.
 ///
 /// A closure rather than the `eframe::Frame` a window uses: `Frame::_new_kittest` leaves the hook
@@ -174,18 +287,24 @@ pub(crate) type RegisterTexture<'a> = Box<dyn FnMut(glow::NativeTexture) -> egui
 
 /// The glow-backend handles a scene needs for non-egui rendering — the loader, gallery's own glow
 /// context (for FBO bookkeeping), a way to register a texture with egui, and this scene's cached
-/// target. Present only under [`Renderer::Glow`](crate::Renderer::Glow).
+/// targets. Present only under [`Renderer::Glow`](crate::Renderer::Glow).
 pub(crate) struct GlDeps<'a> {
     pub loader: crate::GlLoader,
     pub gl: &'a glow::Context,
     pub register: RegisterTexture<'a>,
-    pub target: &'a mut Option<RenderTarget>,
+    pub targets: &'a mut Vec<RenderTarget>,
 }
 
 impl GlDeps<'_> {
-    /// Ensure the cached target matches `size` — creating it, or resizing it in place — then bind it,
-    /// clear it, run `draw`, and put back the framebuffer that was bound, returning the colour texture
-    /// to show. That attachment is bottom-left origin, so the caller flips V when displaying it.
+    /// Ensure the target for the call site at `at` matches `size` — creating it,
+    /// or resizing it in place — then bind it, clear it, run `draw`, and put back what was bound,
+    /// returning the colour texture to show. That attachment is bottom-left origin, so the caller
+    /// flips V when displaying it.
+    ///
+    /// `at` counts a scene's `offscreen` calls in the order it makes them, so each keeps its own
+    /// texture and one image is never another's pixels. The store only grows: a call a scene stops
+    /// making leaves its target behind — eframe exposes no way to release a registered `TextureId`,
+    /// the same reason [`RenderTarget::resize`] reallocates — and takes it up again if it returns.
     ///
     /// Putting back what was bound, rather than framebuffer 0: a window's egui paints to 0,
     /// but a headless capture paints into an FBO of its own, and everything the scene draws
@@ -196,19 +315,20 @@ impl GlDeps<'_> {
     )]
     pub(crate) fn render(
         &mut self,
+        at: usize,
         size: [u32; 2],
         draw: impl FnOnce(&Offscreen),
     ) -> egui::TextureId {
         // SAFETY (every block below): `self.gl` is the live glow context handed in by the shell.
-        match self.target.as_mut() {
-            Some(target) if target.size != size => unsafe { target.resize(self.gl, size) },
-            Some(_) => {}
-            None => {
-                let target = unsafe { RenderTarget::create(self.gl, &mut *self.register, size) };
-                *self.target = Some(target);
-            }
+        while self.targets.len() <= at {
+            let target = unsafe { RenderTarget::create(self.gl, &mut *self.register, size) };
+            self.targets.push(target);
         }
-        let target = self.target.as_ref().expect("just ensured present");
+        let target = &mut self.targets[at];
+        if target.size != size {
+            unsafe { target.resize(self.gl, size) };
+        }
+        let target = &self.targets[at];
         let (tex_id, fbo) = (target.tex_id, target.fbo);
         // SAFETY: read the binding to put back, since it is not always framebuffer 0.
         let previous = unsafe { self.gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING) };
@@ -232,5 +352,207 @@ impl GlDeps<'_> {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, restore);
         }
         tex_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 200×100 image at (10, 20) showing a 400×200 target, so a point maps to two pixels
+    /// and a mistaken offset can't pass for a mistaken scale.
+    const RECT: egui::Rect = egui::Rect {
+        min: egui::pos2(10.0, 20.0),
+        max: egui::pos2(210.0, 120.0),
+    };
+    const SIZE: [u32; 2] = [400, 200];
+
+    /// Feed `events` to [`pointer`] a frame at a time and collect what each frame reported.
+    fn seen(rect: egui::Rect, clip: egui::Rect, events: &[egui::Event]) -> Vec<Vec<Pointer>> {
+        let id = egui::Id::new("offscreen-under-test");
+        let out = std::cell::RefCell::new(Vec::new());
+        {
+            let mut harness = egui_kittest::Harness::new_ui(|ui| {
+                let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(clip));
+                ui.set_clip_rect(clip);
+                out.borrow_mut().push(pointer(&ui, id, rect, SIZE));
+            });
+            for event in events {
+                harness.input_mut().events.push(event.clone());
+                harness.step();
+            }
+        }
+        out.into_inner()
+    }
+
+    fn press(x: f32, y: f32, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::pos2(x, y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn a_press_maps_to_the_images_own_pixels() {
+        let frames = seen(RECT, RECT, &[press(110.0, 70.0, true)]);
+        // The rect's centre, so the target's centre whatever the two sizes are.
+        assert_eq!(
+            frames.last().expect("a frame ran"),
+            &[Pointer::Down { x: 200.0, y: 100.0 }]
+        );
+    }
+
+    #[test]
+    fn a_scrolled_off_image_keeps_its_coordinates() {
+        // The top half is clipped away, as a canvas scrolled halfway down it would.
+        let clip = egui::Rect::from_min_max(egui::pos2(10.0, 70.0), egui::pos2(210.0, 120.0));
+        let frames = seen(RECT, clip, &[press(110.0, 95.0, true)]);
+        assert_eq!(
+            frames.last().expect("a frame ran"),
+            &[Pointer::Down { x: 200.0, y: 150.0 }],
+            "measured from the whole image, not from where it starts being visible"
+        );
+
+        let above = seen(RECT, clip, &[press(110.0, 40.0, true)]);
+        assert!(
+            above.last().expect("a frame ran").is_empty(),
+            "a press on the scrolled-off part is not a press on the image"
+        );
+    }
+
+    #[test]
+    fn a_drag_past_the_edge_keeps_reporting_and_still_releases() {
+        let frames = seen(
+            RECT,
+            RECT,
+            &[
+                press(110.0, 70.0, true),
+                egui::Event::PointerMoved(egui::pos2(400.0, 70.0)),
+                press(400.0, 70.0, false),
+            ],
+        );
+        let all: Vec<Pointer> = frames.into_iter().flatten().collect();
+        assert!(
+            matches!(all[0], Pointer::Down { .. }),
+            "the press starts the capture"
+        );
+        assert_eq!(
+            all[1],
+            Pointer::Move { x: 780.0, y: 100.0 },
+            "a move past the edge still reports, and reads past the extent"
+        );
+        assert!(
+            matches!(all[2], Pointer::Up { .. }),
+            "the release arrives even though it happened outside"
+        );
+    }
+
+    /// A drag that began elsewhere crosses the image without owning it: its moves are reported,
+    /// but press and release belong to whoever took them, so content is never left held.
+    #[test]
+    fn a_release_belongs_to_whoever_took_the_press() {
+        let all: Vec<Pointer> = seen(
+            RECT,
+            RECT,
+            &[
+                press(400.0, 70.0, true),
+                egui::Event::PointerMoved(egui::pos2(110.0, 70.0)),
+                press(110.0, 70.0, false),
+            ],
+        )
+        .into_iter()
+        .flatten()
+        .collect();
+
+        assert!(
+            !all.iter().any(|at| matches!(at, Pointer::Down { .. })),
+            "the press landed elsewhere"
+        );
+        assert!(
+            !all.iter().any(|at| matches!(at, Pointer::Up { .. })),
+            "so its release is not ours to deliver"
+        );
+        assert_eq!(
+            all,
+            [Pointer::Move { x: 200.0, y: 100.0 }],
+            "only the move, which did cross the image"
+        );
+    }
+
+    /// Report `pointer`'s events and what it left of the scroll delta, one frame at a time.
+    fn wheeled(rect: egui::Rect, at: egui::Pos2) -> Vec<(Vec<Pointer>, egui::Vec2)> {
+        let id = egui::Id::new("offscreen-under-test");
+        let out = std::cell::RefCell::new(Vec::new());
+        {
+            let mut harness = egui_kittest::Harness::new_ui(|ui| {
+                let events = pointer(ui, id, rect, SIZE);
+                let left = ui.input(|input| input.smooth_scroll_delta);
+                out.borrow_mut().push((events, left));
+            });
+            for event in [
+                egui::Event::PointerMoved(at),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -12.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ] {
+                harness.input_mut().events.push(event);
+                harness.step();
+            }
+        }
+        out.into_inner()
+    }
+
+    /// The double-scroll fix: the canvas must not also pan when content under the pointer scrolls.
+    #[test]
+    fn a_wheel_the_image_takes_is_left_for_no_one_else() {
+        let taken = wheeled(RECT, egui::pos2(110.0, 70.0));
+        assert!(
+            taken.iter().any(|(events, _)| !events.is_empty()),
+            "the wheel reached the image"
+        );
+        assert!(
+            taken.iter().all(|(_, left)| left.y == 0.0),
+            "and nothing of it was left for the canvas behind"
+        );
+
+        let elsewhere = wheeled(RECT, egui::pos2(400.0, 70.0));
+        assert!(
+            elsewhere.iter().all(|(events, _)| events.is_empty()),
+            "a wheel away from the image is not the image's to take"
+        );
+        assert!(
+            elsewhere.iter().any(|(_, left)| left.y != 0.0),
+            "so the canvas still gets to scroll on it"
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_the_image_is_reported_where_it_happened() {
+        let frames = seen(
+            RECT,
+            RECT,
+            &[
+                egui::Event::PointerMoved(egui::pos2(110.0, 70.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -12.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let wheel = frames
+            .into_iter()
+            .flatten()
+            .find(|at| matches!(at, Pointer::Wheel { .. }))
+            .expect("the wheel reached the image");
+        assert!(
+            matches!(wheel, Pointer::Wheel { x, y, delta } if x == 200.0 && y == 100.0 && delta.y != 0.0)
+        );
     }
 }

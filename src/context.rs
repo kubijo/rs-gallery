@@ -9,7 +9,7 @@
 use eframe::glow;
 
 use crate::knobs::{ChoiceStyle, Knob, Pad2DSpec};
-use crate::offscreen::{GlDeps, Offscreen};
+use crate::offscreen::{GlDeps, Offscreen, Pointer};
 
 /// What a scene receives each frame: the egui [`Ui`](egui::Ui) to draw into, plus the knob accessors.
 ///
@@ -25,6 +25,8 @@ pub struct SceneCtx<'a> {
     knobs: &'a mut Vec<Knob>,
     cursor: usize,
     stages: usize,
+    /// Counts this frame's `offscreen` calls, so each keeps its own render target.
+    offscreens: usize,
     gl: Option<GlDeps<'a>>,
 }
 
@@ -139,6 +141,7 @@ impl<'a> SceneCtx<'a> {
             knobs,
             cursor: 0,
             stages: 0,
+            offscreens: 0,
             gl,
         }
     }
@@ -267,6 +270,92 @@ impl<'a> SceneCtx<'a> {
         );
     }
 
+    /// Whether the stage this call is about to make is open — the id [`stage`](Self::stage)
+    /// will derive, read before it does.
+    fn staging_open(&self) -> bool {
+        let id = self.ui.id().with(("gallery-stage", self.stages));
+        self.ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true)
+    }
+
+    /// [`offscreen`](Self::offscreen) on a stage: the checkerboard, size caption and collapse toggle
+    /// egui content gets, so a rendered frame reads as the same kind of thing as a widget.
+    /// `None` while the stage is folded, which is also when `draw` never runs — a fold costs no GL.
+    ///
+    /// `stage` sizes the box as it does for any content, so [`Stage::Fit`] is the image itself;
+    /// `size` is the texture's own, in pixels.
+    pub fn offscreen_stage(
+        &mut self,
+        stage: impl Into<StageSpec>,
+        size: impl Into<[u32; 2]>,
+        draw: impl FnOnce(&Offscreen),
+    ) -> Option<egui::Response> {
+        self.staged(stage.into(), size.into(), draw, egui::Sense::hover())
+    }
+
+    /// [`offscreen_input`](Self::offscreen_input) on a stage — see
+    /// [`offscreen_stage`](Self::offscreen_stage) for the chrome, and [`Pointer`] for the events.
+    /// `None` while the stage is collapsed: nothing is drawn, so nothing can be pointed at.
+    pub fn offscreen_input_stage(
+        &mut self,
+        stage: impl Into<StageSpec>,
+        size: impl Into<[u32; 2]>,
+        draw: impl FnOnce(&Offscreen),
+    ) -> Option<(egui::Response, Vec<Pointer>)> {
+        let size = size.into();
+        let response = self.staged(stage.into(), size, draw, egui::Sense::click_and_drag())?;
+        let events = crate::offscreen::pointer(self.ui, response.id, response.rect, size);
+        Some((response, events))
+    }
+
+    /// Render the target for this call site, then show it inside a stage.
+    ///
+    /// Two steps rather than one closure: `stage` lends a `Ui` and nothing more, while the GL half
+    /// needs the whole context. Drawing the texture first leaves only an image, which a `Ui` can stage.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "small, non-negative pixel dimensions"
+    )]
+    fn staged(
+        &mut self,
+        stage: StageSpec,
+        size: [u32; 2],
+        draw: impl FnOnce(&Offscreen),
+        sense: egui::Sense,
+    ) -> Option<egui::Response> {
+        // Claimed whether or not the GL runs, so folding one stage away doesn't move the targets
+        // of the call sites after it.
+        let at = self.offscreens;
+        self.offscreens += 1;
+        let drawn = self
+            .staging_open()
+            .then(|| self.gl.as_mut().map(|deps| deps.render(at, size, draw)));
+
+        let mut shown = None;
+        self.stage(stage, |ui| {
+            shown = Some(match drawn.flatten() {
+                Some(tex_id) => {
+                    // GL textures are bottom-left origin; flip V so the image reads upright.
+                    let sized = egui::load::SizedTexture::new(
+                        tex_id,
+                        egui::vec2(size[0] as f32, size[1] as f32),
+                    );
+                    ui.add(
+                        egui::Image::new(sized)
+                            .uv(egui::Rect::from_min_max(
+                                egui::pos2(0.0, 1.0),
+                                egui::pos2(1.0, 0.0),
+                            ))
+                            .sense(sense),
+                    )
+                }
+                None => {
+                    ui.colored_label(egui::Color32::YELLOW, "offscreen() needs the glow renderer")
+                }
+            });
+        });
+        shown
+    }
+
     /// The GL proc-address loader — `Some` only under [`Renderer::Glow`](crate::Renderer::Glow). Build a
     /// femtovg renderer (`OpenGl::new_from_function_cstr`) or your own `glow::Context` from it at any
     /// glow/femtovg version — gallery pins none. The low-level floor under [`offscreen`](Self::offscreen).
@@ -288,34 +377,73 @@ impl<'a> SceneCtx<'a> {
     }
 
     /// Render non-egui content into an offscreen texture of `size` pixels and show it inline. gallery
-    /// owns the framebuffer + texture (cached per scene, recreated on resize, registered once), binds it
-    /// around `draw`, and returns the shown image's [`Response`](egui::Response). Inside `draw`, build a
-    /// GL library (femtovg, raw glow, …) from [`Offscreen::gl_loader`] and paint into the bound FBO — at
-    /// any glow/femtovg version. Glow renderer only; under wgpu it shows a hint instead.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "small, non-negative pixel dimensions"
-    )]
+    /// owns the framebuffer + texture (one per call site, kept across frames, resized in place,
+    /// registered once), binds it around `draw`, and returns the shown image's
+    /// [`Response`](egui::Response). Inside `draw`, build a GL library (femtovg, raw glow, …)
+    /// from [`Offscreen::gl_loader`] and paint into the bound FBO — at any glow/femtovg version.
+    /// Glow renderer only; under wgpu it shows a hint instead.
+    ///
+    /// Call sites are told apart by the order the scene makes them, as knobs are, so a scene staging
+    /// several images gives each its own; one behind a toggle shifts the ones after it to new targets.
     pub fn offscreen(
         &mut self,
         size: impl Into<[u32; 2]>,
         draw: impl FnOnce(&Offscreen),
     ) -> egui::Response {
+        self.shown(size.into(), draw, egui::Sense::hover())
+    }
+
+    /// Like [`offscreen`](Self::offscreen), and reports the pointer that landed on the image
+    /// — press, move, release and wheel, in its own pixel space — for content that hit-tests itself.
+    /// [`Pointer`] has the coordinate and capture rules.
+    ///
+    /// The image takes the drag and the wheel, so neither also moves the canvas behind it;
+    /// a scene that would rather leave the canvas scrolling calls [`offscreen`](Self::offscreen).
+    pub fn offscreen_input(
+        &mut self,
+        size: impl Into<[u32; 2]>,
+        draw: impl FnOnce(&Offscreen),
+    ) -> (egui::Response, Vec<Pointer>) {
         let size = size.into();
+        let response = self.shown(size, draw, egui::Sense::click_and_drag());
+        if self.gl.is_none() {
+            return (response, Vec::new());
+        }
+        let events = crate::offscreen::pointer(self.ui, response.id, response.rect, size);
+        (response, events)
+    }
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "small, non-negative pixel dimensions"
+    )]
+    fn shown(
+        &mut self,
+        size: [u32; 2],
+        draw: impl FnOnce(&Offscreen),
+        sense: egui::Sense,
+    ) -> egui::Response {
+        // Taken before the deps are borrowed, and counted even under wgpu,
+        // so a call site keeps the same slot whichever renderer the scene meets.
+        let at = self.offscreens;
+        self.offscreens += 1;
         let Some(deps) = self.gl.as_mut() else {
             return self
                 .ui
                 .colored_label(egui::Color32::YELLOW, "offscreen() needs the glow renderer");
         };
-        let tex_id = deps.render(size, draw);
+        let tex_id = deps.render(at, size, draw);
         // GL textures are bottom-left origin; flip V so the image reads upright in egui.
         let sized =
             egui::load::SizedTexture::new(tex_id, egui::vec2(size[0] as f32, size[1] as f32));
-        self.ui
-            .add(egui::Image::new(sized).uv(egui::Rect::from_min_max(
-                egui::pos2(0.0, 1.0),
-                egui::pos2(1.0, 0.0),
-            )))
+        self.ui.add(
+            egui::Image::new(sized)
+                .uv(egui::Rect::from_min_max(
+                    egui::pos2(0.0, 1.0),
+                    egui::pos2(1.0, 0.0),
+                ))
+                .sense(sense),
+        )
     }
 
     /// How many knobs the scene declared this frame — the shell truncates the store to this, dropping
@@ -477,6 +605,160 @@ impl<'a> SceneCtx<'a> {
             _ => (spec.default_x, spec.default_y),
         }
     }
+
+    /// Write a slider's stored value, clamped to its range and snapped to its `step`.
+    ///
+    /// The `set_*` family is the write half of the accessors:
+    /// content that does its own hit-testing reads the knob, observes the event, then writes it back.
+    /// Keep that order — a write takes the first knob of its kind labelled exactly `label`,
+    /// which before the declaring accessor may still be last frame's.
+    /// A miss changes nothing and returns `false`; landing is not surviving,
+    /// since a knob the scene stops declaring is truncated away, write and all.
+    pub fn set_slider(&mut self, label: &str, value: f32) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+        let found = self.knobs.iter_mut().find_map(|knob| match knob {
+            Knob::Slider {
+                label: l,
+                value,
+                min,
+                max,
+                step,
+            } if l == label => Some((value, *min, *max, *step)),
+            _ => None,
+        });
+        let Some((stored, min, max, step)) = found else {
+            return false;
+        };
+        // `f32::clamp` panics on a NaN bound, which a scene is free to declare.
+        if min.is_nan() || max.is_nan() {
+            return false;
+        }
+        // Clamp then snap from the range's start, as egui's `Slider::set_value` does — so a write
+        // and a drag agree. Clamped again after, because a step that doesn't divide the range
+        // rounds its last stop past the end, and a knob holding what its own slider would reject
+        // is worse than the hair of disagreement.
+        let (lo, hi) = (min.min(max), min.max(max));
+        let mut value = value.clamp(lo, hi);
+        if step > 0.0 && min.is_finite() {
+            value = (min + ((value - min) / step).round() * step).clamp(lo, hi);
+        }
+        *stored = value;
+        true
+    }
+
+    pub fn set_toggle(&mut self, label: &str, value: bool) -> bool {
+        match self.knobs.iter_mut().find_map(|knob| match knob {
+            Knob::Toggle { label: l, value } if l == label => Some(value),
+            _ => None,
+        }) {
+            Some(stored) => {
+                *stored = value;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_text(&mut self, label: &str, value: impl Into<String>) -> bool {
+        match self.knobs.iter_mut().find_map(|knob| match knob {
+            Knob::Text { label: l, value } if l == label => Some(value),
+            _ => None,
+        }) {
+            Some(stored) => {
+                *stored = value.into();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_color(&mut self, label: &str, value: egui::Color32) -> bool {
+        match self.knobs.iter_mut().find_map(|knob| match knob {
+            Knob::Color { label: l, value } if l == label => Some(value),
+            _ => None,
+        }) {
+            Some(stored) => {
+                *stored = value;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Write a choice knob's selection by option label, exactly matched.
+    /// An unknown option is an identity miss and drops the write;
+    /// an index merely out of range clamps ([`set_select_index`](Self::set_select_index)).
+    pub fn set_select(&mut self, label: &str, option: &str) -> bool {
+        let Some((stored, options)) = self.select_mut(label) else {
+            return false;
+        };
+        match options.iter().position(|opt| opt == option) {
+            Some(at) => {
+                *stored = at;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Write a choice knob's selection by index, clamped to the last option.
+    pub fn set_select_index(&mut self, label: &str, index: usize) -> bool {
+        let Some((stored, options)) = self.select_mut(label) else {
+            return false;
+        };
+        if options.is_empty() {
+            return false;
+        }
+        *stored = index.min(options.len() - 1);
+        true
+    }
+
+    fn select_mut(&mut self, label: &str) -> Option<(&mut usize, &[String])> {
+        self.knobs.iter_mut().find_map(|knob| match knob {
+            Knob::Select {
+                label: l,
+                value,
+                options,
+                ..
+            } if l == label => Some((value, options.as_slice())),
+            _ => None,
+        })
+    }
+
+    /// Write a 2-axis pad's stored position, each axis clamped to its own range.
+    pub fn set_pad2d(&mut self, label: &str, x: f32, y: f32) -> bool {
+        if !x.is_finite() || !y.is_finite() {
+            return false;
+        }
+        let found = self.knobs.iter_mut().find_map(|knob| match knob {
+            Knob::Pad2D {
+                label: l,
+                x,
+                y,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                ..
+            } if l == label => Some((x, y, *min_x, *max_x, *min_y, *max_y)),
+            _ => None,
+        });
+        let Some((sx, sy, min_x, max_x, min_y, max_y)) = found else {
+            return false;
+        };
+        // `f32::clamp` panics on a NaN bound, which a scene is free to declare.
+        if [min_x, max_x, min_y, max_y]
+            .iter()
+            .any(|bound| bound.is_nan())
+        {
+            return false;
+        }
+        *sx = x.clamp(min_x.min(max_x), min_x.max(max_x));
+        *sy = y.clamp(min_y.min(max_y), min_y.max(max_y));
+        true
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +860,210 @@ mod tests {
                 SceneCtx::new(ui, &mut knobs, None).buttons("m", &["a", "b"], 0),
                 0,
                 "switching style at the same label drops the stored value"
+            );
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn every_knob_kind_takes_a_scene_write_and_reads_it_back() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
+                ctx.toggle("on", false);
+                ctx.text("name", "before");
+                ctx.color("tint", egui::Color32::BLACK);
+                ctx.select("gear", &["p", "d", "r"], 0);
+                ctx.pad2d("aim", Pad2DSpec::default());
+            }
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                assert!(ctx.set_slider("amt", 0.75));
+                assert!(ctx.set_toggle("on", true));
+                assert!(ctx.set_text("name", "after"));
+                assert!(ctx.set_color("tint", egui::Color32::from_rgb(0x11, 0x22, 0x33)));
+                assert!(ctx.set_select("gear", "d"));
+                assert!(ctx.set_pad2d("aim", 0.25, -0.5));
+            }
+            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+            assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.75);
+            assert!(ctx.toggle("on", false));
+            assert_eq!(ctx.text("name", "before"), "after");
+            assert_eq!(
+                ctx.color("tint", egui::Color32::BLACK),
+                egui::Color32::from_rgb(0x11, 0x22, 0x33)
+            );
+            assert_eq!(ctx.select("gear", &["p", "d", "r"], 0), 1);
+            assert_eq!(ctx.pad2d("aim", Pad2DSpec::default()), (0.25, -0.5));
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn a_written_value_clamps_to_the_knob_and_snaps_to_its_step() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                ctx.slider("amt", 0.5, 0.0, 1.0, 0.25);
+                // A step the range is not a multiple of, so its last stop overshoots the end.
+                ctx.slider("odd", 0.0, 0.0, 1.0, 0.6);
+                ctx.select("gear", &["p", "d", "r"], 0);
+                ctx.pad2d("aim", Pad2DSpec::default());
+            }
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                assert!(ctx.set_slider("amt", 7.0), "an overshoot still lands");
+                assert_eq!(
+                    ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
+                    1.0,
+                    "clamped to the range"
+                );
+                assert!(ctx.set_slider("amt", 0.6));
+                assert!(ctx.set_slider("odd", 1.0));
+                assert!(ctx.set_select_index("gear", 9));
+                assert!(ctx.set_pad2d("aim", 5.0, -5.0));
+            }
+            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+            assert_eq!(
+                ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
+                0.5,
+                "0.6 snaps to the 0.25 grid, as the panel widget would"
+            );
+            assert_eq!(
+                ctx.slider("odd", 0.0, 0.0, 1.0, 0.6),
+                1.0,
+                "snapping never rounds past the end it was just clamped to"
+            );
+            assert_eq!(
+                ctx.select("gear", &["p", "d", "r"], 0),
+                2,
+                "an index past the end clamps to the last option"
+            );
+            assert_eq!(
+                ctx.pad2d("aim", Pad2DSpec::default()),
+                (1.0, -1.0),
+                "each axis clamps to its own range"
+            );
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn a_select_write_takes_an_option_label_but_not_a_stranger() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                ctx.select("gear", &["p", "d", "r"], 0);
+                ctx.select("empty", &[], 0);
+            }
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                assert!(ctx.set_select("gear", "r"));
+                assert!(
+                    !ctx.set_select("gear", "x"),
+                    "an option the knob doesn't carry is dropped"
+                );
+                assert!(
+                    !ctx.set_select_index("empty", 3),
+                    "no options means nothing to clamp to"
+                );
+            }
+            assert_eq!(
+                SceneCtx::new(ui, &mut knobs, None).select("gear", &["p", "d", "r"], 0),
+                2,
+                "the dropped writes left the landed one alone"
+            );
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn a_write_to_a_missing_knob_is_dropped_without_a_phantom() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            assert!(
+                !SceneCtx::new(ui, &mut knobs, None).set_slider("amt", 1.0),
+                "nothing is declared yet on the first frame"
+            );
+            assert!(knobs.is_empty(), "a miss creates no control");
+
+            SceneCtx::new(ui, &mut knobs, None).toggle("amt", false);
+            assert!(
+                !SceneCtx::new(ui, &mut knobs, None).set_slider("amt", 1.0),
+                "the label exists, but on another kind"
+            );
+            assert_eq!(knobs.len(), 1);
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn a_non_finite_write_is_dropped_rather_than_stored() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
+                ctx.pad2d("aim", Pad2DSpec::default());
+            }
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                assert!(!ctx.set_slider("amt", f32::NAN));
+                assert!(!ctx.set_slider("amt", f32::INFINITY));
+                assert!(!ctx.set_pad2d("aim", f32::NAN, 0.0));
+            }
+            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+            assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.5);
+            assert_eq!(ctx.pad2d("aim", Pad2DSpec::default()), (0.0, 0.0));
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn a_write_lands_before_an_accessor_later_the_same_frame() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            SceneCtx::new(ui, &mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.0);
+            // It holds last frame's slot, so a write before this frame's declaration finds it.
+            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+            assert!(ctx.set_slider("amt", 0.9));
+            assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.9);
+        });
+        harness.run();
+    }
+
+    #[test]
+    fn a_written_value_survives_exactly_as_long_as_its_knob_stays_declared() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
+                ctx.toggle("b", false);
+                assert!(ctx.set_slider("a", 0.7));
+                assert!(ctx.set_toggle("b", true), "landing is not surviving");
+            }
+            // The scene stops declaring `b`; the shell truncates as `render_canvas` does.
+            let declared = {
+                let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+                ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
+                ctx.declared()
+            };
+            knobs.truncate(declared);
+
+            let mut ctx = SceneCtx::new(ui, &mut knobs, None);
+            assert_eq!(
+                ctx.slider("a", 0.1, 0.0, 1.0, 0.0),
+                0.7,
+                "a still-declared knob keeps its written value"
+            );
+            assert!(
+                !ctx.toggle("b", false),
+                "a truncated knob comes back at its default, write and all"
             );
         });
         harness.run();

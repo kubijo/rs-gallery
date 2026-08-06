@@ -34,3 +34,10 @@ knobs = { caption = "overridden", tint = "#e8a33d", width = 230 }
 name = "offscreen-gl"
 scene = "offscreen-gl"
 size = "160x160"
+
+# Several call sites in one scene: each keeps its own texture, so the shapes and colours differ.
+# The last is staged, so its chrome is guarded too.
+[[shot]]
+name = "offscreen-slots"
+scene = "offscreen-slots"
+size = "200x200"

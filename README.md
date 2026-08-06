@@ -78,7 +78,18 @@ and the content scrolls inside it; [`example.scene.rs`](template/example.scene.r
 A scene takes a `SceneCtx`: `ctx.ui` is the egui `Ui` to draw into, and `ctx.slider(...)`, `ctx.toggle(...)`,
 `ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare **controls** (knobs). Calling one registers the control in
 the right-hand panel *and* returns its current value, so tweaking it re-renders the scene —
-[`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind.
+[`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. The `ctx.set_slider(...)` family writes a value back
+by label, so content that does its own hit-testing — a slider drawn inside the preview, a rendered button — drives the
+panel too.
+
+`gallery::action(...)` reports something worth seeing into the **Actions** panel — a free function, not a method, so a
+scene can call it from inside a callback it hands a component: `picker(ui, |row| action(format!("picked {row}")))`. The
+component keeps its own event type; the scene's closure decides what's worth a line.
+
+Under the glow renderer, `ctx.offscreen(...)` renders non-egui content (femtovg, raw glow) into a framebuffer gallery
+owns and shows inline. `ctx.offscreen_input(...)` shows it the same way and hands back the pointer input that landed on
+it — press, move, release and wheel, in the image's own pixels — so content with its own hit-testing is as live in the
+gallery as it is on the device.
 
 The title's slashes build the sidebar tree; the scenes are children:
 
@@ -166,9 +177,9 @@ Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` 
 
 ## Status & roadmap
 
-Discovery, the tree, hot-reload, knobs, source view, SVG icons and headless capture all work, on either renderer. Open:
-a wgpu-native offscreen path (glow has `ctx.offscreen`), driving a knob by interacting with the preview, and publishing
-to crates.io.
+Discovery, the tree, hot-reload, knobs — reading and writing them from the scene — source view, SVG icons and headless
+capture all work, on either renderer. Open: a wgpu-native offscreen path (glow has `ctx.offscreen`) and publishing to
+crates.io.
 
 ## License
 

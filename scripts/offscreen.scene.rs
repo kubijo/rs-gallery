@@ -16,6 +16,9 @@ use gallery::prelude::*;
 
 scene_meta! { title: "Renderer / femtovg" }
 
+/// The offscreen target's pixel size — also what pointer coordinates are measured against.
+const SIZE: [u32; 2] = [520, 340];
+
 thread_local! {
     // Building a `Canvas` recompiles femtovg's shaders, so keep one for the scene's lifetime and reuse
     // it every frame. The scene owns its renderer; gallery only lends the bound FBO and the GL loader.
@@ -42,8 +45,9 @@ fn vector_shapes(ctx: &mut SceneCtx) {
     );
 
     ctx.ui.heading("femtovg, drawn into gallery's FBO");
-    // No `stage!`: it lends only a `Ui`, and `offscreen` needs the whole `SceneCtx`.
-    ctx.offscreen([520u32, 340], |o| {
+    // Staged, so the femtovg frame carries the checkerboard, size caption and collapse toggle
+    // an egui component gets — and folding it away costs no GL at all.
+    let staged = ctx.offscreen_input_stage(Stage::Fit, SIZE, |o| {
         let loader = o.gl_loader();
         let fbo = o.fbo();
         let [w, h] = o.size();
@@ -91,6 +95,14 @@ fn vector_shapes(ctx: &mut SceneCtx) {
         });
     });
 
+    // The image hit-tests itself: a press or drag moves the centre, and the knob follows.
+    for at in staged.iter().flat_map(|(_, pointer)| pointer) {
+        if let Pointer::Down { x, y } | Pointer::Move { x, y } = *at {
+            ctx.set_pad2d("center", x / SIZE[0] as f32, y / SIZE[1] as f32);
+        }
+    }
+
     ctx.ui.add_space(6.0);
-    ctx.ui.weak("femtovg → offscreen FBO → egui texture");
+    ctx.ui
+        .weak("femtovg → offscreen FBO → egui texture · drag the image to move the centre");
 }

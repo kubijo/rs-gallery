@@ -113,7 +113,8 @@ past a handful of images, and a structural target beside the pixel one.
 
 - [x] **Why this stopped being "thin".** A static snapshot of default knobs shows a state nobody chose. Capture recipes
   answer that without a record-replay layer: a shot names its knobs by label, so the state is *declared* rather than
-  replayed. What recipes still can't express is a state only reachable by clicking, dragging or typing.
+  replayed. What recipes still can't express is a state only reachable by clicking, dragging or typing — unless the
+  scene writes the interaction back into a knob (`set_slider` &co.), which a recipe then states.
 - [x] Renders the canvas alone, through the `render_canvas` the shell itself draws with, so a capture is the component's
   own pixels — on either backend. The glow one is gallery's own `TestRenderer` over an EGL-device context, since
   egui_kittest ships only a wgpu one.

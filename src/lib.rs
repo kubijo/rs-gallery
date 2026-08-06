@@ -34,6 +34,7 @@ pub use gallery_macros::scene;
 #[doc(hidden)]
 pub use inventory;
 
+mod actions;
 mod context;
 mod diagnostic;
 mod fonts;
@@ -53,13 +54,15 @@ mod style;
 mod svg;
 mod tree;
 mod update;
+pub use actions::action;
+use actions::{Log, collecting, render_actions};
 pub use context::{SceneCtx, Stage, StageSpec};
 pub use hot::HotDylib;
 pub use knobs::{ChoiceStyle, Knob, Pad2DSpec};
 use knobs::{KnobStore, render_knobs};
 pub use launcher::launch;
-pub use offscreen::Offscreen;
 use offscreen::{GlDeps, RenderTarget, TargetStore};
+pub use offscreen::{Offscreen, Pointer};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
 use svg::Icons;
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
@@ -68,7 +71,8 @@ use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, vis
 /// then bare `scene_meta!` / `#[scene]`.
 pub mod prelude {
     pub use crate::{
-        Offscreen, Pad2DSpec, SceneCtx, SceneEntry, Stage, StageSpec, scene, scene_meta, stage,
+        Offscreen, Pad2DSpec, Pointer, SceneCtx, SceneEntry, Stage, StageSpec, action, scene,
+        scene_meta, stage,
     };
 }
 
@@ -193,8 +197,10 @@ pub(crate) struct ShellState {
     show_perf: bool,
     show_scenes: bool,
     show_controls: bool,
+    show_actions: bool,
     knobs: KnobStore,
     targets: TargetStore,
+    actions: Log,
 }
 
 /// The eframe backend the shell runs on — the host's explicit,
@@ -483,6 +489,30 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             );
         }
 
+        // Before the central panel, which takes whatever is left over.
+        if self.state.show_actions {
+            egui::Panel::bottom("gallery-actions")
+                .frame(egui::Frame::NONE.fill(PANEL_BG))
+                .show(ui, |ui| {
+                    {
+                        let mut header = header_bar(ui);
+                        header.label(header_title("Actions"));
+                        header.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
+                                if ui.button("Clear").clicked() {
+                                    self.state.actions.clear();
+                                }
+                            },
+                        );
+                    }
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| render_actions(ui, &self.state.actions));
+                });
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(PANEL_BG))
             .show(ui, |ui| {
@@ -503,6 +533,8 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                             .on_disabled_hover_text("egui's debug overlay is a dev-build feature");
                         ui.checkbox(&mut self.state.show_perf, "Perf")
                             .on_hover_text("Performance window (⌘B)");
+                        ui.checkbox(&mut self.state.show_actions, "Actions")
+                            .on_hover_text("What the scene reports happening");
                     });
                 }
 
@@ -512,7 +544,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                     }
                 } else if let (Some(scene), Some(key)) = (scene, &key) {
                     let store = self.state.knobs.entry(key.clone()).or_default();
-                    let target = self.state.targets.entry(key.clone()).or_default();
+                    let targets = self.state.targets.entry(key.clone()).or_default();
                     let gl_deps = match (gl_loader.clone(), gl.as_deref()) {
                         (Some(loader), Some(gl)) => Some(GlDeps {
                             loader,
@@ -520,11 +552,13 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                             register: Box::new(|texture| {
                                 frame.register_native_glow_texture(texture)
                             }),
-                            target,
+                            targets,
                         }),
                         _ => None,
                     };
-                    let _ = render_canvas(ui, scene, store, gl_deps);
+                    let ((), reported) =
+                        collecting(|| _ = render_canvas(ui, scene, store, gl_deps));
+                    self.state.actions.extend(key, reported);
                 }
             });
 
@@ -1164,6 +1198,42 @@ mod tests {
             harness.state().state.selected.as_deref(),
             Some(wanted.as_str()),
             "the requested scene is selected, not the first one"
+        );
+    }
+
+    #[test]
+    fn what_a_scene_reports_reaches_the_actions_panel() {
+        // Once, as an event would — a scene reporting every frame is the misuse the docs warn of.
+        fn reports(_ctx: &mut SceneCtx<'_>) {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::action("saved to disk");
+            }
+        }
+        let scenes = vec![SceneEntry {
+            render: reports,
+            name: "view",
+            module_path: "m",
+            default: true,
+            order: u32::MAX,
+            source: "",
+        }];
+        let mut gallery = Gallery::new(
+            Fixed(scenes, vec![group("m", "Group")]),
+            Settings::new(Renderer::Wgpu),
+            None,
+            None,
+        );
+        gallery.state.show_actions = true;
+
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_cc| gallery);
+        // The first frame selects the scene; the second is the one it renders in.
+        harness.run_steps(2);
+
+        assert!(
+            harness.query_by_label("saved to disk").is_some(),
+            "the line the scene reported is on screen"
         );
     }
 

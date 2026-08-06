@@ -18,6 +18,7 @@ name = "knobs-choice"
 # A whole scene key, or a case-insensitive regex; it has to match exactly one scene.
 scene = "knobs::choice"
 # Each key is a knob's label, or a regex over the labels. A choice is set by option label.
+# Values are re-applied before every frame, so they outrank anything the scene writes to its own knobs.
 knobs = { select = "two", radio = "three", buttons = "one" }
 
 [[shot]]

@@ -5,7 +5,8 @@
 //! containing spaces out of argv and makes a set of states reviewable and re-runnable.
 //!
 //! Knobs are declarative-by-use, so an override cannot be seeded up front — hence the frame protocol
-//! in [`shoot`]: declare, apply, redraw, capture.
+//! in [`draw`]: declare, apply, redraw, capture. Overrides re-apply before every frame, so a recipe
+//! outranks whatever a scene writes to its own knobs — capture and store both end on the recipe.
 
 use std::{collections::BTreeMap, fmt::Write as _};
 
@@ -265,9 +266,9 @@ pub(crate) fn open<A: eframe::App + 'static>(
 
 /// Draw `scene` at `size`, applying the shot's knobs as the frames go by.
 ///
-/// Frame one declares the knobs at their defaults; each later frame
-/// gets another chance to apply overrides, because setting one knob
-/// can be what makes the next one exist.
+/// Frame one declares the knobs at their defaults; every later frame re-applies the overrides
+/// — setting one knob can be what makes the next one exist,
+/// and a scene writing its own is overruled.
 ///
 /// # Errors
 /// For a key that named no knob by the last frame.
@@ -284,19 +285,36 @@ fn draw(
         gl: cc.gl.clone(),
         loader: cc.get_proc_address.clone(),
         painter,
-        target: None,
+        targets: Vec::new(),
         wanted: egui::Vec2::ZERO,
     })?;
+    settle(&mut harness, shot)?;
+    Ok(harness)
+}
+
+/// Draw the frames a shot asks for, applying its overrides as they go by.
+///
+/// Split out so a resize can run it again on the same harness — [`shoot`] has the why.
+///
+/// # Errors
+/// For a key that named no knob by the last frame.
+fn settle(
+    harness: &mut egui_kittest::Harness<'static, Canvas>,
+    shot: &Shot,
+) -> Result<(), Diagnostic> {
     harness.run_steps(1);
-    let mut pending: Vec<&(String, String)> = shot.knobs.iter().collect();
+    let mut unmatched: Vec<&(String, String)> = shot.knobs.iter().collect();
     for _ in 1..shot.frames.unwrap_or(DEFAULT_FRAMES).max(2) {
-        apply(&mut harness.state_mut().knobs, &mut pending)?;
+        apply(&mut harness.state_mut().knobs, &shot.knobs, &mut unmatched)?;
         harness.run_steps(1);
     }
-    if !pending.is_empty() {
-        return Err(unknown_knobs(&pending, &harness.state().knobs));
+    // The loop ends on a draw, so a scene's own writes would outlive the last apply.
+    // One more settles the store on the recipe, which is what `--list-knobs` then reports.
+    apply(&mut harness.state_mut().knobs, &shot.knobs, &mut unmatched)?;
+    if !unmatched.is_empty() {
+        return Err(unknown_knobs(&unmatched, &harness.state().knobs));
     }
-    Ok(harness)
+    Ok(())
 }
 
 /// Draw one shot: resolve its scene, draw it at a size that holds it, then capture.
@@ -318,11 +336,12 @@ fn shoot(
         shot.size.y.max(wanted.y.ceil()),
     );
     if fitting != shot.size {
-        // Let go of the first before asking for the second:
-        // a glow capture holds an EGL context, and two
-        // of them alive at once takes the process down.
-        drop(harness);
-        harness = draw(scene, renderer, setup, shot, fitting)?;
+        // Resized rather than drawn again on a fresh harness, which would take the GL context with it.
+        // A scene that cached anything against that context — a femtovg canvas, a compiled shader —
+        // would then be drawing into nothing, and the shot would come back with the egui parts alone.
+        // Reuse also keeps two EGL contexts from being alive at once, which the teardown was for.
+        harness.set_size(fitting);
+        settle(&mut harness, shot)?;
     }
 
     if shot.list {
@@ -385,21 +404,21 @@ struct Canvas {
     gl: Option<std::sync::Arc<glow::Context>>,
     loader: Option<GlLoader>,
     painter: Option<GlPainter>,
-    target: Option<RenderTarget>,
+    targets: Vec<RenderTarget>,
     /// What the last frame's canvas came to — the size a shot has to be at least as big as.
     wanted: egui::Vec2,
 }
 
 impl eframe::App for Canvas {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Split so the painter and the target can be borrowed at once.
+        // Split so the painter and the targets can be borrowed at once.
         let Self {
             scene,
             knobs,
             gl,
             loader,
             painter,
-            target,
+            targets,
             wanted,
         } = self;
         let gl_deps = match (loader.clone(), gl.as_deref(), painter.as_ref()) {
@@ -409,7 +428,7 @@ impl eframe::App for Canvas {
                 // Through the painter rather than the `Frame`, which a harness builds
                 // without the glow hook that nothing outside eframe can supply.
                 register: Box::new(|texture| painter.borrow_mut().register_native_texture(texture)),
-                target,
+                targets,
             }),
             // Under wgpu, `SceneCtx::offscreen` draws its "needs the glow renderer" hint, as in a window.
             _ => None,
@@ -422,24 +441,28 @@ impl eframe::App for Canvas {
     }
 }
 
-/// Apply each pending override whose knob the scene has now declared,
-/// and leave the rest pending.
+/// Apply every override whose knob the scene has declared,
+/// and cross the ones that landed off `unmatched` for good —
+/// a knob another override later hides must not put its key back.
 ///
+/// Takes the whole list each frame: re-applying is what keeps the recipe's word the last one.
 /// A key matching nothing yet is not an error
 /// — it may name a knob that appears only once another is set.
 ///
 /// A key matching a knob that can't take the value fails straight away,
 /// as does one matching several knobs, which no later frame can disambiguate.
-fn apply(knobs: &mut [Knob], pending: &mut Vec<&(String, String)>) -> Result<(), Diagnostic> {
-    let mut deferred = Vec::new();
-    for over in std::mem::take(pending) {
+fn apply<'shot>(
+    knobs: &mut [Knob],
+    overrides: &'shot [(String, String)],
+    unmatched: &mut Vec<&'shot (String, String)>,
+) -> Result<(), Diagnostic> {
+    for over in overrides {
         let (key, value) = over;
-        match find(knobs, key)? {
-            Some(at) => set(&mut knobs[at], value)?,
-            None => deferred.push(over),
+        if let Some(at) = find(knobs, key)? {
+            set(&mut knobs[at], value)?;
+            unmatched.retain(|left| !std::ptr::eq(*left, over));
         }
     }
-    *pending = deferred;
     Ok(())
 }
 
@@ -940,12 +963,12 @@ mod tests {
             .collect()
     }
 
-    /// Apply `pairs` to `knobs`, as a frame of [`shoot`] would.
+    /// Apply `pairs` to `knobs`, as a frame of [`shoot`] would; returns how many went unmatched.
     fn applied(store: &mut [Knob], pairs: &[(&str, &str)]) -> Result<usize, Diagnostic> {
         let owned = knobs(pairs);
-        let mut pending: Vec<&(String, String)> = owned.iter().collect();
-        apply(store, &mut pending)?;
-        Ok(pending.len())
+        let mut unmatched: Vec<&(String, String)> = owned.iter().collect();
+        apply(store, &owned, &mut unmatched)?;
+        Ok(unmatched.len())
     }
 
     fn select(label: &str, options: &[&str]) -> Knob {
@@ -1115,16 +1138,410 @@ mod tests {
             value: false,
         }];
         let owned = knobs(&[("night", "true"), ("headlights", "true")]);
-        let mut pending: Vec<&(String, String)> = owned.iter().collect();
-        apply(&mut store, &mut pending).expect("an unmatched key is not yet a failure");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].0, "headlights");
+        let mut unmatched: Vec<&(String, String)> = owned.iter().collect();
+        apply(&mut store, &owned, &mut unmatched).expect("an unmatched key is not yet a failure");
+        assert_eq!(unmatched.len(), 1);
+        assert_eq!(unmatched[0].0, "headlights");
 
-        let message = unknown_knobs(&pending, &store).plain();
+        let message = unknown_knobs(&unmatched, &store).plain();
         assert!(message.contains("`headlights`"), "names what was not found");
         assert!(
             message.contains("night"),
             "lists what the scene does declare"
+        );
+
+        // A knob that took its value and then vanished stays satisfied: the recipe was honoured.
+        store.clear();
+        apply(&mut store, &owned, &mut unmatched).expect("an empty store is not a failure");
+        assert_eq!(
+            unmatched.len(),
+            1,
+            "`night` landed once and does not come back"
+        );
+    }
+
+    /// The flip side of re-applying: a regex key resolves anew each frame,
+    /// so a knob appearing mid-settle can turn it ambiguous — which errors.
+    #[test]
+    fn a_key_turning_ambiguous_on_a_later_frame_is_an_error() {
+        let mut store = vec![slider("speed")];
+        let owned = knobs(&[("spe.*", "1.5")]);
+        let mut unmatched: Vec<&(String, String)> = owned.iter().collect();
+        apply(&mut store, &owned, &mut unmatched).expect("one match applies");
+
+        store.push(slider("spectrum"));
+        let failure = apply(&mut store, &owned, &mut unmatched)
+            .expect_err("two matches can no longer say which knob is meant");
+        assert!(failure.plain().contains("matches 2 knobs"));
+    }
+
+    #[test]
+    fn a_recipe_value_is_reasserted_over_a_scenes_own_write() {
+        let mut store = vec![slider("speed")];
+        let owned = knobs(&[("speed", "1.5")]);
+        let mut unmatched: Vec<&(String, String)> = owned.iter().collect();
+        apply(&mut store, &owned, &mut unmatched).expect("the key names its knob");
+        assert!(unmatched.is_empty());
+
+        // Stand in for a scene writing the knob back mid-frame.
+        if let Knob::Slider { value, .. } = &mut store[0] {
+            *value = 1.9;
+        }
+        apply(&mut store, &owned, &mut unmatched).expect("re-applying is idempotent");
+        assert!(
+            matches!(store[0], Knob::Slider { value, .. } if value == 1.5),
+            "the recipe's word is the last one"
+        );
+    }
+
+    /// Two images in one scene are two targets: sharing one made every image show
+    /// the last one's pixels, stretched to whatever size that call had asked for.
+    ///
+    /// Different sizes as well as different colours, since one target would also
+    /// have been reallocated between the two and left the first image reading
+    /// a texture of the wrong shape.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn each_offscreen_call_in_a_scene_keeps_its_own_target() {
+        fn two(ctx: &mut crate::SceneCtx<'_>) {
+            fn fill(target: &crate::Offscreen, rgb: (f32, f32, f32)) {
+                let loader = target.gl_loader();
+                // SAFETY: the capture made its context current, and `loader` resolves against it.
+                let gl =
+                    unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) };
+                // SAFETY: the target's framebuffer is bound for the duration of this closure.
+                unsafe {
+                    use eframe::glow::HasContext as _;
+                    gl.clear_color(rgb.0, rgb.1, rgb.2, 1.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                }
+            }
+            ctx.offscreen([64_u32, 32], |target| fill(target, (1.0, 0.0, 0.0)));
+            ctx.offscreen([32_u32, 16], |target| fill(target, (0.0, 0.0, 1.0)));
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: two,
+                name: "two-images",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let out = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-two-images")
+            .join("two.png");
+        let capture = Capture {
+            shots: vec![Shot {
+                scene: "two-images".to_owned(),
+                out: Some(out.clone()),
+                size: egui::vec2(200.0, 200.0),
+                knobs: Vec::new(),
+                frames: None,
+                trim: true,
+                list: false,
+                template: false,
+            }],
+            sheet: None,
+        };
+        render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+            .expect("the shot renders");
+
+        let png = std::fs::read(&out).expect("the capture was written");
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("a PNG")
+            .to_rgba8();
+        let mostly = |want: char| {
+            image
+                .pixels()
+                .filter(|p| {
+                    let [r, _, b, a] = p.0;
+                    a > 128
+                        && if want == 'r' {
+                            r > 128 && b < 64
+                        } else {
+                            b > 128 && r < 64
+                        }
+                })
+                .count()
+        };
+        assert!(
+            mostly('r') > 512,
+            "the first image keeps its own red, not the second's blue"
+        );
+        assert!(mostly('b') > 128, "and the second keeps its blue");
+    }
+
+    /// A staged image is a call site like any other: its own slot, in the order the scene makes it,
+    /// leaving the bare call after it on the slot it already had. The caption reports the image,
+    /// which for a fitted stage is the response's own rect.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_staged_image_takes_a_slot_of_its_own_and_is_captioned_by_its_size() {
+        thread_local! {
+            static STAGED: std::cell::Cell<Option<egui::Rect>> =
+                const { std::cell::Cell::new(None) };
+        }
+        fn staged_and_bare(ctx: &mut crate::SceneCtx<'_>) {
+            let blank = |_: &crate::Offscreen| {};
+            let shown = ctx.offscreen_stage(crate::Stage::Fit, [48_u32, 24], blank);
+            STAGED.set(shown.map(|response| response.rect));
+            ctx.offscreen([16_u32, 16], blank);
+        }
+        let harness = staged_harness(staged_and_bare, "staged-and-bare");
+        assert_eq!(
+            harness.state().targets.len(),
+            2,
+            "the staged image and the bare one each keep their own target"
+        );
+        let rect = STAGED.get().expect("an open stage shows its image");
+        assert_eq!(
+            (rect.width(), rect.height()),
+            (48.0, 24.0),
+            "a fitted stage is the image, and its size is what the caption reads"
+        );
+    }
+
+    /// Folding a stage away has to skip the GL, not draw it somewhere nobody looks — and the target
+    /// stays put, so unfolding does not rebuild it or shift the call sites after it.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_folded_stage_costs_no_gl_and_keeps_its_target() {
+        use egui_kittest::kittest::Queryable as _;
+
+        thread_local! {
+            static DREW: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        fn counts(ctx: &mut crate::SceneCtx<'_>) {
+            ctx.offscreen_stage(crate::Stage::Fit, [48_u32, 24], |_| {
+                DREW.set(DREW.get() + 1);
+            });
+        }
+        let mut harness = staged_harness(counts, "folds");
+        assert!(DREW.get() > 0, "an open stage draws");
+        assert_eq!(harness.state().targets.len(), 1);
+
+        harness.get_by_label("▾").click();
+        harness.run_steps(2);
+        let folded = DREW.get();
+        harness.run_steps(2);
+        assert_eq!(DREW.get(), folded, "a folded stage runs no GL at all");
+        assert_eq!(
+            harness.state().targets.len(),
+            1,
+            "and holds its target for when it opens again"
+        );
+    }
+
+    /// One scene, drawn as a shot would draw it, with the harness left open to poke at.
+    #[cfg(not(target_vendor = "apple"))]
+    fn staged_harness(
+        render: fn(&mut crate::SceneCtx<'_>),
+        name: &'static str,
+    ) -> egui_kittest::Harness<'static, Canvas> {
+        let scene = SceneEntry {
+            render,
+            name,
+            module_path: "reference",
+            default: true,
+            order: 0,
+            source: "",
+        };
+        let shot = Shot {
+            scene: name.to_owned(),
+            out: None,
+            size: egui::vec2(200.0, 200.0),
+            knobs: Vec::new(),
+            frames: None,
+            trim: true,
+            list: false,
+            template: false,
+        };
+        draw(
+            scene,
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &shot,
+            shot.size,
+        )
+        .expect("the scene draws")
+    }
+
+    /// A scene may make fewer calls on a later frame — one behind a toggle — and the targets
+    /// it stops asking for are kept for when it asks again, rather than freed under
+    /// a `TextureId` eframe gives no way to release.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_scene_that_stops_staging_an_image_keeps_the_target_for_its_return() {
+        thread_local! {
+            static BOTH: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+        }
+        fn sometimes_two(ctx: &mut crate::SceneCtx<'_>) {
+            let blank = |_: &crate::Offscreen| {};
+            ctx.offscreen([32_u32, 32], blank);
+            if BOTH.get() {
+                ctx.offscreen([16_u32, 16], blank);
+            }
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: sometimes_two,
+                name: "sometimes-two",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let shot = Shot {
+            scene: "sometimes-two".to_owned(),
+            out: None,
+            size: egui::vec2(200.0, 200.0),
+            knobs: Vec::new(),
+            frames: None,
+            trim: true,
+            list: false,
+            template: false,
+        };
+        let mut harness = draw(
+            manifest.scenes[0],
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &shot,
+            shot.size,
+        )
+        .expect("both images draw");
+        assert_eq!(harness.state().targets.len(), 2, "one target per call site");
+
+        BOTH.set(false);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().targets.len(),
+            2,
+            "the one it stopped staging is held, not dropped"
+        );
+
+        BOTH.set(true);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().targets.len(),
+            2,
+            "and taken up again rather than made afresh"
+        );
+    }
+
+    /// A shot smaller than its scene lays out is drawn twice, and the scene must see the same GL
+    /// both times: `scripts/offscreen.scene.rs` tells scenes to build a femtovg canvas once
+    /// and keep it, and one built against a context since torn down draws nothing.
+    ///
+    /// The loader is an `Arc` per capture, so its identity is what says whether the context held.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_regrown_capture_keeps_the_gl_the_scene_cached_against() {
+        thread_local! {
+            static FIRST: std::cell::RefCell<Option<crate::GlLoader>> =
+                const { std::cell::RefCell::new(None) };
+            static SWAPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        fn caches_gl(ctx: &mut crate::SceneCtx<'_>) {
+            ctx.offscreen([64_u32, 64], |target| {
+                let loader = target.gl_loader();
+                FIRST.with_borrow_mut(|first| match first {
+                    Some(seen) if !std::sync::Arc::ptr_eq(seen, &loader) => SWAPPED.set(true),
+                    Some(_) => {}
+                    None => *first = Some(loader),
+                });
+            });
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: caches_gl,
+                name: "caches-gl",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let shot = Shot {
+            scene: "caches-gl".to_owned(),
+            out: None,
+            // Well under the 64×64 image plus its padding, so the fitting size differs.
+            size: egui::vec2(24.0, 24.0),
+            knobs: Vec::new(),
+            frames: None,
+            trim: true,
+            list: false,
+            template: false,
+        };
+        let harness = draw(
+            manifest.scenes[0],
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &shot,
+            shot.size,
+        )
+        .expect("the first pass draws");
+        let wanted = harness.state().wanted;
+        assert!(
+            wanted.x > shot.size.x || wanted.y > shot.size.y,
+            "the scene has to outgrow the shot for this to test anything"
+        );
+        drop(harness);
+        // That measuring pass had a capture of its own; only the shot below is under test.
+        FIRST.with_borrow_mut(|first| *first = None);
+        SWAPPED.set(false);
+
+        shoot(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &shot).expect("the shot renders");
+        assert!(
+            !SWAPPED.get(),
+            "the scene saw one GL context for the whole shot"
+        );
+    }
+
+    /// The precedence rule end to end: a scene nudging its own knob every frame
+    /// loses to the recipe, in the pixels and in the store a listing reads.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_recipe_outlives_a_scene_writing_its_own_knob() {
+        fn self_nudging(ctx: &mut crate::SceneCtx<'_>) {
+            let speed = ctx.slider("speed", 1.0, 0.0, 100.0, 0.0);
+            ctx.set_slider("speed", speed + 1.0);
+        }
+        let scene = SceneEntry {
+            render: self_nudging,
+            name: "self-nudging",
+            module_path: "reference",
+            default: true,
+            order: 0,
+            source: "",
+        };
+        let shot = Shot {
+            scene: "self-nudging".to_owned(),
+            out: None,
+            size: egui::vec2(320.0, 200.0),
+            knobs: knobs(&[("speed", "5")]),
+            frames: None,
+            trim: true,
+            list: false,
+            template: false,
+        };
+        let harness = draw(
+            scene,
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &shot,
+            shot.size,
+        )
+        .expect("the shot draws");
+        assert!(
+            matches!(harness.state().knobs[0], Knob::Slider { value, .. } if value == 5.0),
+            "every settle frame re-applies the recipe, and one more after the last draw"
         );
     }
 
@@ -1240,9 +1657,10 @@ mod tests {
                 Knob::Group { .. } => {}
             }
         }
-        let mut pending: Vec<&(String, String)> = shots[0].knobs.iter().collect();
-        apply(&mut store, &mut pending).expect("every generated key names its knob");
-        assert!(pending.is_empty(), "no key went unmatched");
+        let mut unmatched: Vec<&(String, String)> = shots[0].knobs.iter().collect();
+        apply(&mut store, &shots[0].knobs, &mut unmatched)
+            .expect("every generated key names its knob");
+        assert!(unmatched.is_empty(), "no key went unmatched");
         for (before, after) in declared.iter().zip(&store) {
             assert_eq!(
                 toml_value(before),
@@ -1288,6 +1706,33 @@ mod tests {
                 gl.clear(glow::COLOR_BUFFER_BIT);
                 gl.disable(glow::SCISSOR_TEST);
             }
+        });
+    }
+
+    /// Several offscreen images at different sizes, so the reference catches one call site's target
+    /// standing in for another's — which reads as the same picture repeated, at the wrong shape.
+    /// The last is staged, which also holds the chrome a rendered frame gets.
+    fn draws_offscreen_slots(ctx: &mut crate::SceneCtx<'_>) {
+        fn flat(target: &crate::Offscreen, rgb: (f32, f32, f32)) {
+            let loader = target.gl_loader();
+            // SAFETY: the capture made its context current, and `loader` resolves against it.
+            let gl = unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) };
+            // SAFETY: the target's framebuffer is bound for the duration of this closure.
+            unsafe {
+                use eframe::glow::HasContext as _;
+                gl.clear_color(rgb.0, rgb.1, rgb.2, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+            }
+        }
+        ctx.ui.label("wide");
+        ctx.offscreen([64_u32, 24], |target| flat(target, (0.9, 0.2, 0.2)));
+        ctx.ui.label("tall");
+        ctx.offscreen([24_u32, 48], |target| flat(target, (0.2, 0.4, 0.9)));
+        // Staged, so the reference also holds the chrome a rendered frame gets:
+        // the checkerboard around it, the size caption, the collapse arrow.
+        ctx.ui.label("staged");
+        ctx.offscreen_stage(crate::Stage::Fit, [40_u32, 40], |target| {
+            flat(target, (0.2, 0.8, 0.4));
         });
     }
 
@@ -1363,6 +1808,7 @@ mod tests {
                 scene(glyphs_past_the_default_faces, "glyph-fallbacks"),
                 scene(dressed_by_knobs, "knobs-applied"),
                 scene(draws_offscreen, "offscreen-gl"),
+                scene(draws_offscreen_slots, "offscreen-slots"),
             ],
             groups: Vec::new(),
         }
