@@ -31,7 +31,7 @@ fn vector_shapes(ctx: &mut SceneCtx, ui: &mut Ui) {
     let radius = ctx.slider("corner radius", 28.0, 0.0, 80.0, 1.0);
     let stroke = ctx.slider("stroke width", 3.0, 0.5, 12.0, 0.5);
     let spokes = ctx.slider("spokes", 16.0, 3.0, 64.0, 1.0) as u32;
-    let (cx, cy) = ctx.pad2d(
+    let Pad2D { x: cx, y: cy } = ctx.pad2d(
         "center",
         Pad2DSpec {
             default_x: 0.5,
@@ -96,7 +96,7 @@ fn vector_shapes(ctx: &mut SceneCtx, ui: &mut Ui) {
     });
 
     // The image hit-tests itself: a press or drag moves the centre, and the knob follows.
-    for at in staged.iter().flat_map(|(_, pointer)| pointer) {
+    for at in staged.iter().flat_map(|shown| &shown.pointers) {
         if let Pointer::Down { x, y } | Pointer::Move { x, y } = *at {
             ctx.set_pad2d("center", x / SIZE[0] as f32, y / SIZE[1] as f32);
         }

@@ -62,8 +62,8 @@ fn choice(ctx: &mut SceneCtx, ui: &mut Ui) {
 /// `pad2d` — a 2-axis pad; `Pad2DSpec` sets its ranges and y-orientation.
 #[scene("pad2d")]
 fn pad2d(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let (x, y) = ctx.pad2d("centered, -1..1", Pad2DSpec::default());
-    let (px, py) = ctx.pad2d(
+    let Pad2D { x, y } = ctx.pad2d("centered, -1..1", Pad2DSpec::default());
+    let Pad2D { x: px, y: py } = ctx.pad2d(
         "y-up, 0..100",
         Pad2DSpec {
             min_x: 0.0,
@@ -98,7 +98,7 @@ fn writeback(ctx: &mut SceneCtx, ui: &mut Ui) {
     let note = ctx.text("note", "");
     let tint = ctx.color("tint", TINTS[2].1);
     let mode = ctx.select("mode", MODES, 1);
-    let (x, y) = ctx.pad2d("aim", Pad2DSpec::default());
+    let Pad2D { x, y } = ctx.pad2d("aim", Pad2DSpec::default());
 
     let (mut step, mut flip) = (0.0, false);
     let (mut typed, mut picked, mut chose, mut cycled, mut aimed) = (None, None, None, false, None);

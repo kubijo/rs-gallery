@@ -64,10 +64,13 @@ impl Stage {
     /// it cannot see reads [`egui::Ui::clip_rect`].
     #[must_use]
     pub fn scrollable(self) -> StageSpec {
-        StageSpec {
-            size: self,
-            scroll: true,
-        }
+        StageSpec::from(self).scrollable()
+    }
+
+    /// Set the checkerboard showing around this stage — see [`StageSpec::padding`].
+    #[must_use]
+    pub fn padding(self, points: i8) -> StageSpec {
+        StageSpec::from(self).padding(points)
     }
 }
 
@@ -78,6 +81,7 @@ impl Stage {
 pub struct StageSpec {
     size: Stage,
     scroll: bool,
+    padding: i8,
 }
 
 impl From<Stage> for StageSpec {
@@ -85,7 +89,31 @@ impl From<Stage> for StageSpec {
         Self {
             size,
             scroll: false,
+            padding: PADDING,
         }
+    }
+}
+
+impl StageSpec {
+    /// As [`Stage::scrollable`], on a spec that already carries other settings.
+    #[must_use]
+    pub fn scrollable(mut self) -> Self {
+        self.scroll = true;
+        self
+    }
+
+    /// How much checkerboard shows around the content, in points. [`PADDING`] by default.
+    ///
+    /// `0` puts the content against the edge of its stage, for a component whose own shape
+    /// is the thing being looked at: the margin a rectangle hides behind its corners is all
+    /// that shows around a round face, where it reads as a bezel.
+    ///
+    /// Clamped at zero — a negative margin would put content outside the checkerboard
+    /// and hand a scrolling stage a viewport bigger than the box it was told to keep to.
+    #[must_use]
+    pub fn padding(mut self, points: i8) -> Self {
+        self.padding = points.max(0);
+        self
     }
 }
 
@@ -134,9 +162,9 @@ macro_rules! stage_from {
 
 stage_from!(f32, f64, u16, i16, u32, i32, usize, isize);
 
-/// Breathing room between a staged component
-/// and the edge of its checkerboard.
-const PADDING: i8 = 16;
+/// Breathing room between a staged component and the edge of its checkerboard,
+/// unless a stage says otherwise ([`StageSpec::padding`]).
+pub const PADDING: i8 = 16;
 
 impl<'a> SceneCtx<'a> {
     pub(crate) fn new(knobs: &'a mut Vec<Knob>, gl: Option<GlDeps<'a>>) -> Self {
@@ -159,12 +187,12 @@ impl<'a> SceneCtx<'a> {
         size: impl Into<StageSpec>,
         add: impl FnOnce(&mut egui::Ui),
     ) {
-        let StageSpec { size, scroll } = size.into();
+        let spec = size.into();
         let id = Self::stage_id(ui, self.stages);
         self.stages += 1;
         // One block wherever it is placed: the badge and the content are two items,
         // and a parent laying out in a row would otherwise set them beside each other.
-        ui.vertical(|ui| self.staging(ui, id, size, scroll, add));
+        ui.vertical(|ui| self.staging(ui, id, spec, add));
     }
 
     /// One stage per size, in as many columns as fit across `ui`, aligned in a grid.
@@ -210,10 +238,14 @@ impl<'a> SceneCtx<'a> {
         &mut self,
         ui: &mut egui::Ui,
         id: egui::Id,
-        size: Stage,
-        scroll: bool,
+        spec: StageSpec,
         add: impl FnOnce(&mut egui::Ui),
     ) {
+        let StageSpec {
+            size,
+            scroll,
+            padding,
+        } = spec;
         let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
 
         // The badge sits above the stage but reports a size `Fit` only knows
@@ -255,7 +287,7 @@ impl<'a> SceneCtx<'a> {
             .response
             .rect
         };
-        let padding = egui::Margin::same(PADDING);
+        let padding = egui::Margin::same(padding);
 
         // Reserved before the content, so the checkerboard lands beneath it.
         let backdrop = ui.painter().add(egui::Shape::Noop);
@@ -1358,6 +1390,41 @@ mod tests {
         assert!(
             first_column.windows(2).all(|pair| pair[0] == pair[1]),
             "every cell starting a row shares the first column's x: {corners:?}"
+        );
+    }
+
+    /// `padding(0)` takes the checkerboard margin away and leaves the content box alone:
+    /// two stages of one size differ by exactly the margin between them.
+    ///
+    /// A difference rather than an absolute, since the height of either stage carries a badge
+    /// and a frame besides the margin under test. Each sits in its own scope, so the spacing
+    /// egui puts between two items lands in neither measurement.
+    #[test]
+    fn a_stage_can_be_told_to_keep_no_checkerboard_around_its_content() {
+        let took = std::cell::RefCell::new(Vec::new());
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            took.borrow_mut().clear();
+            for spec in [
+                StageSpec::from(Stage::Fixed(egui::vec2(80.0, 40.0))),
+                Stage::Fixed(egui::vec2(80.0, 40.0)).padding(0),
+            ] {
+                let scope = ui.scope(|ui| {
+                    ctx.stage(ui, spec, |ui| {
+                        ui.label("content");
+                    });
+                });
+                took.borrow_mut().push(scope.response.rect.height());
+            }
+        });
+        harness.run_steps(2);
+
+        let took = took.borrow();
+        let (padded, bare) = (took[0], took[1]);
+        assert!(
+            (padded - bare - 2.0 * f32::from(PADDING)).abs() < 0.5,
+            "the margin is all that differs: padded {padded}, bare {bare}"
         );
     }
 

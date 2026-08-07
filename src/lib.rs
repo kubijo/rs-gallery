@@ -24,6 +24,11 @@ use std::{
 
 use convert_case::{Case, Casing};
 
+// A scene file names `gallery::prelude` and `::gallery::`, paths that resolve everywhere
+// but inside gallery itself. Aliasing the crate to its own name makes them resolve here too,
+// so `scaffold_scenes` below can type-check the scenes a scaffold ships.
+extern crate self as gallery;
+
 /// Re-exported so a host writes `gallery::eframe::Result` without depending
 /// on eframe itself — and so both sides are the same eframe.
 /// Bumping it is a breaking change here.
@@ -56,7 +61,7 @@ mod tree;
 mod update;
 pub use actions::action;
 use actions::{Log, collecting, render_actions};
-pub use context::{SceneCtx, Stage, StageSpec};
+pub use context::{PADDING, SceneCtx, Stage, StageSpec};
 pub use hot::HotDylib;
 pub use knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
 use knobs::{KnobStore, render_knobs};
@@ -74,8 +79,8 @@ pub mod prelude {
     pub use egui::Ui;
 
     pub use crate::{
-        ImageInput, Offscreen, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, Stage, StageSpec,
-        StageTexture, action, scene, scene_meta, stage,
+        ImageInput, Offscreen, PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, Stage,
+        StageSpec, StageTexture, action, scene, scene_meta, stage,
     };
 }
 
@@ -1496,4 +1501,39 @@ mod tests {
         assert!(!collapsed.folds("deep", false));
         assert!(Collapsed::Everything.folds("deep", false), "unlike all");
     }
+}
+
+/// The scenes a scaffold ships, type-checked against the crate they are written for.
+///
+/// They live outside the workspace, their manifest being written for `cargo generate`
+/// rather than cargo, so `just validate` built this crate and never the files it hands out.
+/// A breaking change to the scene-facing API broke them with every gate still green:
+/// `pad2d` returning a named type shipped a scaffold that would not compile.
+///
+/// Only what a scaffold ships, though — `scripts/offscreen.scene.rs` needs femtovg
+/// and is still reachable only through `just demo`.
+///
+/// `#[scene]` submits to `inventory`, so these twenty land in the test binary's registry.
+/// Nothing reads it here — the fixtures in [`test_support`] are built by hand — but a test
+/// reaching for [`Linked`] would see the template's scenes rather than its own.
+///
+/// The directory comes off the module rather than each file: inside a child's `#[path]`,
+/// a `..` resolves against `src/scaffold_scenes/`, which is not a directory that exists.
+#[cfg(test)]
+#[path = "../template"]
+mod scaffold_scenes {
+    #[path = "animation.scene.rs"]
+    mod animation;
+    #[path = "badge.scene.rs"]
+    mod badge;
+    #[path = "example.scene.rs"]
+    mod example;
+    #[path = "knobs.scene.rs"]
+    mod knobs;
+    #[path = "matrix.scene.rs"]
+    mod matrix;
+    #[path = "notices.scene.rs"]
+    mod notices;
+    #[path = "padding.scene.rs"]
+    mod padding;
 }

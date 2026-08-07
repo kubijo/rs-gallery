@@ -5,6 +5,12 @@ so a minor release may carry a breaking change.
 
 ## 2026-08-07
 
+- **A stage's padding is settable** — `Stage::Fit.padding(0)`, or on a spec that already carries other settings,
+  `Stage::Fill.scrollable().padding(4)`. The margin a rectangle hides behind its corners is all that shows around a
+  round component, where it reads as a bezel. The alternative — staging the face at `diameter + 2×padding` and masking
+  the difference — fakes the geometry and leaves the size badge reporting something the component is not. Clamped at
+  zero: a negative margin would put content outside the checkerboard and hand a scrolling stage a viewport bigger than
+  its own box. `PADDING` is public now, as the default it always was.
 - **`SceneCtx::texture_stage`** — puts a texture the scene owns on a stage, with the chrome
   [`offscreen_stage`](src/context.rs) gives one gallery owns, and no copy: nothing crosses into a framebuffer of
   gallery's. `StageTexture::new(id, allocated)` names the texture, `.showing(size)` says how much of it to draw and
