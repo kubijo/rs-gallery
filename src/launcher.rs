@@ -144,6 +144,9 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
         );
     }
     let scene = cli.scene.clone().expect("clap requires --scene for these");
+    // `--frames` also drives a windowed profiling run, where any count is meaningful,
+    // so it is checked here rather than by clap.
+    render::check_frames(cli.frames).unwrap_or_else(|reason| fail(&reason.into()));
     Some(render::Capture {
         shots: vec![render::Shot {
             scene,
@@ -156,11 +159,14 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
             knobs: Vec::new(),
             frames: cli.frames,
             trim: !cli.no_trim,
+            // A recipe option: one shot on the command line is drawn as asked.
+            settle: false,
             list: cli.list_knobs,
             template: cli.init_capture,
         }],
-        // A sheet gathers a recipe's shots; one shot on the command line has nothing to gather.
+        // Both gather a recipe's shots; one shot on the command line has nothing to gather.
         sheet: None,
+        report: None,
     })
 }
 

@@ -1,12 +1,15 @@
-//! Headless scene → PNG, for a caller with no screen. Only the canvas is captured, through the same
-//! [`render_canvas`] the shell draws with, so a picture holds still as the chrome around it changes.
+//! Headless scene → PNG, for a caller with no screen. Only the canvas is captured,
+//! through the same [`render_canvas`] the shell draws with, so a picture holds still
+//! as the chrome around it changes.
 //!
-//! `--render` takes a scene at its defaults; setting knobs takes a [`Recipe`], which keeps labels
-//! containing spaces out of argv and makes a set of states reviewable and re-runnable.
+//! `--render` takes a scene at its defaults; setting knobs takes a [`Recipe`],
+//! which keeps labels containing spaces out of argv and makes a set of states
+//! reviewable and re-runnable.
 //!
-//! Knobs are declarative-by-use, so an override cannot be seeded up front — hence the frame protocol
-//! in [`draw`]: declare, apply, redraw, capture. Overrides re-apply before every frame, so a recipe
-//! outranks whatever a scene writes to its own knobs — capture and store both end on the recipe.
+//! Knobs are declarative-by-use, so an override cannot be seeded up front
+//! — hence the frame protocol in [`draw`]: declare, apply, redraw, capture.
+//! Overrides re-apply before every frame, so a recipe outranks whatever
+//! a scene writes to its own knobs — capture and store both end on the recipe.
 
 use std::{collections::BTreeMap, fmt::Write as _};
 
@@ -32,20 +35,39 @@ use crate::{
 
 /// One scene, in one state, at one size — what a single capture produces.
 pub(crate) struct Shot {
-    /// An exact scene key, else a case-insensitive regex; must name exactly one scene.
+    /// An exact scene key, else a case-insensitive regex;
+    /// must name exactly one scene.
     pub(crate) scene: String,
-    /// Where the PNG goes. `None` for a listing-only run.
+    /// Where the PNG goes.
+    /// `None` for a listing-only run.
     pub(crate) out: Option<Utf8PathBuf>,
     pub(crate) size: egui::Vec2,
-    /// Knob key (exact label, else a case-insensitive regex) to the value it should take.
-    pub(crate) knobs: Vec<(String, String)>,
+    /// Knob key (exact label, else a case-insensitive regex)
+    /// to the value it should take.
+    pub(crate) knobs: Vec<KnobOverride>,
+    /// How many frames to draw — and with `settle`, the most to draw.
     pub(crate) frames: Option<u32>,
     /// Crop the PNG to what the canvas drew.
     pub(crate) trim: bool,
+    /// Stop as soon as the scene stops asking
+    /// to be redrawn, rather than always drawing `frames`.
+    pub(crate) settle: bool,
     /// Print the scene's knobs, their kinds and their values.
     pub(crate) list: bool,
-    /// Print a capture recipe for this scene, its knobs written out at the values found.
+    /// Print a capture recipe for this scene,
+    /// its knobs written out at the values found.
     pub(crate) template: bool,
+}
+
+/// One knob a shot sets, over whatever its scene declared.
+///
+/// The key is an exact label, else a case-insensitive regex over the labels.
+/// The value is parsed against whatever kind the knob turns out to be,
+/// so nothing here is checked until a frame has declared the knob.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct KnobOverride {
+    pub(crate) key: String,
+    pub(crate) value: String,
 }
 
 /// The window's own inner size (see `run_with`),
@@ -58,6 +80,28 @@ pub(crate) const DEFAULT_SIZE: egui::Vec2 = egui::vec2(1280.0, 720.0);
 /// and the rest let egui settle — a grid or a scroll area lays itself out
 /// from the previous frame's measurements, as the knob-panel test in `knobs.rs` also relies on.
 const DEFAULT_FRAMES: u32 = 4;
+
+/// The fewest a shot can ask for and still be told the truth.
+const MIN_FRAMES: u32 = 2;
+
+/// Refuse a `frames` too small to capture the state a shot asked for.
+///
+/// A scene's knobs do not exist until it asks for them, so the first frame declares and the second
+/// applies the recipe over them. One frame captures the scene at its own defaults
+/// whatever the recipe says — the wrong picture rather than a rougher one, worth stopping for.
+///
+/// # Errors
+/// For a `frames` below [`MIN_FRAMES`].
+pub(crate) fn check_frames(frames: Option<u32>) -> Result<(), String> {
+    match frames {
+        Some(few) if few < MIN_FRAMES => Err(format!(
+            "`frames = {few}` is too few: one frame declares a scene's knobs \
+             and the next applies the recipe over them, so {MIN_FRAMES} is the least that captures \
+             what was asked for"
+        )),
+        _ => Ok(()),
+    }
+}
 
 /// Render every shot, in order.
 ///
@@ -79,19 +123,33 @@ pub(crate) fn render(
     let mut written = Vec::new();
     let mut panels = Vec::new();
     let mut outcome = Ok(());
+    // The sheet's own path once it lands, so the report can name it apart from the shots.
+    let mut gathered = None;
+    // Only the shots meant to write something: a listing-only shot has nothing to account for.
+    let requested = capture
+        .shots
+        .iter()
+        .filter(|shot| shot.out.is_some())
+        .count();
+    if let Some(out) = &capture.report {
+        // Cleared before the first shot rather than overwritten after the last: a run that dies
+        // — a failed write, a panic, a kill — then leaves no report at all, which reads as none
+        // rather than as the last run's, which a loop would take for this one's.
+        _ = std::fs::remove_file(out);
+    }
     for shot in &capture.shots {
         match shoot(manifest, &session, setup, shot) {
             Ok(None) => {}
-            Ok(Some((made, image))) => {
+            Ok(Some(taken)) => {
                 // Held only for a sheet, so a run without one keeps a single capture in memory
                 // rather than every capture it has taken.
                 if capture.sheet.is_some() {
                     panels.push(Panel {
-                        name: made.path.file_stem().unwrap_or("shot").to_owned(),
-                        image,
+                        name: taken.written.path.file_stem().unwrap_or("shot").to_owned(),
+                        image: taken.image,
                     });
                 }
-                written.push(made);
+                written.push(taken.written);
             }
             Err(failure) => {
                 outcome = Err(failure);
@@ -99,6 +157,8 @@ pub(crate) fn render(
             }
         }
     }
+    // Counted before the sheet is appended, so the report can hand back the shots alone.
+    let shots = written.len();
     // Two is the fewest that gather into anything: a sheet of one panel is that panel
     // with a caption, so it is worth saying nothing was written rather than writing it.
     let mut skipped = None;
@@ -115,9 +175,42 @@ pub(crate) fn render(
             );
         } else {
             match gather(panels, out, &session, setup) {
-                Ok(sheet) => written.push(sheet),
+                Ok(sheet) => {
+                    // Kept out of `shots`: a sheet has no scene behind it, so `settled`
+                    // and `frames` would answer questions nobody asked of it.
+                    gathered = Some(sheet.path.clone());
+                    written.push(sheet);
+                }
                 Err(failure) => outcome = Err(failure),
             }
+        }
+    }
+    // Written whether or not the run finished: the shots that did land are on disk,
+    // and this is where a reader learns the rest were meant to and didn't.
+    if let Some(out) = &capture.report {
+        let written_report = RunReport {
+            complete: outcome.is_ok(),
+            failed: outcome.as_ref().err().map(Diagnostic::plain),
+            requested,
+            shots: written[..shots]
+                .iter()
+                .map(|file| ShotReport {
+                    name: file.path.file_stem().unwrap_or("shot"),
+                    path: &file.path,
+                    width: file.size.width,
+                    height: file.size.height,
+                    bytes: file.bytes,
+                    settled: file.frames.motion == Motion::Settled,
+                    frames: file.frames.drawn,
+                })
+                .collect(),
+            sheet: gathered.as_deref(),
+            warnings: skipped.iter().map(Diagnostic::plain).collect(),
+        };
+        if let Err(failure) = write_report(&written_report, out)
+            && outcome.is_ok()
+        {
+            outcome = Err(failure);
         }
     }
     // Reported before the failure is returned: the shots that did run are on disk either way,
@@ -126,11 +219,28 @@ pub(crate) fn render(
     outcome
 }
 
+/// Write what the run came to as JSON, for something other than a person to read.
+///
+/// The sheet is named separately rather than listed among the shots: it has no scene behind it,
+/// so `settled` and `frames` would be answers to questions nobody asked of it.
+fn write_report(report: &RunReport<'_>, out: &Utf8Path) -> Result<(), Diagnostic> {
+    let json = serde_json::to_string_pretty(report)
+        .map_err(|e| Diagnostic::from(format!("build the report: {e}")))?;
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Diagnostic::from(format!("create `{parent}`: {e}")))?;
+    }
+    std::fs::write(out, json).map_err(|e| Diagnostic::from(format!("write `{out}`: {e}")))?;
+    Ok(())
+}
+
 /// What one invocation asks for.
 pub(crate) struct Capture {
     pub(crate) shots: Vec<Shot>,
     /// Where to gather the captures. `None` unless a recipe asked for a sheet.
     pub(crate) sheet: Option<Utf8PathBuf>,
+    /// Where to write the run's JSON report. `None` unless a recipe asked for one.
+    pub(crate) report: Option<Utf8PathBuf>,
 }
 
 /// Draw the run's captures onto one sheet and write it.
@@ -139,21 +249,88 @@ fn gather(
     out: &Utf8Path,
     session: &Session,
     setup: &impl Fn(&egui::Context),
-) -> Result<Written, Diagnostic> {
+) -> Result<OutputFile, Diagnostic> {
     let image = sheet::compose(panels, session, setup)?;
     write_png(&image, out)?;
-    Ok(Written {
+    Ok(OutputFile {
         path: landed(out),
-        size: (image.width(), image.height()),
+        size: Size {
+            width: image.width(),
+            height: image.height(),
+        },
         bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
+        // A sheet is drawn once from images already taken; there is nothing for it to settle.
+        frames: Frames {
+            drawn: 1,
+            motion: Motion::Settled,
+        },
     })
 }
 
 /// A PNG this run produced, held back so the whole set can be reported in one block.
-struct Written {
+struct OutputFile {
     path: Utf8PathBuf,
-    size: (u32, u32),
+    size: Size,
     bytes: u64,
+    frames: Frames,
+}
+
+/// A run's outcome as JSON, for a loop nobody is watching.
+///
+/// Its own types rather than `#[derive(Serialize)]` on the ones above, so the file a consumer
+/// parses is a stated format and not whatever the internals happen to be called this week.
+#[derive(serde::Serialize)]
+struct RunReport<'a> {
+    /// Whether every shot the recipe asked for was written. A reader that only counts `shots`
+    /// cannot tell a recipe of three from one of ten that stopped at three.
+    complete: bool,
+    /// What stopped the run, when something did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed: Option<String>,
+    /// How many shots were meant to write an image, which on a run that finished
+    /// is how many `shots` holds. Listing-only shots are not counted, having none to write.
+    requested: usize,
+    shots: Vec<ShotReport<'a>>,
+    /// Absent unless a sheet was gathered — asking for one that was skipped leaves a warning,
+    /// not a path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sheet: Option<&'a Utf8Path>,
+    /// What the run got on with despite, in the words it printed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ShotReport<'a> {
+    /// The shot's name, which is also its PNG's file stem.
+    name: &'a str,
+    path: &'a Utf8Path,
+    width: u32,
+    height: u32,
+    bytes: u64,
+    /// `false` when a `settle` shot ran out of frames still animating —
+    /// the image is a moment the frame count landed on, not one the scene chose.
+    settled: bool,
+    /// Frames drawn, which for a settled shot is where it went quiet.
+    frames: u32,
+}
+
+/// Dimensions in pixels — a written PNG's, a sheet cell's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Size {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+/// Whether a scene had stopped asking to be redrawn when its shot was taken.
+///
+/// [`StillMoving`](Self::StillMoving) only ever comes of a `settle` shot that ran out of frames
+/// mid-animation. It says the captured moment is where the frame count landed rather than one
+/// the scene chose — the difference between a diff worth reading and a phantom one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Motion {
+    Settled,
+    StillMoving,
 }
 
 /// The images the run wrote, and anything it has to say about one it didn't.
@@ -161,7 +338,7 @@ struct Written {
 /// Each block opens on a blank line and closes on none.
 /// A note under the list is then set off by one line rather than two,
 /// and the shell prompt lands one line under whichever block came last.
-fn report(written: &[Written], skipped: Option<&Diagnostic>) {
+fn report(written: &[OutputFile], skipped: Option<&Diagnostic>) {
     if !written.is_empty() {
         let good = Style::new().bold().fg_color(Some(AnsiColor::Green.into()));
         let headline = format!(
@@ -195,7 +372,7 @@ fn human(bytes: u64) -> String {
 
 /// One row per image: the path, then its size in a column of its own,
 /// so a set of shots can be scanned for the odd one out rather than read line by line.
-fn rows(written: &[Written]) -> Vec<String> {
+fn rows(written: &[OutputFile]) -> Vec<String> {
     let aside = Style::new().dimmed();
     let column = written
         .iter()
@@ -206,15 +383,24 @@ fn rows(written: &[Written]) -> Vec<String> {
     // instead of drifting with the number of digits ahead of it.
     let digits = written
         .iter()
-        .map(|w| w.size.0.to_string().len())
+        .map(|w| w.size.width.to_string().len())
         .max()
         .unwrap_or_default();
     written
         .iter()
         .map(|w| {
             let pad = " ".repeat(column - w.path.as_str().chars().count());
-            let size = format!("{:>digits$}×{}", w.size.0, w.size.1);
-            format!("{}{pad}   {}", link(&w.path), paint(aside, &size))
+            let size = format!("{:>digits$}×{}", w.size.width, w.size.height);
+            let still = match w.frames.motion {
+                Motion::Settled => "",
+                Motion::StillMoving => "  still moving",
+            };
+            format!(
+                "{}{pad}   {}{}",
+                link(&w.path),
+                paint(aside, &size),
+                paint(aside, still)
+            )
         })
         .collect()
 }
@@ -294,7 +480,7 @@ fn draw(
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
     size: egui::Vec2,
-) -> Result<egui_kittest::Harness<'static, Canvas>, Diagnostic> {
+) -> Result<SceneFrame, Diagnostic> {
     let mut harness = open(size, session, setup, |cc, painter| Canvas {
         scene,
         knobs: Vec::new(),
@@ -304,25 +490,66 @@ fn draw(
         targets: Vec::new(),
         wanted: egui::Vec2::ZERO,
     })?;
-    settle(&mut harness, shot)?;
-    Ok(harness)
+    let frames = settle(&mut harness, shot)?;
+    Ok(SceneFrame { harness, frames })
 }
+
+/// A scene drawn and settled, and how it was still moving when the drawing stopped.
+struct SceneFrame {
+    harness: egui_kittest::Harness<'static, Canvas>,
+    frames: Frames,
+}
+
+/// What the drawing of one shot came to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Frames {
+    /// How many were drawn, counting the first.
+    /// A shot too big for the size it asked for is drawn twice, and this counts the second
+    /// pass alone — the one that made the captured pixels — not the two added together.
+    pub(crate) drawn: u32,
+    pub(crate) motion: Motion,
+}
+
+/// Frames that must ask for no repaint before a `settle` shot calls the scene still.
+///
+/// More than one because the signal belongs to the egui context rather than to the scene:
+/// a one-shot repaint from anything on the canvas would end the wait early on a scene
+/// still moving. Two consecutive quiet frames cost a frame and take that away.
+const QUIET_FRAMES: u32 = 2;
 
 /// Draw the frames a shot asks for, applying its overrides as they go by.
 ///
 /// Split out so a resize can run it again on the same harness — [`shoot`] has the why.
+///
+/// Reports [`Motion::StillMoving`] only for a `settle` shot
+/// that reached its frame count mid-animation.
 ///
 /// # Errors
 /// For a key that named no knob by the last frame.
 fn settle(
     harness: &mut egui_kittest::Harness<'static, Canvas>,
     shot: &Shot,
-) -> Result<(), Diagnostic> {
+) -> Result<Frames, Diagnostic> {
     harness.run_steps(1);
-    let mut unmatched: Vec<&(String, String)> = shot.knobs.iter().collect();
-    for _ in 1..shot.frames.unwrap_or(DEFAULT_FRAMES).max(2) {
+    let mut unmatched: Vec<&KnobOverride> = shot.knobs.iter().collect();
+    let mut quiet = 0;
+    let mut drawn = 1;
+    // The floor is defence rather than adjustment: both ways in reject a smaller `frames`,
+    // and a ceiling below it would run the loop no times, applying the recipe never.
+    for _ in 1..shot.frames.unwrap_or(DEFAULT_FRAMES).max(MIN_FRAMES) {
         apply(&mut harness.state_mut().knobs, &shot.knobs, &mut unmatched)?;
         harness.run_steps(1);
+        drawn += 1;
+        if shot.settle {
+            quiet = if harness.ctx.has_requested_repaint() {
+                0
+            } else {
+                quiet + 1
+            };
+            if quiet >= QUIET_FRAMES {
+                break;
+            }
+        }
     }
     // The loop ends on a draw, so a scene's own writes would outlive the last apply.
     // One more settles the store on the recipe, which is what `--list-knobs` then reports.
@@ -330,7 +557,12 @@ fn settle(
     if !unmatched.is_empty() {
         return Err(unknown_knobs(&unmatched, &harness.state().knobs));
     }
-    Ok(())
+    let motion = if !shot.settle || quiet >= QUIET_FRAMES {
+        Motion::Settled
+    } else {
+        Motion::StillMoving
+    };
+    Ok(Frames { drawn, motion })
 }
 
 /// Draw one shot: resolve its scene, draw it at a size that holds it, then capture.
@@ -339,9 +571,12 @@ fn shoot(
     session: &Session,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
-) -> Result<Option<(Written, image::RgbaImage)>, Diagnostic> {
+) -> Result<Option<ShotOutput>, Diagnostic> {
     let scene = *resolve_scene(&manifest.scenes, &shot.scene)?;
-    let mut harness = draw(scene, session, setup, shot, shot.size)?;
+    let SceneFrame {
+        mut harness,
+        mut frames,
+    } = draw(scene, session, setup, shot, shot.size)?;
 
     // The canvas scrolls, so a scene that outgrew its size would be cropped to it.
     // A shot names the size to lay out at, not how much of the result to keep,
@@ -357,7 +592,7 @@ fn shoot(
         // would then be drawing into nothing, and the shot would come back with the egui parts alone.
         // Reuse also keeps two EGL contexts from being alive at once, which the teardown was for.
         harness.set_size(fitting);
-        settle(&mut harness, shot)?;
+        frames = settle(&mut harness, shot)?;
     }
 
     if shot.list {
@@ -378,14 +613,24 @@ fn shoot(
             .map_err(|reason| format!("render `{}`: {reason}", scene.name))?;
         let image = if shot.trim { trim(image, drawn) } else { image };
         write_png(&image, out)?;
-        let written = Written {
+        let written = OutputFile {
             path: landed(out),
-            size: (image.width(), image.height()),
+            size: Size {
+                width: image.width(),
+                height: image.height(),
+            },
             bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
+            frames,
         };
-        return Ok(Some((written, image)));
+        return Ok(Some(ShotOutput { written, image }));
     }
     Ok(None)
+}
+
+/// What one shot came to: the PNG it wrote, and the image itself for a sheet that wants it.
+struct ShotOutput {
+    written: OutputFile,
+    image: image::RgbaImage,
 }
 
 /// Crop the background a roomy `size` leaves around the canvas.
@@ -469,13 +714,12 @@ impl eframe::App for Canvas {
 /// as does one matching several knobs, which no later frame can disambiguate.
 fn apply<'shot>(
     knobs: &mut [Knob],
-    overrides: &'shot [(String, String)],
-    unmatched: &mut Vec<&'shot (String, String)>,
+    overrides: &'shot [KnobOverride],
+    unmatched: &mut Vec<&'shot KnobOverride>,
 ) -> Result<(), Diagnostic> {
     for over in overrides {
-        let (key, value) = over;
-        if let Some(at) = find(knobs, key)? {
-            set(&mut knobs[at], value)?;
+        if let Some(at) = find(knobs, &over.key)? {
+            set(&mut knobs[at], &over.value)?;
             unmatched.retain(|left| !std::ptr::eq(*left, over));
         }
     }
@@ -667,10 +911,10 @@ fn accessor(style: ChoiceStyle) -> &'static str {
 /// Keys that named a knob no frame ever declared.
 /// Listing what the scene does declare turns a typo
 /// or a stale label into a one-step fix.
-fn unknown_knobs(pending: &[&(String, String)], declared: &[Knob]) -> Diagnostic {
+fn unknown_knobs(pending: &[&KnobOverride], declared: &[Knob]) -> Diagnostic {
     let named = pending
         .iter()
-        .map(|(key, _)| format!("`{key}`"))
+        .map(|over| format!("`{}`", over.key))
         .collect::<Vec<_>>()
         .join(", ");
     Diagnostic::new(format!("this scene declares no knob matching {named}"))
@@ -727,10 +971,17 @@ struct Recipe {
     out: Option<Utf8PathBuf>,
     /// Canvas size for any shot that doesn't state its own.
     size: Option<String>,
-    /// Gather every shot onto one image here, alongside their own PNGs. Off unless asked for.
+    /// Gather every shot onto one image here, alongside their own PNGs.
+    /// Off unless asked for.
     sheet: Option<Utf8PathBuf>,
-    /// Crop each PNG to what its canvas drew. On by default, and a shot can override it.
+    /// Crop each PNG to what its canvas drew.
+    /// On by default, and a shot can override it.
     trim: Option<bool>,
+    /// Shoot each scene as soon as it stops asking to be redrawn.
+    /// Off by default, and a shot can override it.
+    settle: Option<bool>,
+    /// Write what the run came to as JSON here. Off unless asked for.
+    report: Option<Utf8PathBuf>,
     #[serde(default, rename = "shot")]
     shots: Vec<RecipeShot>,
 }
@@ -744,6 +995,7 @@ struct RecipeShot {
     size: Option<String>,
     frames: Option<u32>,
     trim: Option<bool>,
+    settle: Option<bool>,
     #[serde(default)]
     knobs: BTreeMap<String, toml::Value>,
 }
@@ -794,6 +1046,7 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                     shot.name
                 )
             })?;
+            check_frames(shot.frames).map_err(|e| format!("shot `{}`: {e}", shot.name))?;
             Ok(Shot {
                 scene: shot.scene.clone(),
                 out: Some(base.join(format!("{}.png", shot.name))),
@@ -801,10 +1054,16 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                 knobs: shot
                     .knobs
                     .iter()
-                    .map(|(key, value)| Ok((key.clone(), scalar(key, value)?)))
+                    .map(|(key, value)| {
+                        Ok(KnobOverride {
+                            key: key.clone(),
+                            value: scalar(key, value)?,
+                        })
+                    })
                     .collect::<Result<_, String>>()?,
                 frames: shot.frames,
                 trim: shot.trim.or(recipe.trim).unwrap_or(true),
+                settle: shot.settle.or(recipe.settle).unwrap_or(false),
                 list: false,
                 template: false,
             })
@@ -815,6 +1074,7 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
         shots,
         // Beside the shots it gathers, wherever those landed.
         sheet: recipe.sheet.map(|name| base.join(name)),
+        report: recipe.report.map(|name| base.join(name)),
     })
 }
 
@@ -940,15 +1200,29 @@ mod tests {
     #[test]
     fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
         let written = [
-            Written {
+            OutputFile {
                 path: "/tmp/a.png".into(),
-                size: (640, 360),
+                size: Size {
+                    width: 640,
+                    height: 360,
+                },
                 bytes: 1,
+                frames: Frames {
+                    drawn: 1,
+                    motion: Motion::Settled,
+                },
             },
-            Written {
+            OutputFile {
                 path: "/tmp/a-much-longer-name.png".into(),
-                size: (1280, 720),
+                size: Size {
+                    width: 1280,
+                    height: 720,
+                },
                 bytes: 1,
+                frames: Frames {
+                    drawn: 1,
+                    motion: Motion::Settled,
+                },
             },
         ];
         let columns: Vec<_> = rows(&written)
@@ -971,18 +1245,21 @@ mod tests {
         assert!(landed.ends_with("Cargo.toml"), "`{landed}` names the file");
     }
 
-    /// The `(key, value)` pairs a recipe or the CLI would have produced.
-    fn knobs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    /// The overrides a recipe or the command line would have produced.
+    fn knobs(pairs: &[(&str, &str)]) -> Vec<KnobOverride> {
         pairs
             .iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .map(|(key, value)| KnobOverride {
+                key: (*key).to_owned(),
+                value: (*value).to_owned(),
+            })
             .collect()
     }
 
     /// Apply `pairs` to `knobs`, as a frame of [`shoot`] would; returns how many went unmatched.
     fn applied(store: &mut [Knob], pairs: &[(&str, &str)]) -> Result<usize, Diagnostic> {
         let owned = knobs(pairs);
-        let mut unmatched: Vec<&(String, String)> = owned.iter().collect();
+        let mut unmatched: Vec<&KnobOverride> = owned.iter().collect();
         apply(store, &owned, &mut unmatched)?;
         Ok(unmatched.len())
     }
@@ -1154,10 +1431,10 @@ mod tests {
             value: false,
         }];
         let owned = knobs(&[("night", "true"), ("headlights", "true")]);
-        let mut unmatched: Vec<&(String, String)> = owned.iter().collect();
+        let mut unmatched: Vec<&KnobOverride> = owned.iter().collect();
         apply(&mut store, &owned, &mut unmatched).expect("an unmatched key is not yet a failure");
         assert_eq!(unmatched.len(), 1);
-        assert_eq!(unmatched[0].0, "headlights");
+        assert_eq!(unmatched[0].key, "headlights");
 
         let message = unknown_knobs(&unmatched, &store).plain();
         assert!(message.contains("`headlights`"), "names what was not found");
@@ -1182,7 +1459,7 @@ mod tests {
     fn a_key_turning_ambiguous_on_a_later_frame_is_an_error() {
         let mut store = vec![slider("speed")];
         let owned = knobs(&[("spe.*", "1.5")]);
-        let mut unmatched: Vec<&(String, String)> = owned.iter().collect();
+        let mut unmatched: Vec<&KnobOverride> = owned.iter().collect();
         apply(&mut store, &owned, &mut unmatched).expect("one match applies");
 
         store.push(slider("spectrum"));
@@ -1195,7 +1472,7 @@ mod tests {
     fn a_recipe_value_is_reasserted_over_a_scenes_own_write() {
         let mut store = vec![slider("speed")];
         let owned = knobs(&[("speed", "1.5")]);
-        let mut unmatched: Vec<&(String, String)> = owned.iter().collect();
+        let mut unmatched: Vec<&KnobOverride> = owned.iter().collect();
         apply(&mut store, &owned, &mut unmatched).expect("the key names its knob");
         assert!(unmatched.is_empty());
 
@@ -1258,10 +1535,12 @@ mod tests {
                 knobs: Vec::new(),
                 frames: None,
                 trim: true,
+                settle: false,
                 list: false,
                 template: false,
             }],
             sheet: None,
+            report: None,
         };
         render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
             .expect("the shot renders");
@@ -1368,12 +1647,14 @@ mod tests {
             knobs: Vec::new(),
             frames: None,
             trim: true,
+            settle: false,
             list: false,
             template: false,
         };
         let capture = Capture {
             shots: vec![shot("one"), shot("two"), shot("three")],
             sheet: None,
+            report: None,
         };
         CACHED.set(None);
         render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
@@ -1400,6 +1681,613 @@ mod tests {
             (two, three),
             "and every later shot draws the same, its cached texture still belonging to a live context"
         );
+    }
+
+    /// The pixels a shot writes have to be the ones its overrides produced, for content drawn
+    /// The same recipe twice is the same bytes twice, which is what lets an unattended run diff
+    /// today's captures against yesterday's and believe a difference.
+    ///
+    /// A capture's frame times come from the harness's fixed `step_dt` rather than from the clock,
+    /// and the scene here reads them — so a wall-clock frame time shows up as a difference between
+    /// two runs rather than as anything a reader would notice in one.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn two_runs_of_one_recipe_write_the_same_bytes() {
+        fn clock_watching(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            let time = ui.input(|i| i.time);
+            crate::stage!(ctx, ui, (120, 40), move |ui: &mut egui::Ui| {
+                // Bars rather than the number as text: a font would round the difference away.
+                let width = (time * 40.0) as f32 % 100.0;
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(100.0, 20.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(rect.min, egui::vec2(width, 20.0)),
+                    0.0,
+                    egui::Color32::from_rgb(0x6C, 0x9C, 0xD8),
+                );
+            });
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: clock_watching,
+                name: "clock",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-determinism");
+        let run = |name: &str| {
+            let out = dir.join(format!("{name}.png"));
+            let capture = Capture {
+                shots: vec![Shot {
+                    scene: "clock".to_owned(),
+                    out: Some(out.clone()),
+                    size: egui::vec2(200.0, 120.0),
+                    knobs: Vec::new(),
+                    frames: Some(6),
+                    trim: true,
+                    settle: false,
+                    list: false,
+                    template: false,
+                }],
+                sheet: None,
+                report: None,
+            };
+            render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+                .expect("the shot renders");
+            std::fs::read(&out).expect("the capture was written")
+        };
+
+        let (once, twice) = (run("once"), run("twice"));
+        assert_eq!(
+            once,
+            twice,
+            "two runs of one recipe wrote {} and {} bytes of different PNG",
+            once.len(),
+            twice.len()
+        );
+    }
+
+    /// A run hands back what it did as JSON, so an unattended loop reads a file
+    /// rather than scraping the text meant for a person.
+    ///
+    /// The scene never settles, which is the case that matters: the shot is still written,
+    /// and `settled: false` is what stops the loop diffing a moment the frame ceiling
+    /// landed on against one the scene chose.
+    #[test]
+    fn a_run_reports_what_it_wrote_and_whether_each_shot_settled() {
+        fn restless(_ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            ui.ctx().request_repaint();
+            ui.label("never still");
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: restless,
+                name: "restless",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-report");
+        let report = dir.join("capture.json");
+        let capture = Capture {
+            shots: vec![Shot {
+                scene: "restless".to_owned(),
+                out: Some(dir.join("restless.png")),
+                size: egui::vec2(80.0, 40.0),
+                knobs: Vec::new(),
+                frames: Some(5),
+                trim: true,
+                settle: true,
+                list: false,
+                template: false,
+            }],
+            sheet: None,
+            report: Some(report.clone()),
+        };
+        _ = std::fs::remove_file(&report);
+        render(&manifest, Renderer::Wgpu, &|_: &egui::Context| {}, &capture)
+            .expect("the shot renders");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).expect("a report"))
+                .expect("valid JSON");
+        let shot = &json["shots"][0];
+        assert_eq!(shot["name"], "restless", "named by its file stem");
+        assert_eq!(
+            shot["settled"], false,
+            "a scene asking to be redrawn forever never settles"
+        );
+        assert_eq!(shot["frames"], 5, "so it drew every frame it was allowed");
+        assert!(
+            shot["path"].as_str().is_some_and(|p| p.ends_with(".png")),
+            "and points at the image it wrote: {shot}"
+        );
+        assert_eq!(json["complete"], true, "every shot asked for was written");
+        assert_eq!(json["requested"], 1, "and one was asked for");
+        assert!(
+            json.get("sheet").is_none(),
+            "no sheet was asked for, so none is named"
+        );
+        assert!(
+            json.get("failed").is_none() && json.get("warnings").is_none(),
+            "nothing went wrong, so nothing is said to have: {json}"
+        );
+    }
+
+    /// A run that stops partway still reports, and says so — a loop counting the records alone
+    /// cannot tell a recipe of one from a recipe of three that failed on the second.
+    ///
+    /// The sheet is asked for and skipped, which is a warning rather than a failure — it leaves
+    /// no path, and the reason belongs in the file, not only in the text a person reads.
+    #[test]
+    fn a_run_that_fails_partway_reports_what_it_managed_and_what_stopped_it() {
+        fn plain(_ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            ui.label("fine");
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: plain,
+                name: "plain",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-partial");
+        let report = dir.join("capture.json");
+        let shot = |name: &str, knobs: Vec<KnobOverride>| Shot {
+            scene: "plain".to_owned(),
+            out: Some(dir.join(format!("{name}.png"))),
+            size: egui::vec2(60.0, 40.0),
+            knobs,
+            frames: None,
+            trim: true,
+            settle: false,
+            list: false,
+            template: false,
+        };
+        let capture = Capture {
+            shots: vec![
+                shot("first", Vec::new()),
+                // Names a knob the scene never declares, which stops the run on the second shot.
+                shot("second", knobs(&[("headlights", "true")])),
+                shot("third", Vec::new()),
+            ],
+            sheet: Some(dir.join("sheet.png")),
+            report: Some(report.clone()),
+        };
+        _ = std::fs::remove_file(&report);
+        render(&manifest, Renderer::Wgpu, &|_: &egui::Context| {}, &capture)
+            .expect_err("the second shot names no knob");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).expect("a report even so"))
+                .expect("valid JSON");
+        assert_eq!(json["complete"], false, "the run did not finish");
+        assert_eq!(json["requested"], 3, "three were asked for");
+        assert_eq!(
+            json["shots"].as_array().map(Vec::len),
+            Some(1),
+            "one landed"
+        );
+        assert!(
+            json["failed"]
+                .as_str()
+                .is_some_and(|why| why.contains("headlights")),
+            "and the reason names the knob: {json}"
+        );
+        assert!(
+            json.get("sheet").is_none(),
+            "a run that stopped gathered no sheet"
+        );
+    }
+
+    /// The sheet a run does gather is named, so a loop can find it without guessing the filename.
+    #[test]
+    fn a_report_names_the_sheet_it_gathered() {
+        fn plain(_ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            ui.label("fine");
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: plain,
+                name: "plain",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-sheet-report");
+        let report = dir.join("capture.json");
+        let shot = |name: &str| Shot {
+            scene: "plain".to_owned(),
+            out: Some(dir.join(format!("{name}.png"))),
+            size: egui::vec2(60.0, 40.0),
+            knobs: Vec::new(),
+            frames: None,
+            trim: true,
+            settle: false,
+            list: false,
+            template: false,
+        };
+        let capture = Capture {
+            // Two, since a sheet of one panel is that panel and is skipped.
+            shots: vec![shot("one"), shot("two")],
+            sheet: Some(dir.join("sheet.png")),
+            report: Some(report.clone()),
+        };
+        _ = std::fs::remove_file(&report);
+        render(&manifest, Renderer::Wgpu, &|_: &egui::Context| {}, &capture)
+            .expect("both shots render");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).expect("a report"))
+                .expect("valid JSON");
+        assert!(
+            json["sheet"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("sheet.png")),
+            "the gathered sheet is named: {json}"
+        );
+        assert_eq!(
+            json["shots"].as_array().map(Vec::len),
+            Some(2),
+            "and it is not counted among the shots, having no scene behind it"
+        );
+    }
+
+    /// A frame count too small to apply a recipe is refused rather than quietly raised.
+    #[test]
+    fn a_shot_asking_for_fewer_frames_than_a_capture_needs_is_an_error() {
+        assert!(check_frames(None).is_ok(), "unset takes the default");
+        assert!(check_frames(Some(2)).is_ok(), "two is the least that works");
+        let refused = check_frames(Some(1)).expect_err("one cannot apply a recipe");
+        assert!(
+            refused.contains("declares") && refused.contains("applies"),
+            "and says why rather than just refusing: {refused}"
+        );
+    }
+
+    /// A scene that stops asking to be redrawn is shot then, not at the recipe's frame count —
+    /// so a set of scenes that settle at different speeds needs one number, not one per scene.
+    ///
+    /// The scene asks for `ANIMATED` frames' worth of repaints and then goes quiet,
+    /// well inside a generous cap, so settling and hitting the cap are far apart.
+    #[test]
+    fn a_settling_shot_stops_when_the_scene_goes_quiet_rather_than_at_the_frame_count() {
+        /// Frames the scene asks to be redrawn for, counting the first.
+        const ANIMATED: u32 = 3;
+        /// Far enough past `ANIMATED` that stopping there cannot be the cap doing it.
+        const CAP: u32 = 30;
+
+        thread_local! {
+            static DREW: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn animates(_ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            let drawn = DREW.get() + 1;
+            DREW.set(drawn);
+            if drawn < ANIMATED {
+                ui.ctx().request_repaint();
+            }
+            ui.label("frame");
+        }
+        let scene = SceneEntry {
+            render: animates,
+            name: "animates",
+            module_path: "reference",
+            default: true,
+            order: 0,
+            source: "",
+        };
+        let shot = |settle: bool| Shot {
+            scene: "animates".to_owned(),
+            out: None,
+            size: egui::vec2(80.0, 40.0),
+            knobs: Vec::new(),
+            frames: Some(CAP),
+            trim: true,
+            settle,
+            list: false,
+            template: false,
+        };
+
+        DREW.set(0);
+        let settling = draw(
+            scene,
+            &Session::Wgpu,
+            &|_: &egui::Context| {},
+            &shot(true),
+            shot(true).size,
+        )
+        .expect("the scene draws");
+        let settling_drew = DREW.get();
+        assert_eq!(
+            settling.frames.motion,
+            Motion::Settled,
+            "the scene went quiet well before the cap"
+        );
+        assert!(
+            settling.frames.drawn < CAP,
+            "and stopped short of the ceiling: {} frames of {CAP}",
+            settling.frames.drawn
+        );
+
+        DREW.set(0);
+        draw(
+            scene,
+            &Session::Wgpu,
+            &|_: &egui::Context| {},
+            &shot(false),
+            shot(false).size,
+        )
+        .expect("the scene draws");
+        let capped_drew = DREW.get();
+
+        // Draws rather than frames: egui may run a step over more than one pass, so the counts
+        // are compared against each other instead of against `CAP`.
+        assert!(
+            settling_drew * 2 < capped_drew,
+            "settling stopped far short of the cap: {settling_drew} draws against {capped_drew}"
+        );
+    }
+
+    /// A texture the scene registers itself stages the same way up as one gallery owns,
+    /// and `showing` hides the slack rather than the content.
+    ///
+    /// The marker is asymmetric top to bottom, a flip being the failure here and a symmetric
+    /// marker passing upside down. The texture is allocated half again as tall as it is shown,
+    /// so a crop taken off the wrong end shows the empty half instead.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn an_adopted_texture_stages_upright_with_its_slack_hidden() {
+        /// The whole texture; the bottom third is left blank as slack.
+        const ALLOCATED: [u32; 2] = [32, 48];
+        /// What the scene lays out and asks to be shown.
+        const SHOWN: [u32; 2] = [32, 32];
+
+        thread_local! {
+            static ADOPTED: std::cell::Cell<Option<egui::TextureId>> =
+                const { std::cell::Cell::new(None) };
+        }
+        fn adopts(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            let id = ADOPTED.get().unwrap_or_else(|| {
+                let loader = ctx.gl_loader().expect("the glow renderer");
+                // SAFETY: the capture made its context current, and `loader` resolves against it.
+                let gl =
+                    unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) };
+                use eframe::glow::HasContext as _;
+                // Red across the scene's top row, blue across its bottom, the rest transparent —
+                // so upright, flipped and mis-cropped each come out different.
+                //
+                // GL rows run bottom-up while a stage reads top-down, so the shown window
+                // is the *last* `SHOWN` rows of this buffer: the scene's top row is the very
+                // last one, and the slack sits at the start. Filling from row 0 would put
+                // the content in the slack, which is the mistake the flip makes easy.
+                let mut pixels = vec![0_u8; (ALLOCATED[0] * ALLOCATED[1] * 4) as usize];
+                let row = (ALLOCATED[0] * 4) as usize;
+                for x in 0..ALLOCATED[0] as usize {
+                    let top = (ALLOCATED[1] as usize - 1) * row + x * 4;
+                    pixels[top] = 255;
+                    pixels[top + 3] = 255;
+                    let bottom = (ALLOCATED[1] - SHOWN[1]) as usize * row + x * 4;
+                    pixels[bottom + 2] = 255;
+                    pixels[bottom + 3] = 255;
+                }
+                // SAFETY: a live context; the texture outlives the scene by design.
+                let name = unsafe {
+                    let name = gl.create_texture().expect("a texture");
+                    gl.bind_texture(glow::TEXTURE_2D, Some(name));
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA as i32,
+                        ALLOCATED[0] as i32,
+                        ALLOCATED[1] as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&pixels)),
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_MIN_FILTER,
+                        glow::NEAREST as i32,
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D,
+                        glow::TEXTURE_MAG_FILTER,
+                        glow::NEAREST as i32,
+                    );
+                    gl.bind_texture(glow::TEXTURE_2D, None);
+                    name
+                };
+                let id = ctx.register_native_texture(
+                    std::num::NonZeroU32::new(name.0.get()).expect("a GL name"),
+                );
+                ADOPTED.set(Some(id));
+                id
+            });
+            ctx.texture_stage(
+                ui,
+                crate::Stage::Fit,
+                crate::StageTexture::new(id, ALLOCATED).showing(SHOWN),
+            );
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: adopts,
+                name: "adopts",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let out = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-adopted")
+            .join("adopted.png");
+        let capture = Capture {
+            shots: vec![Shot {
+                scene: "adopts".to_owned(),
+                out: Some(out.clone()),
+                size: egui::vec2(120.0, 120.0),
+                knobs: Vec::new(),
+                frames: None,
+                trim: true,
+                settle: false,
+                list: false,
+                template: false,
+            }],
+            sheet: None,
+            report: None,
+        };
+        ADOPTED.set(None);
+        render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+            .expect("the shot renders");
+
+        let png = std::fs::read(&out).expect("the capture was written");
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("a PNG")
+            .to_rgba8();
+        // A hue rather than a bright channel: the stage's chrome is pale grey, which is bright
+        // in every channel and would read as both markers at once.
+        let topmost = |hue: usize| {
+            let other = if hue == 0 { 2 } else { 0 };
+            image
+                .enumerate_pixels()
+                .filter(|(_, _, p)| p.0[3] > 128 && p.0[hue] > 128 && p.0[other] < 64)
+                .map(|(_, y, _)| y)
+                .min()
+                .expect("the marker is in the image")
+        };
+        let (red, blue) = (topmost(0), topmost(2));
+        assert!(
+            red < blue,
+            "red marks the scene's top row and blue its bottom, so the image is upright: \
+             red from y={red}, blue from y={blue}"
+        );
+    }
+
+    /// The colour-space contract [`crate::Offscreen`] states, in pixels.
+    ///
+    /// Both halves are asserted because a trap is only useful stated alongside its remedy
+    /// — the identity case alone reads as "it just works".
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn an_offscreen_decodes_what_is_written_unless_the_scene_encodes_it() {
+        /// Away from both ends, where a stray decode moves the value a long way.
+        const WROTE: [f32; 3] = [0.2, 0.5, 0.8];
+
+        fn flat(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            let fill = |target: &crate::Offscreen, encode: bool| {
+                let loader = target.gl_loader();
+                // SAFETY: the capture made its context current, and `loader` resolves against it.
+                let gl =
+                    unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) };
+                // SAFETY: the target's framebuffer is bound for the duration of this closure.
+                unsafe {
+                    use eframe::glow::HasContext as _;
+                    if encode {
+                        gl.enable(glow::FRAMEBUFFER_SRGB);
+                    }
+                    gl.clear_color(WROTE[0], WROTE[1], WROTE[2], 1.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                    if encode {
+                        gl.disable(glow::FRAMEBUFFER_SRGB);
+                    }
+                }
+            };
+            ctx.offscreen(ui, [32_u32, 32], |target| fill(target, false));
+            ctx.offscreen(ui, [32_u32, 32], |target| fill(target, true));
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: flat,
+                name: "flat",
+                module_path: "reference",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let out = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-srgb")
+            .join("flat.png");
+        let capture = Capture {
+            shots: vec![Shot {
+                scene: "flat".to_owned(),
+                out: Some(out.clone()),
+                size: egui::vec2(80.0, 80.0),
+                knobs: Vec::new(),
+                frames: None,
+                trim: true,
+                settle: false,
+                list: false,
+                template: false,
+            }],
+            sheet: None,
+            report: None,
+        };
+        render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+            .expect("the shot renders");
+
+        let png = std::fs::read(&out).expect("the capture was written");
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("a PNG")
+            .to_rgba8();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a colour channel, rounded into the byte it came from"
+        )]
+        let wrote: Vec<u8> = WROTE.iter().map(|c| (c * 255.0).round() as u8).collect();
+        // The two images stack down the canvas; sample the middle of each, clear of the edges.
+        let quarter = image.get_pixel(image.width() / 2, image.height() / 4).0;
+        let three_quarters = image.get_pixel(image.width() / 2, image.height() * 3 / 4).0;
+
+        assert!(
+            quarter[..3]
+                .iter()
+                .zip(&wrote)
+                .all(|(got, sent)| got < sent),
+            "written straight in, every channel comes back decoded and darker: \
+             wrote {wrote:?}, read {:?}",
+            &quarter[..3]
+        );
+        // Within a bit rather than to the byte: the encode and the decode round independently,
+        // and llvmpipe and a GPU driver disagree by one on some channels. A decode moves it by 40.
+        assert!(
+            three_quarters[..3]
+                .iter()
+                .zip(&wrote)
+                .all(|(got, sent)| got.abs_diff(*sent) <= 1),
+            "and written under FRAMEBUFFER_SRGB it survives: wrote {wrote:?}, read {:?}",
+            &three_quarters[..3]
+        );
+        assert_eq!(three_quarters[3], 255, "opaque either way");
     }
 
     /// The pixels a shot writes have to be the ones its overrides produced, for content drawn
@@ -1439,18 +2327,19 @@ mod tests {
         let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
             .expect("a UTF-8 temp dir")
             .join("gallery-offscreen-override");
-        let shot = |name: &str, knobs: Vec<(String, String)>| Shot {
+        let shot = |name: &str, knobs: Vec<KnobOverride>| Shot {
             scene: "tinted".to_owned(),
             out: Some(dir.join(format!("{name}.png"))),
             size: egui::vec2(120.0, 120.0),
             knobs,
             frames: None,
             trim: true,
+            settle: false,
             list: false,
             template: false,
         };
-        // The override rides the second shot, where a run that rebuilt its context per shot
-        // would have left nothing to override.
+        // Two shots rather than one: the default and the override in a single run,
+        // so the pair also says a later shot's knobs are its own.
         let capture = Capture {
             shots: vec![
                 shot("default", Vec::new()),
@@ -1458,6 +2347,7 @@ mod tests {
                 shot("overridden", knobs(&[("red", "1")])),
             ],
             sheet: None,
+            report: None,
         };
         render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
             .expect("both shots render");
@@ -1573,10 +2463,13 @@ mod tests {
             knobs: Vec::new(),
             frames: None,
             trim: true,
+            settle: false,
             list: false,
             template: false,
         };
-        draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size).expect("the scene draws")
+        draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size)
+            .expect("the scene draws")
+            .harness
     }
 
     /// A scene may make fewer calls on a later frame — one behind a toggle — and the targets
@@ -1613,6 +2506,7 @@ mod tests {
             knobs: Vec::new(),
             frames: None,
             trim: true,
+            settle: false,
             list: false,
             template: false,
         };
@@ -1623,7 +2517,8 @@ mod tests {
             &shot,
             shot.size,
         )
-        .expect("both images draw");
+        .expect("both images draw")
+        .harness;
         assert_eq!(harness.state().targets.len(), 2, "one target per call site");
 
         BOTH.set(false);
@@ -1685,6 +2580,7 @@ mod tests {
             knobs: Vec::new(),
             frames: None,
             trim: true,
+            settle: false,
             list: false,
             template: false,
         };
@@ -1695,7 +2591,8 @@ mod tests {
             &shot,
             shot.size,
         )
-        .expect("the first pass draws");
+        .expect("the first pass draws")
+        .harness;
         let wanted = harness.state().wanted;
         assert!(
             wanted.x > shot.size.x || wanted.y > shot.size.y,
@@ -1737,11 +2634,13 @@ mod tests {
             knobs: knobs(&[("speed", "5")]),
             frames: None,
             trim: true,
+            settle: false,
             list: false,
             template: false,
         };
         let harness = draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size)
-            .expect("the shot draws");
+            .expect("the shot draws")
+            .harness;
         assert!(
             matches!(harness.state().knobs[0], Knob::Slider { value, .. } if value == 5.0),
             "every settle frame re-applies the recipe, and one more after the last draw"
@@ -1860,7 +2759,7 @@ mod tests {
                 Knob::Group { .. } => {}
             }
         }
-        let mut unmatched: Vec<&(String, String)> = shots[0].knobs.iter().collect();
+        let mut unmatched: Vec<&KnobOverride> = shots[0].knobs.iter().collect();
         apply(&mut store, &shots[0].knobs, &mut unmatched)
             .expect("every generated key names its knob");
         assert!(unmatched.is_empty(), "no key went unmatched");
@@ -2134,10 +3033,12 @@ mod tests {
                 knobs: Vec::new(),
                 frames: None,
                 trim: true,
+                settle: false,
                 list: false,
                 template: false,
             }],
             sheet: None,
+            report: None,
         };
         render(
             &reference_scenes(),
@@ -2176,12 +3077,14 @@ mod tests {
             knobs: Vec::new(),
             frames: None,
             trim,
+            settle: false,
             list: false,
             template: false,
         };
         let capture = Capture {
             shots: vec![shot("cropped", true), shot("whole", false)],
             sheet: None,
+            report: None,
         };
         render(
             &reference_scenes(),
@@ -2266,10 +3169,12 @@ mod tests {
                 knobs: Vec::new(),
                 frames: None,
                 trim: true,
+                settle: false,
                 list: false,
                 template: false,
             }],
             sheet: None,
+            report: None,
         };
         render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
             .expect("the shot renders");
@@ -2310,6 +3215,24 @@ mod tests {
         let path = dir.join("capture.toml");
         std::fs::write(&path, text).expect("write recipe");
         read_recipe(&path, out.map(Utf8Path::new))
+    }
+
+    /// The recipe a scaffold ships reads back, since `deny_unknown_fields` turns a key that drifts
+    /// out of the `Recipe` struct into an error for every instance rather than a stale comment.
+    ///
+    /// Nothing else parses it: `just validate` compiles the crate, not the files it hands out.
+    #[test]
+    fn the_scaffolded_recipe_still_parses() {
+        let shipped = Utf8Path::new("template/capture.toml");
+        let capture = read_recipe(shipped, None).expect("the scaffold's own recipe parses");
+        assert!(
+            !capture.shots.is_empty(),
+            "and describes the shots it documents"
+        );
+        assert!(
+            capture.report.is_some() && capture.sheet.is_some(),
+            "including the options it exists to demonstrate"
+        );
     }
 
     #[test]

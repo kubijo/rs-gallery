@@ -58,11 +58,11 @@ pub use actions::action;
 use actions::{Log, collecting, render_actions};
 pub use context::{SceneCtx, Stage, StageSpec};
 pub use hot::HotDylib;
-pub use knobs::{ChoiceStyle, Knob, Pad2DSpec};
+pub use knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
 use knobs::{KnobStore, render_knobs};
 pub use launcher::launch;
 use offscreen::{GlDeps, RenderTarget, TargetStore};
-pub use offscreen::{Offscreen, Pointer};
+pub use offscreen::{ImageInput, Offscreen, Pointer, StageTexture};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
 use svg::Icons;
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
@@ -74,8 +74,8 @@ pub mod prelude {
     pub use egui::Ui;
 
     pub use crate::{
-        Offscreen, Pad2DSpec, Pointer, SceneCtx, SceneEntry, Stage, StageSpec, action, scene,
-        scene_meta, stage,
+        ImageInput, Offscreen, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, Stage, StageSpec,
+        StageTexture, action, scene, scene_meta, stage,
     };
 }
 
@@ -638,8 +638,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         }),
                         _ => None,
                     };
-                    let ((), reported) =
-                        collecting(|| _ = render_canvas(ui, scene, store, gl_deps));
+                    let reported = collecting(|| _ = render_canvas(ui, scene, store, gl_deps));
                     self.state.actions.extend(key, reported);
                 }
             });

@@ -11,7 +11,11 @@ use rectangle_pack::{
     volume_heuristic,
 };
 
-use crate::{HEADER_BG, PANEL_BG, diagnostic::Diagnostic, render::open};
+use crate::{
+    HEADER_BG, PANEL_BG,
+    diagnostic::Diagnostic,
+    render::{Size, open},
+};
 
 /// One capture, waiting to be placed.
 pub(crate) struct Panel {
@@ -42,11 +46,11 @@ pub(crate) struct Packed {
 
 /// The room a panel takes: the caption band above it, and the gutter off its right and bottom
 /// that keeps two captures from reading as one picture.
-fn cell_size(panel: &Panel) -> (u32, u32) {
-    (
-        panel.image.width() + GUTTER,
-        panel.image.height() + CAPTION + GUTTER,
-    )
+fn cell_size(panel: &Panel) -> Size {
+    Size {
+        width: panel.image.width() + GUTTER,
+        height: panel.image.height() + CAPTION + GUTTER,
+    }
 }
 
 /// The smallest sheet the packer will take these panels on.
@@ -58,7 +62,7 @@ fn cell_size(panel: &Panel) -> (u32, u32) {
 ///
 /// `None` if there are no panels, or if the packer takes none of the widths offered.
 pub(crate) fn pack(panels: &[Panel]) -> Option<Packed> {
-    let cells: Vec<(u32, u32)> = panels.iter().map(cell_size).collect();
+    let cells: Vec<Size> = panels.iter().map(cell_size).collect();
     widths(&cells)
         .into_iter()
         .filter_map(|width| shortest(&cells, width))
@@ -90,10 +94,10 @@ fn cost(packed: &Packed) -> f64 {
 /// The height has to be squeezed rather than left generous: given room for a column the packer will
 /// lay one out and never reach across the width, and cropping that back would make every width come
 /// out the same sheet.
-fn shortest(cells: &[(u32, u32)], width: u32) -> Option<Packed> {
-    let mut short = cells.iter().map(|(_, h)| *h).max()?;
+fn shortest(cells: &[Size], width: u32) -> Option<Packed> {
+    let mut short = cells.iter().map(|cell| cell.height).max()?;
     // A column always fits, so this is a height the search can close in on rather than test.
-    let mut tall = cells.iter().map(|(_, h)| *h).sum();
+    let mut tall = cells.iter().map(|cell| cell.height).sum();
     while short < tall {
         let between = short + (tall - short) / 2;
         match place(cells, width, between) {
@@ -113,8 +117,8 @@ fn shortest(cells: &[(u32, u32)], width: u32) -> Option<Packed> {
 /// And the width a flawless pack would have at the shape we want, which usually falls between runs.
 ///
 /// All quadratic in the number of shots, so the whole search stays cheap.
-fn widths(cells: &[(u32, u32)]) -> Vec<u32> {
-    let across: Vec<u32> = cells.iter().map(|(w, _)| *w).collect();
+fn widths(cells: &[Size]) -> Vec<u32> {
+    let across: Vec<u32> = cells.iter().map(|cell| cell.width).collect();
     let widest = across.iter().copied().max().unwrap_or_default();
 
     let pairs = across
@@ -131,7 +135,7 @@ fn widths(cells: &[(u32, u32)]) -> Vec<u32> {
 
     let area: u64 = cells
         .iter()
-        .map(|(w, h)| u64::from(*w) * u64::from(*h))
+        .map(|cell| u64::from(cell.width) * u64::from(cell.height))
         .sum();
     let ideal = ((area as f64) * TARGET).sqrt() as u32;
 
@@ -166,22 +170,22 @@ fn crop(cells: Vec<Cell>) -> Option<Packed> {
 /// it happens to hold them. Sorting first makes that order ours rather than its, so the same panels
 /// land in the same places whatever the packer does inside.
 /// Reading back by our own ids then returns them in the caller's order.
-fn place(cells: &[(u32, u32)], width: u32, height: u32) -> Option<Vec<Cell>> {
+fn place(cells: &[Size], width: u32, height: u32) -> Option<Vec<Cell>> {
     let mut order: Vec<usize> = (0..cells.len()).collect();
     order.sort_by_key(|at| {
-        let (w, h) = cells[*at];
+        let cell = cells[*at];
         (
-            Reverse(u64::from(w) * u64::from(h)),
-            Reverse(h),
-            Reverse(w),
+            Reverse(u64::from(cell.width) * u64::from(cell.height)),
+            Reverse(cell.height),
+            Reverse(cell.width),
             *at,
         )
     });
 
     let mut wanted = GroupedRectsToPlace::<usize, ()>::new();
     for (rank, at) in order.iter().enumerate() {
-        let (w, h) = cells[*at];
-        wanted.push_rect(rank, None, RectToInsert::new(w, h, 1));
+        let cell = cells[*at];
+        wanted.push_rect(rank, None, RectToInsert::new(cell.width, cell.height, 1));
     }
     let mut sheet = BTreeMap::new();
     sheet.insert((), TargetBin::new(width, height, 1));

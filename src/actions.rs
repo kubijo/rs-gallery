@@ -29,13 +29,12 @@ pub fn action(what: impl Display) {
     });
 }
 
-/// Run `render` with [`action`] listening, and return what it reported.
-pub(crate) fn collecting<R>(render: impl FnOnce() -> R) -> (R, Vec<String>) {
+/// Run `render` with [`action`] listening, and return the actions it reported.
+pub(crate) fn collecting(render: impl FnOnce()) -> Vec<String> {
     // Fresh each frame, so a panicking render leaves nothing to replay into the next.
     SINK.with_borrow_mut(|sink| *sink = Some(Vec::new()));
-    let rendered = render();
-    let reported = SINK.with_borrow_mut(Option::take).unwrap_or_default();
-    (rendered, reported)
+    render();
+    SINK.with_borrow_mut(Option::take).unwrap_or_default()
 }
 
 /// The lines one scene has reported.
@@ -103,15 +102,14 @@ mod tests {
     #[test]
     fn a_scene_is_heard_only_while_it_renders() {
         action("before");
-        let ((), heard) = collecting(|| {
+        let heard = collecting(|| {
             action("during");
             action(format_args!("{} too", "this"));
         });
         assert_eq!(heard, ["during", "this too"], "and nothing from outside");
 
         action("after");
-        let ((), next) = collecting(|| {});
-        assert!(next.is_empty(), "each render starts over");
+        assert!(collecting(|| {}).is_empty(), "each render starts over");
     }
 
     #[test]

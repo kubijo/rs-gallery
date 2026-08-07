@@ -20,19 +20,23 @@ pub(crate) fn check_updates() {
     };
 
     let installed = semver::Version::parse(current).ok();
-    let mut newer: Vec<(semver::Version, String)> = released_sections(&changelog)
+    let mut newer: Vec<Release> = released_sections(&changelog)
         .into_iter()
-        .filter(|(version, _)| installed.as_ref().is_none_or(|cur| version > cur))
+        .filter(|release| {
+            installed
+                .as_ref()
+                .is_none_or(|installed| &release.version > installed)
+        })
         .collect();
-    newer.sort_by(|a, b| b.0.cmp(&a.0));
+    newer.sort_by(|a, b| b.version.cmp(&a.version));
 
     if newer.is_empty() {
         println!("gallery {current} is up to date — no newer release upstream.");
         return;
     }
     println!("A newer gallery is out (you're on {current}):\n");
-    for (version, notes) in newer {
-        println!("## {version}\n{}\n", notes.trim());
+    for release in newer {
+        println!("## {}\n{}\n", release.version, release.notes.trim());
     }
 }
 
@@ -56,11 +60,17 @@ fn fetch(url: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-/// The released `## [x.y.z]` sections of a Keep-a-Changelog document, as `(version, notes)` — skipping
+/// One released section of a Keep-a-Changelog document.
+struct Release {
+    version: semver::Version,
+    notes: String,
+}
+
+/// The released `## [x.y.z]` sections of a Keep-a-Changelog document — skipping
 /// `## [Unreleased]` and any heading whose bracketed name isn't a semver version.
-fn released_sections(changelog: &str) -> Vec<(semver::Version, String)> {
+fn released_sections(changelog: &str) -> Vec<Release> {
     let mut sections = Vec::new();
-    let mut current: Option<(semver::Version, String)> = None;
+    let mut current: Option<Release> = None;
     for line in changelog.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
             if let Some(section) = current.take() {
@@ -75,11 +85,14 @@ fn released_sections(changelog: &str) -> Vec<(semver::Version, String)> {
                 .unwrap_or_default()
                 .trim();
             if let Ok(version) = semver::Version::parse(name) {
-                current = Some((version, String::new()));
+                current = Some(Release {
+                    version,
+                    notes: String::new(),
+                });
             }
-        } else if let Some((_, notes)) = current.as_mut() {
-            notes.push_str(line);
-            notes.push('\n');
+        } else if let Some(section) = current.as_mut() {
+            section.notes.push_str(line);
+            section.notes.push('\n');
         }
     }
     if let Some(section) = current.take() {
@@ -123,9 +136,9 @@ mod tests {
 ";
         let sections = released_sections(changelog);
         assert_eq!(sections.len(), 2);
-        assert_eq!(sections[0].0, semver::Version::new(0, 2, 0));
-        assert!(sections[0].1.contains("added b"));
-        assert_eq!(sections[1].0, semver::Version::new(0, 1, 0));
-        assert!(sections[1].1.contains("added a"));
+        assert_eq!(sections[0].version, semver::Version::new(0, 2, 0));
+        assert!(sections[0].notes.contains("added b"));
+        assert_eq!(sections[1].version, semver::Version::new(0, 1, 0));
+        assert!(sections[1].notes.contains("added a"));
     }
 }

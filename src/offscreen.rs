@@ -133,6 +133,24 @@ impl RenderTarget {
 
 /// Handle passed to the [`SceneCtx::offscreen`](crate::SceneCtx::offscreen) closure — its FBO is bound
 /// and the GL viewport set. Draw into it with any GL library built from [`gl_loader`](Self::gl_loader).
+///
+/// # Colour space
+///
+/// The target is `SRGB8_ALPHA8` and its sampler decodes, so bytes written straight in come back one
+/// decode darker — mid-grey `128` reads as `54`. A 2D library that hands you sRGB-encoded bytes
+/// (femtovg, cairo, skia) therefore looks right in its own preview and crushed here.
+///
+/// Enable `FRAMEBUFFER_SRGB` around the draw and the write encodes, cancelling the decode
+/// to within a least-significant bit, the encode and the decode rounding independently:
+///
+/// ```ignore
+/// gl.enable(glow::FRAMEBUFFER_SRGB);
+/// // ...draw...
+/// gl.disable(glow::FRAMEBUFFER_SRGB);
+/// ```
+///
+/// A scene computing in linear light wants it off, which is the default.
+/// Both halves are pinned by `an_offscreen_decodes_what_is_written_unless_the_scene_encodes_it`.
 pub struct Offscreen {
     loader: crate::GlLoader,
     size: [u32; 2],
@@ -161,6 +179,120 @@ impl Offscreen {
     pub fn fbo(&self) -> std::num::NonZeroU32 {
         self.fbo
     }
+}
+
+/// A texture the scene owns, for [`SceneCtx::texture_stage`](crate::SceneCtx::texture_stage)
+/// to put on a stage. Gallery composites it and never frees it — register once and keep
+/// the [`TextureId`](egui::TextureId), since eframe exposes no way to release one.
+///
+/// The way in is [`SceneCtx::register_native_texture`](crate::SceneCtx::register_native_texture)
+/// under the glow renderer, but any `TextureId` works, including one from [`egui::Context::load_texture`].
+///
+/// # Allocating loosely and showing tightly
+///
+/// [`showing`](Self::showing) says how much of the texture to draw, from its top-left.
+/// A scene whose height depends on what it lays out can allocate generously once, render,
+/// and show the height it measured — all in one frame, where sizing a gallery-owned target
+/// means rendering, measuring, asking for a repaint and resizing, with a frame shown
+/// at the wrong size in between.
+///
+/// It also keeps the texture from being reallocated, which is what would leak a `TextureId`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct StageTexture {
+    texture: egui::TextureId,
+    allocated: [u32; 2],
+    shown: [u32; 2],
+    interactive: bool,
+}
+
+impl StageTexture {
+    /// A texture of `size` pixels, all of it shown.
+    #[must_use]
+    pub fn new(texture: egui::TextureId, size: impl Into<[u32; 2]>) -> Self {
+        let allocated = size.into();
+        Self {
+            texture,
+            allocated,
+            shown: allocated,
+            interactive: false,
+        }
+    }
+
+    /// Draw only this much of it, measured from the top-left. Clamped to what was allocated.
+    ///
+    /// Pass an extent something actually measured, not whatever the layout handed back: a node
+    /// that reports no extent gives zero, and a stage told to show zero pixels says so in place
+    /// of the image rather than drawing a sliver that reads as a lost texture.
+    #[must_use]
+    pub fn showing(mut self, shown: impl Into<[u32; 2]>) -> Self {
+        let shown = shown.into();
+        self.shown = [
+            shown[0].min(self.allocated[0]),
+            shown[1].min(self.allocated[1]),
+        ];
+        self
+    }
+
+    /// Take the pointer that lands on the image, and report it in the image's own pixels.
+    ///
+    /// Off by default, since a stage taking the drag and the wheel stops the canvas behind it
+    /// from scrolling — worth it for content that hit-tests itself, a cost for content that
+    /// doesn't.
+    #[must_use]
+    pub fn interactive(mut self) -> Self {
+        self.interactive = true;
+        self
+    }
+
+    /// Where the shown part sits in the texture, V flipped.
+    ///
+    /// GL textures are bottom-left origin while a stage reads top-down, so the rect runs backwards
+    /// in y, and the crop has to come off the end the flip put the content on.
+    /// Derived at a call site instead, it crops an upside-down image
+    /// — quietly keeping the slack and cutting the content.
+    pub(crate) fn uv(self) -> egui::Rect {
+        let ratio = |shown: u32, allocated: u32| match allocated {
+            0 => 0.0,
+            whole => f64::from(shown) / f64::from(whole),
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a ratio of two small pixel counts, in 0..=1"
+        )]
+        let (across, down) = (
+            ratio(self.shown[0], self.allocated[0]) as f32,
+            ratio(self.shown[1], self.allocated[1]) as f32,
+        );
+        egui::Rect::from_min_max(egui::pos2(0.0, 1.0), egui::pos2(across, 1.0 - down))
+    }
+
+    pub(crate) fn shown(self) -> [u32; 2] {
+        self.shown
+    }
+
+    pub(crate) fn texture(self) -> egui::TextureId {
+        self.texture
+    }
+
+    pub(crate) fn sense(self) -> egui::Sense {
+        if self.interactive {
+            egui::Sense::click_and_drag()
+        } else {
+            egui::Sense::hover()
+        }
+    }
+
+    pub(crate) fn is_interactive(self) -> bool {
+        self.interactive
+    }
+}
+
+/// An image gallery drew, and the pointer that landed on it.
+///
+/// `pointers` is empty unless the image asked to be [`interactive`](StageTexture::interactive).
+pub struct ImageInput {
+    pub response: egui::Response,
+    pub pointers: Vec<Pointer>,
 }
 
 /// One pointer event that landed on an offscreen image, in that image's own pixel space:
@@ -358,6 +490,40 @@ impl GlDeps<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A whole texture is drawn flipped in y and not cropped at all: `v` runs 1 → 0.
+    ///
+    /// The flip is what makes cropping easy to get backwards. Keeping the half of a texture
+    /// that holds content means taking `v` from 1 down to 0.5; taking 0 to 0.5 keeps the slack
+    /// and cuts the content, which is what deriving this from an upside-down image does.
+    #[test]
+    fn showing_part_of_a_texture_crops_the_end_the_flip_put_the_content_on() {
+        let whole = StageTexture::new(egui::TextureId::User(0), [100_u32, 100]).uv();
+        assert_eq!(
+            whole.min,
+            egui::pos2(0.0, 1.0),
+            "top-left of a flipped image"
+        );
+        assert_eq!(whole.max, egui::pos2(1.0, 0.0), "and its bottom-right");
+
+        let half = StageTexture::new(egui::TextureId::User(0), [100_u32, 100])
+            .showing([100_u32, 50])
+            .uv();
+        assert_eq!(half.min, egui::pos2(0.0, 1.0), "the top edge is unmoved");
+        assert_eq!(
+            half.max,
+            egui::pos2(1.0, 0.5),
+            "and the crop comes off the bottom, leaving the content"
+        );
+    }
+
+    #[test]
+    fn a_texture_shows_no_more_than_was_allocated_for_it() {
+        let over =
+            StageTexture::new(egui::TextureId::User(0), [64_u32, 64]).showing([999_u32, 999]);
+        assert_eq!(over.shown(), [64, 64], "clamped to the allocation");
+        assert_eq!(over.uv().max, egui::pos2(1.0, 0.0), "so nothing is cropped");
+    }
 
     /// A 200×100 image at (10, 20) showing a 400×200 target, so a point maps to two pixels
     /// and a mistaken offset can't pass for a mistaken scale.

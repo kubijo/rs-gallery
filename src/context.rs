@@ -9,8 +9,8 @@
 
 use eframe::glow;
 
-use crate::knobs::{ChoiceStyle, Knob, Pad2DSpec};
-use crate::offscreen::{GlDeps, Offscreen, Pointer};
+use crate::knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
+use crate::offscreen::{GlDeps, ImageInput, Offscreen, StageTexture};
 
 /// What a scene receives each frame alongside its [`Ui`](egui::Ui): the knob accessors,
 /// and the methods that draw. Those take the `Ui` to draw into rather than holding one,
@@ -30,6 +30,12 @@ pub struct SceneCtx<'a> {
     /// Counts this frame's `offscreen` calls, so each keeps its own render target.
     offscreens: usize,
     gl: Option<GlDeps<'a>>,
+}
+
+/// A choice knob found by label: which option it sits on, and what it may sit on.
+struct Choice<'a> {
+    chosen: &'a mut usize,
+    options: &'a [String],
 }
 
 /// How much room a [`stage`](SceneCtx::stage) takes.
@@ -359,11 +365,78 @@ impl<'a> SceneCtx<'a> {
         stage: impl Into<StageSpec>,
         size: impl Into<[u32; 2]>,
         draw: impl FnOnce(&Offscreen),
-    ) -> Option<(egui::Response, Vec<Pointer>)> {
+    ) -> Option<ImageInput> {
         let size = size.into();
         let response = self.staged(ui, stage.into(), size, draw, egui::Sense::click_and_drag())?;
-        let events = crate::offscreen::pointer(ui, response.id, response.rect, size);
-        Some((response, events))
+        let pointers = crate::offscreen::pointer(ui, response.id, response.rect, size);
+        Some(ImageInput { response, pointers })
+    }
+
+    /// Put a texture the scene owns on a stage, with the chrome `offscreen_stage` gives a texture
+    /// gallery owns — and no copy, since nothing crosses into a framebuffer of gallery's.
+    ///
+    /// Gallery owns the awkward part: GL textures are bottom-left origin, so the image is flipped,
+    /// and [`StageTexture::showing`] crops off the end the flip put the content on. The stage is sized
+    /// and captioned by the shown part, not the allocation behind it.
+    ///
+    /// Any [`TextureId`](egui::TextureId) works — under glow,
+    /// [`register_native_texture`](Self::register_native_texture) makes one from a GL name.
+    /// Register once and keep it: a `TextureId` cannot be freed, so re-registering every frame
+    /// leaks. `None` while the stage is folded, when nothing is drawn to point at.
+    ///
+    /// ```ignore
+    /// let shown = ctx.texture_stage(
+    ///     ui,
+    ///     Stage::Fit,
+    ///     StageTexture::new(cached_id, [512, 512]).showing([512, laid_out_height]).interactive(),
+    /// );
+    /// for at in shown.iter().flat_map(|shown| &shown.pointers) { /* ... */ }
+    /// ```
+    pub fn texture_stage(
+        &mut self,
+        ui: &mut egui::Ui,
+        stage: impl Into<StageSpec>,
+        adopted: StageTexture,
+    ) -> Option<ImageInput> {
+        let shown = adopted.shown();
+        // An empty measurement would draw a sliver a reader takes for a lost image,
+        // and the caption's `×0` is easy to miss. [`StageTexture::showing`] has the cause.
+        let empty = shown[0] == 0 || shown[1] == 0;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "small, non-negative pixel dimensions"
+        )]
+        let sized = egui::load::SizedTexture::new(
+            adopted.texture(),
+            egui::vec2(shown[0] as f32, shown[1] as f32),
+        );
+        let mut response = None;
+        self.stage(ui, stage, |ui| {
+            response = Some(if empty {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!(
+                        "texture_stage: nothing to show at {}×{}",
+                        shown[0], shown[1]
+                    ),
+                )
+            } else {
+                ui.add(
+                    egui::Image::new(sized)
+                        .uv(adopted.uv())
+                        .sense(adopted.sense()),
+                )
+            });
+        });
+        let response = response?;
+        // No image was drawn, so nothing can be pointed at — mapping against the hint's own rect
+        // would hand back coordinates in an image that does not exist.
+        let pointers = if adopted.is_interactive() && !empty {
+            crate::offscreen::pointer(ui, response.id, response.rect, shown)
+        } else {
+            Vec::new()
+        };
+        Some(ImageInput { response, pointers })
     }
 
     /// Render the target for this call site, then show it inside a stage.
@@ -465,14 +538,15 @@ impl<'a> SceneCtx<'a> {
         ui: &mut egui::Ui,
         size: impl Into<[u32; 2]>,
         draw: impl FnOnce(&Offscreen),
-    ) -> (egui::Response, Vec<Pointer>) {
+    ) -> ImageInput {
         let size = size.into();
         let response = self.shown(ui, size, draw, egui::Sense::click_and_drag());
-        if self.gl.is_none() {
-            return (response, Vec::new());
-        }
-        let events = crate::offscreen::pointer(ui, response.id, response.rect, size);
-        (response, events)
+        let pointers = if self.gl.is_some() {
+            crate::offscreen::pointer(ui, response.id, response.rect, size)
+        } else {
+            Vec::new()
+        };
+        ImageInput { response, pointers }
     }
 
     #[expect(
@@ -647,8 +721,8 @@ impl<'a> SceneCtx<'a> {
         );
     }
 
-    /// A 2-axis pad; returns the current `(x, y)`.
-    pub fn pad2d(&mut self, label: &str, spec: Pad2DSpec) -> (f32, f32) {
+    /// A 2-axis pad, wherever it currently sits.
+    pub fn pad2d(&mut self, label: &str, spec: Pad2DSpec) -> Pad2D {
         match self.slot(
             || Knob::Pad2D {
                 label: label.to_owned(),
@@ -662,8 +736,11 @@ impl<'a> SceneCtx<'a> {
             },
             |k| matches!(k, Knob::Pad2D { label: l, .. } if l == label),
         ) {
-            Knob::Pad2D { x, y, .. } => (*x, *y),
-            _ => (spec.default_x, spec.default_y),
+            Knob::Pad2D { x, y, .. } => Pad2D { x: *x, y: *y },
+            _ => Pad2D {
+                x: spec.default_x,
+                y: spec.default_y,
+            },
         }
     }
 
@@ -752,12 +829,12 @@ impl<'a> SceneCtx<'a> {
     /// An unknown option is an identity miss and drops the write;
     /// an index merely out of range clamps ([`set_select_index`](Self::set_select_index)).
     pub fn set_select(&mut self, label: &str, option: &str) -> bool {
-        let Some((stored, options)) = self.select_mut(label) else {
+        let Some(choice) = self.select_mut(label) else {
             return false;
         };
-        match options.iter().position(|opt| opt == option) {
+        match choice.options.iter().position(|opt| opt == option) {
             Some(at) => {
-                *stored = at;
+                *choice.chosen = at;
                 true
             }
             None => false,
@@ -766,24 +843,27 @@ impl<'a> SceneCtx<'a> {
 
     /// Write a choice knob's selection by index, clamped to the last option.
     pub fn set_select_index(&mut self, label: &str, index: usize) -> bool {
-        let Some((stored, options)) = self.select_mut(label) else {
+        let Some(choice) = self.select_mut(label) else {
             return false;
         };
-        if options.is_empty() {
+        if choice.options.is_empty() {
             return false;
         }
-        *stored = index.min(options.len() - 1);
+        *choice.chosen = index.min(choice.options.len() - 1);
         true
     }
 
-    fn select_mut(&mut self, label: &str) -> Option<(&mut usize, &[String])> {
+    fn select_mut(&mut self, label: &str) -> Option<Choice<'_>> {
         self.knobs.iter_mut().find_map(|knob| match knob {
             Knob::Select {
                 label: l,
                 value,
                 options,
                 ..
-            } if l == label => Some((value, options.as_slice())),
+            } if l == label => Some(Choice {
+                chosen: value,
+                options: options.as_slice(),
+            }),
             _ => None,
         })
     }
@@ -936,7 +1016,10 @@ mod tests {
             egui::Color32::from_rgb(0x11, 0x22, 0x33)
         );
         assert_eq!(ctx.select("gear", &["p", "d", "r"], 0), 1);
-        assert_eq!(ctx.pad2d("aim", Pad2DSpec::default()), (0.25, -0.5));
+        assert_eq!(
+            ctx.pad2d("aim", Pad2DSpec::default()),
+            Pad2D { x: 0.25, y: -0.5 }
+        );
     }
 
     #[test]
@@ -981,7 +1064,7 @@ mod tests {
         );
         assert_eq!(
             ctx.pad2d("aim", Pad2DSpec::default()),
-            (1.0, -1.0),
+            Pad2D { x: 1.0, y: -1.0 },
             "each axis clamps to its own range"
         );
     }
@@ -1046,7 +1129,10 @@ mod tests {
         }
         let mut ctx = SceneCtx::new(&mut knobs, None);
         assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.5);
-        assert_eq!(ctx.pad2d("aim", Pad2DSpec::default()), (0.0, 0.0));
+        assert_eq!(
+            ctx.pad2d("aim", Pad2DSpec::default()),
+            Pad2D { x: 0.0, y: 0.0 }
+        );
     }
 
     #[test]
@@ -1273,6 +1359,35 @@ mod tests {
             first_column.windows(2).all(|pair| pair[0] == pair[1]),
             "every cell starting a row shares the first column's x: {corners:?}"
         );
+    }
+
+    /// A stage told to show nothing says so, rather than drawing a sliver that reads as gallery
+    /// having lost the texture. Nothing is reported as pointed at either, there being no image.
+    #[test]
+    fn a_texture_with_nothing_to_show_says_so_instead_of_drawing_a_sliver() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let shown = ctx.texture_stage(
+                ui,
+                Stage::Fit,
+                StageTexture::new(egui::TextureId::User(0), [300_u32, 300])
+                    .showing([300_u32, 0])
+                    .interactive(),
+            );
+            assert!(
+                shown.is_some_and(|shown| shown.pointers.is_empty()),
+                "and nothing is reported as pointed at, there being no image to point at"
+            );
+        });
+        harness.run_steps(2);
+
+        let said = harness
+            .query_all_by_label_contains("nothing to show")
+            .count();
+        assert_eq!(said, 1, "the empty measurement is named, not drawn");
     }
 
     /// A matrix of one size in a pane that fits them all takes one row,

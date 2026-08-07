@@ -99,6 +99,11 @@ owns and shows inline. `ctx.offscreen_input(...)` shows it the same way and hand
 it — press, move, release and wheel, in the image's own pixels — so content with its own hit-testing is as live in the
 gallery as it is on the device.
 
+A renderer that cannot be pointed at a foreign framebuffer goes the other way round: draw into a texture of your own,
+register it once, and hand it to `ctx.texture_stage(ui, stage, StageTexture::new(id, size))` for the stage chrome with
+no copy. `.showing(..)` draws part of a loosely-allocated texture, which is how a content-sized stage settles its height
+in the frame it measured it; `.interactive()` asks for the pointer.
+
 The title's slashes build the sidebar tree; the scenes are children:
 
 ```text
@@ -138,6 +143,8 @@ That uses the scene's default knobs, rarely the state worth seeing. Other states
 out = "renders" # relative to this file; `just capture <file> <dir>` overrides it
 size = "640x360" # for any shot that doesn't state its own
 sheet = "sheet.png" # optional; gathers the run onto one captioned image as well
+settle = true # optional; shoot each scene once it stops animating, `frames` being the most to draw
+report = "capture.json" # optional; what the run came to, for something other than a person to read
 
 [[shot]]
 name = "night" # the shot's identity, and its filename: renders/night.png
@@ -162,6 +169,16 @@ color   "accent" = #4caf50ff
 
 A pattern or label matching none or several, or a value its kind won't take, stops the run: a clean render of the wrong
 state is worse than none.
+
+`settle` replaces guessing a frame count. Without it a shot draws `frames` and captures whatever is on screen — too few
+and it catches a scene mid-animation, too many and every settled scene in the set pays for the slowest one. With it, a
+scene is shot once it stops asking egui to redraw it, and `frames` is only the ceiling. A scene that animates forever
+never settles: it is captured at the ceiling and marked **still moving** in the run's report, so an unattended loop
+neither hangs nor quietly diffs one arbitrary frame against another.
+
+`report` writes that same outcome as JSON — a record per shot with its name, path, size, `settled` and the frames it
+drew, plus the sheet's path if one was gathered. A loop that renders a set and inspects the results reads that instead
+of scraping the text meant for a person.
 
 `sheet` gathers the run onto one image beside the shots, so a change across a whole set is one thing to look at rather
 than a directory to click through. The shots still write their own PNGs, and each panel is captioned with the shot that

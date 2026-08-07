@@ -3,6 +3,54 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
+## 2026-08-07
+
+- **`SceneCtx::texture_stage`** — puts a texture the scene owns on a stage, with the chrome
+  [`offscreen_stage`](src/context.rs) gives one gallery owns, and no copy: nothing crosses into a framebuffer of
+  gallery's. `StageTexture::new(id, allocated)` names the texture, `.showing(size)` says how much of it to draw and
+  `.interactive()` asks for the pointer; it hands back an [`ImageInput`](src/offscreen.rs) carrying the `Response` and
+  the events in the image's own pixels, so content that hit-tests itself can take this path rather than staying on
+  `offscreen` for the input alone. Any `TextureId` works, including one from `egui::Context::load_texture`, so this is
+  not glow-only — only making one out of a GL name is.
+- **A stage told to show nothing says so** — `showing([w, 0])` draws a named hint in place of the image. The bug that
+  lands there is measuring a layout node that reports no extent, and a one-pixel sliver under a `×0` caption reads as
+  gallery having lost the texture rather than as the measurement having failed.
+- **Gallery owns the V flip and the crop.** GL textures are bottom-left origin while a stage reads top-down, so an
+  adopted texture is drawn flipped, and `showing` has to crop the end the flip put the content on. Derived at a call
+  site from an upside-down render, that comes out backwards — keeping the slack and cutting the content. `showing` also
+  removes the auto-height round trip: allocate loosely once, render, and show the height just measured, in one frame,
+  where sizing a gallery-owned target means render, measure, repaint, resize, with a frame at the wrong size in between.
+  Allocating once also keeps the texture from being reallocated, which is what would leak a `TextureId`.
+- **`report`** — a recipe's `report = "capture.json"` writes what the run came to beside the images: per shot its name,
+  path, size, byte count, whether it `settled` and how many frames it drew, plus the sheet's path when one was gathered.
+  Its own serialisable types rather than the internals, so the file is a stated format. For an unattended loop, which
+  needs to tell a settled capture from one the frame ceiling landed on without reading English. It says what did *not*
+  happen too — `complete`, `requested`, `failed` and `warnings` sit alongside the shots, because a reader counting
+  records alone cannot tell a recipe of three from one of ten that stopped at three. A run that fails partway still
+  writes it, listing what landed and what stopped the rest; a sheet asked for and skipped leaves a warning rather than a
+  path. The file is removed before the first shot rather than overwritten after the last, so a run that dies leaves no
+  report instead of the previous one, which a loop would take for this run's.
+- **A `frames` under 2 is refused** rather than quietly raised. One frame declares a scene's knobs and the next applies
+  the recipe over them, so a single frame captures the scene's own defaults whatever the recipe says — the wrong picture
+  rather than a rougher one. A recipe and `--frames` are both checked; the windowed profiling run, where any count means
+  something, is not.
+- **`settle`** — a recipe (or a single shot) can say `settle = true`, and each scene is then captured as soon as it
+  stops asking egui to redraw it, with `frames` becoming the most to draw rather than the number drawn. It replaces
+  tuning a frame count by hand, where too few catches a scene mid-animation and too many makes every settled scene in
+  the set wait for the slowest. A scene that animates forever is captured at the ceiling and reported **still moving**,
+  so an unattended run neither hangs nor silently diffs one arbitrary frame against another. Two consecutive quiet
+  frames are required, since the signal is the egui context's rather than the scene's and a one-shot repaint from
+  anything on the canvas would otherwise end the wait early.
+- **The offscreen colour space is written down** — the target is `SRGB8_ALPHA8` and its sampler decodes, so bytes
+  written straight in come back one decode darker: mid-grey `128` reads as `54`. A 2D library handing over sRGB-encoded
+  bytes (femtovg, cairo, skia) therefore looks right in its own preview and crushed here, which cost a consumer real
+  time to work out from nothing. Drawing under `FRAMEBUFFER_SRGB` cancels it, to within a least-significant bit — the
+  encode and the decode round independently, and a software rasteriser and a GPU disagree by one. Both halves are on
+  [`Offscreen`](src/offscreen.rs) and pinned by a round-trip test; no behaviour changed.
+- Captures are pinned as reproducible: two runs of one recipe write the same bytes, over a scene that reads the frame
+  clock, so a capture's frame times staying fixed rather than following the wall clock is now a test rather than a happy
+  accident.
+
 ## 2026-08-06
 
 - **Sidebar folding** — `Settings::collapsed(..)` says which folders a gallery opens with folded: `true` for all of

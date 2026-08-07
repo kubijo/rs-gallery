@@ -11,14 +11,24 @@ size = "640x360"
 # Each PNG is cropped to what its scene drew; `trim = false` here or on a shot keeps the whole canvas.
 # Gather every shot onto one captioned image too. Drop the line to write only the shots themselves.
 sheet = "sheet.png"
+# What the run came to, as JSON: a record per shot with its name, path, size, `settled` and the
+# frames it drew. For a loop that renders a set and looks at the results without anyone watching.
+report = "capture.json"
+# Shoot each scene once it stops asking to be redrawn, rather than always drawing `frames` of them.
+# `frames` becomes the most to draw: a scene that settles sooner is caught sooner, and one that never
+# settles — an endless animation — is caught there and reported as still moving. Per-shot too.
+settle = true
 
 [[shot]]
 # The name is the shot's identity and its filename — here `renders/knobs-choice.png`.
 name = "knobs-choice"
-# A whole scene key, or a case-insensitive regex; it has to match exactly one scene.
+# A whole scene key, or a case-insensitive regex;
+# it has to match exactly one scene.
 scene = "knobs::choice"
-# Each key is a knob's label, or a regex over the labels. A choice is set by option label.
-# Values are re-applied before every frame, so they outrank anything the scene writes to its own knobs.
+# Each key is a knob's label, or a regex over the labels.
+# A choice is set by option label.
+# Values are re-applied before every frame, so they outrank
+# anything the scene writes to its own knobs.
 knobs = { select = "two", radio = "three", buttons = "one" }
 
 [[shot]]
@@ -30,7 +40,8 @@ knobs = { tint = "#E8A33D" }
 name = "knobs-everything"
 scene = "knobs::group"
 size = "480x240"
-# Numbers and booleans are written as themselves; `x` and `y` are two knobs, matched exactly.
+# Numbers and booleans are written as themselves;
+# `x` and `y` are two knobs, matched exactly.
 knobs = { x = 0.6, y = -0.4, tint = "#7FD4A0", bold = true }
 
 # Far smaller than the canvas it lays out in, so trim takes most of the PNG.
@@ -42,6 +53,7 @@ scene = "badge"
 name = "orbit-mid-spin"
 scene = "orbit"
 size = "480x480"
-# An animated scene draws a different frame each time, so pick which one to catch.
+# Orbit animates forever, so it never settles: this is the frame it is caught at.
+settle = false
 frames = 40
 knobs = { dots = 96, radius = 150, accent = "#6C9CD8" }

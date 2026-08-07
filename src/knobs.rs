@@ -63,6 +63,14 @@ pub enum ChoiceStyle {
     Buttons,
 }
 
+/// Where a [`SceneCtx::pad2d`](crate::SceneCtx::pad2d) knob sits,
+/// in the ranges its [`Pad2DSpec`] declared.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Pad2D {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// How a [`SceneCtx::pad2d`](crate::SceneCtx::pad2d) knob is set up: its default position, per-axis
 /// ranges, and y-orientation.
 #[derive(Clone, Copy)]
