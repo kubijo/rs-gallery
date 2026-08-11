@@ -29,10 +29,15 @@ use convert_case::{Case, Casing};
 // so `scaffold_scenes` below can type-check the scenes a scaffold ships.
 extern crate self as gallery;
 
-/// Re-exported so a host writes `gallery::eframe::Result` without depending
-/// on eframe itself — and so both sides are the same eframe.
-/// Bumping it is a breaking change here.
+/// Re-exported so a host writes `gallery::eframe::Result` without depending on eframe,
+/// and so both sides link the same one. Bumping it is a breaking change here.
 pub use eframe;
+/// Likewise — and a scene reaches `egui::Color32` through the prelude, declaring none itself.
+pub use egui;
+/// Likewise, for a host installing asset loaders. The loaders are feature-gated and off here,
+/// while `install_image_loaders` is not gated at all — so a host that forgets
+/// `features = ["extras-svg"]` gets a call that compiles and installs nothing.
+pub use egui_extras;
 pub use gallery_macros::scene;
 /// Macro plumbing: `#[scene]` expands to `::gallery::inventory::submit!`.
 /// Not meant to be named.
@@ -80,7 +85,7 @@ pub mod prelude {
 
     pub use crate::{
         ImageInput, Offscreen, PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, Stage,
-        StageSpec, StageTexture, action, scene, scene_meta, stage,
+        StageSpec, StageTexture, action, egui, scene, scene_meta, stage,
     };
 }
 
@@ -1057,7 +1062,7 @@ pub fn apply_default_style(style: &mut egui::Style) {
 /// has run over every theme — so a host can:
 ///
 /// - **keep** the gallery look — touch nothing (just register asset loaders,
-///   e.g. `egui_extras::install_image_loaders`);
+///   e.g. `gallery::egui_extras::install_image_loaders`);
 /// - **extend** it — `ctx.all_styles_mut(|style| ...)`, e.g. recolour `visuals.selection.bg_fill`;
 /// - **replace** it — `ctx.all_styles_mut(|style| *style = my_style)`;
 /// - **drop** it — `ctx.all_styles_mut(|style| *style = egui::Style::default())` for plain egui.

@@ -48,14 +48,14 @@ sed -i \
     "$demo/Cargo.toml"
 
 if [ "$variant" = femtovg ]; then
-    # Switch the host to the glow backend and add the femtovg scene + its dependencies. The pins are
-    # deliberate: femtovg 0.20.4 (and the matching glow 0.16, which the scene uses to name femtovg's
-    # framebuffer type) sit against eframe 0.35's glow 0.17, so the demo builds two incompatible glow
-    # versions into one binary. Nothing shares a glow type across the boundary — gallery hands the scene
-    # a raw C proc-address loader and femtovg builds its own glow from it — so that mismatch surviving is
-    # the proof of renderer (and glow-version) independence.
+    # The version clash is the point. femtovg 0.20.4 needs glow 0.16 — which the scene names too,
+    # for femtovg's framebuffer type — while eframe 0.36 brings 0.17. Nothing crosses between them
+    # but a raw C proc-address loader, so two glow versions in one binary prove a scene's renderer
+    # is its own.
+    #
+    # Anchored on the section header rather than a dependency line, which comes and goes.
     sed -i 's/gallery::Renderer::Wgpu/gallery::Renderer::Glow/' "$demo/main.rs"
-    sed -i -e '/^egui = "0.35"$/a femtovg = "0.20.4"' -e '/^egui = "0.35"$/a glow = "0.16"' \
+    sed -i -e '/^\[dependencies\]/a femtovg = "0.20.4"' -e '/^\[dependencies\]/a glow = "0.16"' \
         "$demo/Cargo.toml"
     cp "$repo/scripts/offscreen.scene.rs" "$demo/offscreen.scene.rs"
 

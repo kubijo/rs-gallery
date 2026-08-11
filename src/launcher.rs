@@ -28,7 +28,8 @@ use crate::{
 /// ```
 ///
 /// Expands to [`launch()`] with the calling crate's name and manifest dir filled in.
-/// `setup` runs against the fresh egui context (e.g. `|ctx| egui_extras::install_image_loaders(ctx)`).
+/// `setup` runs against the fresh egui context
+/// (e.g. `|ctx| gallery::egui_extras::install_image_loaders(ctx)`).
 #[macro_export]
 macro_rules! launch {
     ($setup:expr, $settings:expr) => {

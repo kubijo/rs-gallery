@@ -228,7 +228,7 @@ impl egui_kittest::TestRenderer for SharedCapture {
         self.0.borrow().setup_eframe(cc, frame);
     }
 
-    fn handle_delta(&mut self, delta: &egui::TexturesDelta) {
+    fn handle_delta(&mut self, delta: &mut egui::TexturesDelta) {
         self.0.borrow_mut().handle_delta(delta);
     }
 
@@ -249,14 +249,18 @@ impl egui_kittest::TestRenderer for GlowCapture {
         cc.get_proc_address = Some(self.loader.clone());
     }
 
-    /// Upload what egui added or changed this frame.
-    /// Frees are skipped, as in kittest's wgpu renderer:
-    /// the output being rendered still names textures egui has already let go of.
-    fn handle_delta(&mut self, delta: &egui::TexturesDelta) {
+    /// Upload what egui added or changed, then empty the delta — epaint 0.36 asserts on drop
+    /// that every entry was consumed. The frees are dropped rather than applied: this runs
+    /// before `render`, whereas `Painter::paint_and_update_textures` frees after painting —
+    /// the output still names them.
+    fn handle_delta(&mut self, delta: &mut egui::TexturesDelta) {
         let mut painter = self.painter.borrow_mut();
-        for (id, image) in &delta.set {
-            painter.set_texture(*id, image);
+        for (id, images) in delta.set.drain() {
+            for image in images {
+                painter.set_texture(id, &image);
+            }
         }
+        delta.free.clear();
     }
 
     fn render(

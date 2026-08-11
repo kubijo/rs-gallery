@@ -20,6 +20,9 @@ pkgs.writeShellApplication {
     # Release too: egui gates `Style::debug` on `debug_assertions`, so code touching
     # it compiles in dev and fails in release — a dev-only gate never sees that.
     cargo clippy --workspace --release --all-targets -- -D warnings
+    # Once with every feature on: the forwarded `egui_extras` gates are off by default,
+    # so a default-only run never builds the code they pull in.
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
     # tools/ is its own uv project, and both of these resolve imports
     # from its root — run them there rather than through repochk,
     # which lints file by file and would see no project at all.

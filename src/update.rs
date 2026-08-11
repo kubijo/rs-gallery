@@ -56,7 +56,8 @@ fn fetch(url: &str) -> Result<String, String> {
     ureq::get(url)
         .call()
         .map_err(|e| e.to_string())?
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| e.to_string())
 }
 

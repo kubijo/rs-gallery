@@ -3,6 +3,27 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
+## 2026-08-11
+
+- **egui 0.36.** `egui`, `eframe`, `egui_extras` and `egui_kittest` move together to 0.36.1, and a host has to move with
+  them: only one egui is ever linked, so gallery's and the host's must be the same one. The MSRV is 1.95 now. Nothing in
+  the shell changed shape — the reference images match what 0.35 rendered, byte for byte.
+- **`gallery::egui`** — egui is re-exported, and a scaffolded instance no longer declares it: scenes reach
+  `egui::Color32` through the prelude. Two egui versions in one build is the failure the rule above describes, and a
+  manifest that never names egui cannot cause it. Existing instances can drop the dependency.
+- **`gallery::egui_extras`, behind forwarded features** — `extras-svg` and `extras-image` turn on the loaders
+  `install_image_loaders` installs, so an instance registers them without declaring egui_extras itself. Declaring it was
+  the same seam as declaring egui, one crate further out: an instance on egui_extras 0.35 pulls egui 0.35 back in.
+  Forgetting the feature is worth knowing about — `install_image_loaders` is not itself gated, so the call compiles and
+  silently installs nothing. `extras-svg` costs a second SVG stack, resvg pinning usvg 0.45 beside the 0.48 the sidebar
+  icons tessellate through; gallery's own use of egui_extras is `syntax_highlighting`, which needs no feature at all.
+- **Texture uploads follow epaint's new contract.** `TestRenderer::handle_delta` takes the delta by `&mut`,
+  `TexturesDelta::set` groups several `ImageDelta`s under one texture, and `Drop` asserts the delta was consumed. The
+  glow capture drains the uploads and discards the frees: it runs before the paint, where `egui_glow` frees only after
+  one, so acting on them there would take textures out from under output that still names them.
+- **`usvg` 0.48 and `ureq` 3.** A response body is read through `body_mut().read_to_string()` now. `glow` stays at 0.16
+  — it mirrors the glow the femtovg demo pulls, so it moves when femtovg does rather than tracking the latest.
+
 ## 2026-08-07
 
 - **A stage's padding is settable** — `Stage::Fit.padding(0)`, or on a spec that already carries other settings,
