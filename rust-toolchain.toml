@@ -2,6 +2,10 @@
 # The Nix flake reads this same file via oxalica's rust-overlay,
 # so `nix develop` and a local `rustup` resolve an identical toolchain.
 [toolchain]
-channel = "stable"
+# A version rather than `stable`, so a release lands
+# as a deliberate bump, not on the day it ships.
+channel = "1.97.1"
 profile = "minimal"
+# llvm-tools-preview carries the llvm-profdata
+# that cargo-llvm-cov reports coverage with.
 components = ["rustfmt", "clippy", "rust-src", "llvm-tools-preview"]

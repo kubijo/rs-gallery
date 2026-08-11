@@ -45,42 +45,12 @@ timing, an A/B comparison ledger, and a capture/verify visual-regression suite. 
 fuel/instruction-count layer does not, being particular to a wasm interpreter — the native analogue is wall-clock spans.
 Ordered by value: honest meter → profiler → snapshots.
 
-Motivation — the current perf footer is not trustworthy (`src/lib.rs`), and fixing it is the prerequisite for everything
-else here:
-
-- Expanding the panel calls `ctx.request_repaint()` every frame, so *observing* the numbers pins the loop to max FPS —
-  the reading measures "we're repainting because you're watching," not real work.
-- It records `ui.input(|i| i.stable_dt)`, the inter-frame interval (≈ vsync), not frame work — so the "16.7 ms" it shows
-  is the vsync cap, not a render cost.
-
-### Tier 3 — honest frame-cost meter in its own viewport (do first)
+### Tier 3 — honest frame-cost meter in its own viewport
 
 Separate observer from observed by construction: a deferred egui viewport (`gallery · perf`) with its own repaint clock,
 so its liveness never drives the main loop and its own draw cost lands in its own budget. The main window stays
 reactive; idle → it holds the last real frame's numbers.
 
-- [x] **Spike — answered: deferred viewports self-sustain, no keep-alive needed.** With the parent never self-repainting
-  it went quiet at frame 20 (t=1.72s) and never ran again, while the perf viewport kept running its own closure at the
-  requested ~5 Hz through t=7.4s (tick 46). The parent window's UI visibly froze at its last painted values, confirming
-  it really had stopped. So an idle main loop sits at **zero** forced repaints while the perf window stays live.
-- [x] Measures work, not interval — the shell's `ui()` is self-timed with an `Instant`. `frame.info().cpu_usage` was the
-  obvious primitive and is wrong here: eframe reports it per *viewport* redraw with no root check, so the perf window's
-  own repaints overwrite it and the meter ends up charging the shell for the instrument. Self-timing covers the shell's
-  build only; tessellate and paint sit outside it, which is what the GPU layer below is for.
-- [x] Main loop: dropped the forced `request_repaint()` and the `stable_dt` record; stats shared via
-  `Arc<Mutex<PerfStats>>`. The shell is fully reactive now — an idle gallery forces zero repaints.
-- [x] Perf window is a deferred viewport (`gallery · perf`) on its own ~10 Hz clock, reading the stats read-only. The
-  bottom panel is gone; a `Perf` toggle sits in the top bar beside `Debug`, and closing the window unticks it via a
-  single requested parent repaint.
-- [x] Dropped FPS entirely — it measured repaint frequency, not cost — for frame cost + p95; the sparkline plots cost
-  against the 17/33 ms budget lines.
-- [x] Hot-reload polling is gated on `--hot` (`HotDylib::new(lib_name, watching)`). It ran unconditionally, repainting
-  the shell 5×/s forever, so the loop never came to rest for a cost reading to mean anything.
-- [x] `template/animation.scene.rs` (Motion / Orbit) drives the loop so the meter has something to measure: an `animate`
-  toggle demonstrates `rendering` vs `idle`, and `dots` pushes per-frame cost past the budget lines. Plain egui, so it
-  exercises both renderers.
-- [x] The window parks beside the shell from `outer_rect`/`monitor_size`, frozen at open so dragging it sticks. A no-op
-  on Wayland, which reports no window geometry and leaves placement to the compositor; kept for the other platforms.
 - [ ] GPU paint cost via wgpu `TIMESTAMP_QUERY` (async readback, N frames later) as a second layer.
 - [ ] An explicit continuous/benchmark mode that deliberately drives the loop, for when a steady-state rate *is* what
   you want to read.
@@ -111,33 +81,16 @@ automatic:
 Rendering a scene headlessly and diffing it against a committed reference both landed. What is left is the shape needed
 past a handful of images, and a structural target beside the pixel one.
 
-- [x] **Why this stopped being "thin".** A static snapshot of default knobs shows a state nobody chose. Capture recipes
-  answer that without a record-replay layer: a shot names its knobs by label, so the state is *declared* rather than
-  replayed. What recipes still can't express is a state only reachable by clicking, dragging or typing — unless the
-  scene writes the interaction back into a knob (`set_slider` &co.), which a recipe then states.
-- [x] Renders the canvas alone, through the `render_canvas` the shell itself draws with, so a capture is the component's
-  own pixels — on either backend. The glow one is gallery's own `TestRenderer` over an EGL-device context, since
-  egui_kittest ships only a wgpu one.
-- [x] **Pixels, against a committed reference.** `egui_kittest`'s snapshot support (dify) compares a capture with
-  `tests/snapshots/*.png`; `UPDATE_SNAPSHOTS=1` rewrites one after an intended change and keeps the old beside it. It
-  only means anything because the tests pin llvmpipe from the pinned mesa (`nix/test.nix`) — on a GPU the same scene
-  antialiases differently and every developer would disagree with the reference.
 - [ ] Only this crate's own tests compare images; a consumer capturing their components wants the same thing. It needs a
   way to say so — `--capture --verify`, against references beside the recipe — and once it exists the differ moves from
   a dev-dependency to an optional feature, so only those who ask for it link it (and inherit its MPL-2.0 corner; see
   `deny.toml`).
-- [x] **A run's captures on one sheet.** A recipe's `sheet = "sheet.png"` packs them into a single captioned image
-  (`rectangle-pack`, over a search for a size worth looking at), so reviewing a set is one image rather than a
-  directory. That covers looking over what a run produced; reviewing a wall of *failures* is the separate problem below.
 - [ ] It scales to a handful of images, not hundreds. Past that, the shape that works is a persistent differ fed image
   pairs over a pipe (`odiff --server`) rather than a process per image, and an HTML report putting before/after/diff
   side by side — reviewing a wall of failures in a browser beats opening `*.diff.png` by hand. Worth porting when the
   reference count justifies it, not before.
 - [ ] Structural snapshots as the other target: serialize the scene's AccessKit tree / `Shape` list — jest-style,
   text-diffable in a PR, no GPU or antialiasing to pin at all. A `snapshot!` API would pick per use.
-- [x] Renders in CI, on a runner with no GPU: `nix/test.nix` puts mesa's EGL driver on the wrapper that runs the tests,
-  and `EGL_MESA_device_software` supplies a device that needs no DRM node. Verified locally by hiding `/dev/dri` in a
-  mount namespace — the capture still rendered.
 - [ ] The wgpu path has no equivalent pin, so only glow captures are reference-tested. Lavapipe via `VK_ICD_FILENAMES`
   would give wgpu a deterministic rasteriser too, if a wgpu-rendered reference is ever wanted.
 - [ ] Design a record-replay layer for pointer interactions, informed by jest snapshot ergonomics. Knob state no longer

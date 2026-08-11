@@ -1,14 +1,12 @@
 //! Every capture of a run on one image.
 //!
-//! The packing itself is `rectangle-pack`'s. What's here is the search for a sheet worth looking at,
+//! The packing itself is `binpack2d`'s. What's here is the search for a sheet worth looking at,
 //! and the drawing — which goes through egui, so a caption is set in the shell's own fonts
 //! and needs no rasteriser here.
 
-use std::{cmp::Reverse, collections::BTreeMap};
-
-use rectangle_pack::{
-    GroupedRectsToPlace, RectToInsert, TargetBin, contains_smallest_box, pack_rects,
-    volume_heuristic,
+use binpack2d::{
+    Dimension,
+    maxrects::{Heuristic, MaxRectsBin},
 };
 
 use crate::{
@@ -63,11 +61,25 @@ fn cell_size(panel: &Panel) -> Size {
 /// `None` if there are no panels, or if the packer takes none of the widths offered.
 pub(crate) fn pack(panels: &[Panel]) -> Option<Packed> {
     let cells: Vec<Size> = panels.iter().map(cell_size).collect();
-    widths(&cells)
-        .into_iter()
-        .filter_map(|width| shortest(&cells, width))
+    let widths = widths(&cells);
+    RULES
+        .iter()
+        .flat_map(|rule| widths.iter().map(move |width| (*rule, *width)))
+        .filter_map(|(rule, width)| shortest(&cells, width, rule))
         .min_by(|one, two| cost(one).total_cmp(&cost(two)))
 }
+
+/// Every rule the packer can seat a panel by.
+///
+/// None of them dominates — a rule that seats a tall panel well leaves a wide one stranded —
+/// and they are cheap enough to run all of and score after.
+const RULES: [Heuristic; 5] = [
+    Heuristic::BestShortSideFit,
+    Heuristic::BestLongSideFit,
+    Heuristic::BestAreaFit,
+    Heuristic::BottomLeftRule,
+    Heuristic::ContactPointRule,
+];
 
 /// The proportions a sheet gets read at, near enough: a screen.
 const TARGET: f64 = 16.0 / 10.0;
@@ -76,17 +88,30 @@ fn area(packed: &Packed) -> u64 {
     u64::from(packed.width) * u64::from(packed.height)
 }
 
-/// Smaller, and shaped like the thing it will be read on. Lower is better.
+/// Smaller, shaped like the thing it will be read on, and covered in panels. Lower is better.
 ///
 /// Area alone picks unreviewable extremes. A tall column and a long strip hold the same panels
 /// over much the same page, and both are area-optimal — yet either one, scaled to fit a screen,
 /// leaves every panel too small to read.
 ///
 /// Weighting the area by how far the sheet sits off a screen's proportions separates them.
-/// Every candidate holds the same panels, so the areas sit close together and the shape decides.
+/// That alone cannot see a hole, though: `area × (TARGET / ratio)` is `TARGET × height²`, so a sheet
+/// taller than a screen cancels its own width and the slack beside its panels is free.
+/// Dividing by the share its panels cover puts that cancelled side back.
 fn cost(packed: &Packed) -> f64 {
     let ratio = f64::from(packed.width) / f64::from(packed.height);
-    area(packed) as f64 * (ratio / TARGET).max(TARGET / ratio)
+    let shape = (ratio / TARGET).max(TARGET / ratio);
+    area(packed) as f64 * shape / covered(packed)
+}
+
+/// The share of the sheet its panels cover, from nothing to all of it.
+fn covered(packed: &Packed) -> f64 {
+    let panels: u64 = packed
+        .cells
+        .iter()
+        .map(|cell| u64::from(cell.width) * u64::from(cell.height))
+        .sum();
+    panels as f64 / area(packed) as f64
 }
 
 /// The shortest sheet of this width that still holds every cell.
@@ -94,18 +119,24 @@ fn cost(packed: &Packed) -> f64 {
 /// The height has to be squeezed rather than left generous: given room for a column the packer will
 /// lay one out and never reach across the width, and cropping that back would make every width come
 /// out the same sheet.
-fn shortest(cells: &[Size], width: u32) -> Option<Packed> {
+fn shortest(cells: &[Size], width: u32, rule: Heuristic) -> Option<Packed> {
     let mut short = cells.iter().map(|cell| cell.height).max()?;
     // A column always fits, so this is a height the search can close in on rather than test.
     let mut tall = cells.iter().map(|cell| cell.height).sum();
+    // The packer is greedy, so a height it packs is no promise that every taller one does too.
+    // Keeping the last that placed stops the search from dropping a width that demonstrably works.
+    let mut fits = None;
     while short < tall {
         let between = short + (tall - short) / 2;
-        match place(cells, width, between) {
-            Some(_) => tall = between,
+        match place(cells, width, between, rule) {
+            Some(placed) => {
+                fits = Some(placed);
+                tall = between;
+            }
             None => short = between + 1,
         }
     }
-    crop(place(cells, width, short)?)
+    crop(place(cells, width, short, rule).or(fits)?)
 }
 
 /// The widths worth packing into, since a sheet's width is always some run of panels side by side.
@@ -166,46 +197,36 @@ fn crop(cells: Vec<Cell>) -> Option<Packed> {
 
 /// Lay `cells` out on one `width` × `height` sheet, or `None` when they don't all fit.
 ///
-/// Two cells of a size are interchangeable to a packer, which may separate them in whatever order
-/// it happens to hold them. Sorting first makes that order ours rather than its, so the same panels
-/// land in the same places whatever the packer does inside.
-/// Reading back by our own ids then returns them in the caller's order.
-fn place(cells: &[Size], width: u32, height: u32) -> Option<Vec<Cell>> {
-    let mut order: Vec<usize> = (0..cells.len()).collect();
-    order.sort_by_key(|at| {
-        let cell = cells[*at];
-        (
-            Reverse(u64::from(cell.width) * u64::from(cell.height)),
-            Reverse(cell.height),
-            Reverse(cell.width),
-            *at,
-        )
-    });
+/// Each cell carries its place in `cells` as the id the packer hands back,
+/// so the placements return in the caller's order however it reordered them to seat them.
+fn place(cells: &[Size], width: u32, height: u32, rule: Heuristic) -> Option<Vec<Cell>> {
+    let wanted: Vec<Dimension> = cells
+        .iter()
+        .enumerate()
+        .map(|(at, cell)| {
+            Some(Dimension::with_id(
+                isize::try_from(at).ok()?,
+                i32::try_from(cell.width).ok()?,
+                i32::try_from(cell.height).ok()?,
+                0,
+            ))
+        })
+        .collect::<Option<_>>()?;
 
-    let mut wanted = GroupedRectsToPlace::<usize, ()>::new();
-    for (rank, at) in order.iter().enumerate() {
-        let cell = cells[*at];
-        wanted.push_rect(rank, None, RectToInsert::new(cell.width, cell.height, 1));
+    let mut sheet = MaxRectsBin::new(i32::try_from(width).ok()?, i32::try_from(height).ok()?);
+    let (placements, rejected) = sheet.insert_list(&wanted, rule);
+    if !rejected.is_empty() {
+        return None;
     }
-    let mut sheet = BTreeMap::new();
-    sheet.insert((), TargetBin::new(width, height, 1));
-    let packed = pack_rects(
-        &wanted,
-        &mut sheet,
-        &volume_heuristic,
-        &contains_smallest_box,
-    )
-    .ok()?;
 
-    let placements = packed.packed_locations();
     let mut placed = vec![None; cells.len()];
-    for (rank, at) in order.iter().enumerate() {
-        let (_, spot) = placements.get(&rank)?;
-        placed[*at] = Some(Cell {
-            x: spot.x(),
-            y: spot.y(),
-            width: spot.width(),
-            height: spot.height(),
+    for spot in placements {
+        let at = usize::try_from(spot.id()).ok()?;
+        *placed.get_mut(at)? = Some(Cell {
+            x: u32::try_from(spot.x()).ok()?,
+            y: u32::try_from(spot.y()).ok()?,
+            width: u32::try_from(spot.width()).ok()?,
+            height: u32::try_from(spot.height()).ok()?,
         });
     }
     placed.into_iter().collect()
@@ -327,35 +348,19 @@ mod tests {
         }
     }
 
-    /// How much of the sheet is panel rather than nothing, in percent.
-    fn covered(packed: &Packed) -> u64 {
-        let panels: u64 = packed
-            .cells
-            .iter()
-            .map(|c| u64::from(c.width) * u64::from(c.height))
-            .sum();
-        panels * 100 / (u64::from(packed.width) * u64::from(packed.height))
-    }
-
     #[test]
     fn a_mixed_capture_packs_densely_and_into_a_shape_that_can_be_looked_at() {
         // The demo's own capture. A single column of these is the smallest sheet by area,
         // and also two and a half screens tall — the shape has to count for something.
         let packed =
             pack(&panels(&[(640, 360), (640, 360), (480, 480), (480, 240)])).expect("panels pack");
+        let filled = covered(&packed) * 100.0;
+        let (width, height) = (packed.width, packed.height);
         assert!(
-            covered(&packed) >= 80,
-            "the sheet is {}% panels at {}×{}",
-            covered(&packed),
-            packed.width,
-            packed.height
+            filled >= 80.0,
+            "the sheet is {filled:.0}% panels at {width}×{height}"
         );
-        assert!(
-            packed.height < packed.width * 2,
-            "{}×{} is not a strip",
-            packed.width,
-            packed.height
-        );
+        assert!(height < width * 2, "{width}×{height} is not a strip");
     }
 
     /// A sheet's width over its height.
@@ -436,5 +441,30 @@ mod tests {
     #[test]
     fn nothing_to_pack_is_no_sheet() {
         assert!(pack(&[]).is_none());
+    }
+
+    #[test]
+    fn panels_of_spread_aspect_stack_instead_of_lining_up_in_one_row() {
+        // Reported: one shot of a scene at each of its breakpoints, so the panels run
+        // from a column two and a half times the height of the rest to a banner twice their width.
+        // All of them went into a single row: the shortest sheet there is, and a third of it empty.
+        let packed = pack(&panels(&[
+            (385, 1698),
+            (664, 918),
+            (964, 658),
+            (1164, 658),
+            (964, 605),
+        ]))
+        .expect("panels pack");
+        let (filled, ratio) = (covered(&packed) * 100.0, ratio(&packed));
+        let (width, height) = (packed.width, packed.height);
+        assert!(
+            filled >= 80.0,
+            "the sheet is {filled:.0}% panels at {width}×{height}"
+        );
+        assert!(
+            (0.8..=2.6).contains(&ratio),
+            "{width}×{height} is {ratio:.2}:1, near enough a screen to review"
+        );
     }
 }

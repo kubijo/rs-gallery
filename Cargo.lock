@@ -479,6 +479,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "binpack2d"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c3793db1a9ea79234eac9513713a00ca32751417046d92db5320f0b2574394f"
+
+[[package]]
 name = "bit-set"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1441,6 +1447,7 @@ version = "0.1.0"
 dependencies = [
  "anstream",
  "anstyle",
+ "binpack2d",
  "camino",
  "clap",
  "convert_case",
@@ -1459,7 +1466,6 @@ dependencies = [
  "lyon",
  "percent-encoding",
  "process-wrap",
- "rectangle-pack",
  "regex",
  "semver",
  "serde",
@@ -3119,12 +3125,6 @@ dependencies = [
  "font-types",
  "once_cell",
 ]
-
-[[package]]
-name = "rectangle-pack"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0d463f2884048e7153449a55166f91028d5b0ea53c79377099ce4e8cf0cf9bb"
 
 [[package]]
 name = "redox_syscall"

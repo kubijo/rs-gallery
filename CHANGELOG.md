@@ -5,6 +5,16 @@ so a minor release may carry a breaking change.
 
 ## 2026-08-11
 
+- **Sheets pack denser, on `binpack2d` rather than `rectangle-pack`.** A capture whose panels' aspects spread wide — a
+  narrow column two and a half times the height of the rest, beside a banner twice their width — put every panel in one
+  row and left a third of the page empty. That is the shortest sheet there is, since nothing stands taller than the
+  tallest panel, and the score had no reason to look further: weighting area by how far the sheet sits off a screen's
+  proportions cancels, because `area × (TARGET / ratio)` is `TARGET × height²`, so a tall sheet's width and all the
+  slack along it came free. Reaching a better arrangement took more than scoring, though — rectangle-pack splits free
+  space guillotine-style and never puts it back together, so a hole wide enough for a panel stops being one. The score
+  divides by the share its panels cover now, and MaxRects keeps whole free rectangles to seat them in, every placement
+  rule it offers tried and scored. The capture above packs to 84% on a sheet 876 px narrower.
+  `tests/snapshots/sheet.png` is repacked to match.
 - **egui 0.36.** `egui`, `eframe`, `egui_extras` and `egui_kittest` move together to 0.36.1, and a host has to move with
   them: only one egui is ever linked, so gallery's and the host's must be the same one. The MSRV is 1.95 now. Nothing in
   the shell changed shape — the reference images match what 0.35 rendered, byte for byte.
