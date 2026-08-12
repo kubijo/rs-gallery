@@ -49,6 +49,27 @@ knobs = { x = 0.6, y = -0.4, tint = "#7FD4A0", bold = true }
 name = "badge"
 scene = "badge"
 
+# Not egui content: the drawing is a wgpu paint callback, which a capture runs exactly
+# as a window does — the knobs land in the shader's uniform buffer either way.
+[[shot]]
+name = "wgpu-gradient"
+scene = "wgpu::gradient"
+knobs = { bias = 1.6 }
+
+# The same solid twice. Without a depth buffer the far faces land on the near ones, since
+# egui's render pass has none to lend; with one the callback renders in a pass of its own.
+[[shot]]
+name = "wgpu-depth-off"
+scene = "wgpu::depth"
+size = "320x280"
+knobs = { "depth buffer" = false }
+
+[[shot]]
+name = "wgpu-depth-on"
+scene = "wgpu::depth"
+size = "320x280"
+knobs = { "depth buffer" = true }
+
 [[shot]]
 name = "orbit-mid-spin"
 scene = "orbit"

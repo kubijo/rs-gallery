@@ -431,7 +431,11 @@ pub(crate) fn open<A: eframe::App + 'static>(
     let (painter, builder) = match session {
         #[cfg(not(target_vendor = "apple"))]
         Session::Glow(capture) => (Some(capture.painter()), builder.renderer(capture.clone())),
-        Session::Wgpu => (None, builder),
+        // Eager, unlike the default lazy renderer, which builds its wgpu state on the first
+        // `render()` — by which time the app has been drawing for frames. Built up front,
+        // the state reaches the `CreationContext`, so `SceneCtx::render_state` is `Some`
+        // here exactly as it is in a window. Same render options either way.
+        Session::Wgpu => (None, builder.wgpu()),
     };
     Ok(builder.build_eframe(|cc| {
         install_context(cc, setup);
@@ -481,14 +485,25 @@ fn draw(
     shot: &Shot,
     size: egui::Vec2,
 ) -> Result<SceneFrame, Diagnostic> {
-    let mut harness = open(size, session, setup, |cc, painter| Canvas {
-        scene,
-        knobs: Vec::new(),
-        gl: cc.gl.clone(),
-        loader: cc.get_proc_address.clone(),
-        painter,
-        targets: Vec::new(),
-        wanted: egui::Vec2::ZERO,
+    let wgpu_session = matches!(session, Session::Wgpu);
+    let mut harness = open(size, session, setup, |cc, painter| {
+        let wgpu = cc.wgpu_render_state.clone();
+        // Loudly, because the quiet alternative is worse: a capture without the render state
+        // still writes a PNG, minus every paint callback the window would have drawn.
+        assert!(
+            !wgpu_session || wgpu.is_some(),
+            "the wgpu harness left no render state on the CreationContext"
+        );
+        Canvas {
+            scene,
+            knobs: Vec::new(),
+            gl: cc.gl.clone(),
+            loader: cc.get_proc_address.clone(),
+            painter,
+            targets: Vec::new(),
+            wgpu,
+            wanted: egui::Vec2::ZERO,
+        }
     })?;
     let frames = settle(&mut harness, shot)?;
     Ok(SceneFrame { harness, frames })
@@ -666,6 +681,9 @@ struct Canvas {
     loader: Option<GlLoader>,
     painter: Option<GlPainter>,
     targets: Vec<RenderTarget>,
+    /// `Some` only under a wgpu capture — [`SceneCtx::render_state`](crate::SceneCtx::render_state),
+    /// as the window's `Frame` carries it.
+    wgpu: Option<eframe::egui_wgpu::RenderState>,
     /// What the last frame's canvas came to — the size a shot has to be at least as big as.
     wanted: egui::Vec2,
 }
@@ -680,6 +698,7 @@ impl eframe::App for Canvas {
             loader,
             painter,
             targets,
+            wgpu,
             wanted,
         } = self;
         let gl_deps = match (loader.clone(), gl.as_deref(), painter.as_ref()) {
@@ -697,7 +716,7 @@ impl eframe::App for Canvas {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(PANEL_BG))
             .show(ui, |ui| {
-                *wanted = render_canvas(ui, scene, knobs, gl_deps);
+                *wanted = render_canvas(ui, scene, knobs, gl_deps, wgpu.clone());
             });
     }
 }
@@ -3120,6 +3139,168 @@ mod tests {
             cropped.get_pixel(0, 0),
             whole.get_pixel(0, 0),
             "the crop keeps the origin, so the drawing itself is untouched"
+        );
+    }
+
+    /// A wgpu paint callback is scene content egui's shapes never carry, so a shot has to be
+    /// checked against it twice over: the harness must hand the render state to the scene —
+    /// without it a capture still writes a clean PNG, minus everything the window would have
+    /// drawn through wgpu — and the trim must keep the whole rect the callback drew into.
+    /// The last row is where a short trim would show, the callback being the only thing on it.
+    ///
+    /// The template's gradient scene is the subject: its end colours reach the shader only
+    /// through the uniform buffer its callback uploads.
+    /// Finding them in the pixels is evidence the uniforms arrived, not that a pipeline ran.
+    /// Shoot one of the template's wgpu scenes and read the PNG back.
+    ///
+    /// Through [`Linked`](crate::Linked), which reads the test binary's inventory —
+    /// `scaffold_scenes` has filled it with the scenes a scaffold ships.
+    fn wgpu_shot(scene: &str, size: egui::Vec2, knobs: &[(&str, &str)]) -> image::RgbaImage {
+        use crate::SceneSource as _;
+
+        let out = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-wgpu")
+            .join(format!("{}.png", slug(scene)));
+        let capture = Capture {
+            shots: vec![Shot {
+                scene: scene.to_owned(),
+                out: Some(out.clone()),
+                size,
+                knobs: knobs
+                    .iter()
+                    .map(|(key, value)| KnobOverride {
+                        key: (*key).to_owned(),
+                        value: (*value).to_owned(),
+                    })
+                    .collect(),
+                frames: None,
+                trim: true,
+                settle: false,
+                list: false,
+                template: false,
+            }],
+            sheet: None,
+            report: None,
+        };
+        render(
+            &crate::Linked.manifest(),
+            Renderer::Wgpu,
+            &|_: &egui::Context| {},
+            &capture,
+        )
+        .expect("the shot renders");
+
+        let png = std::fs::read(&out).expect("the capture was written");
+        image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("a PNG")
+            .to_rgba8()
+    }
+
+    #[test]
+    fn a_wgpu_paint_callback_lands_in_a_trimmed_capture() {
+        let asked = egui::vec2(640.0, 360.0);
+        let image = wgpu_shot("wgpu::gradient", asked, &[]);
+        // Down the middle, where the ramp runs.
+        let column = |y: u32| image.get_pixel(image.width() / 2, y).0;
+        let near = |pixel: [u8; 4], color: egui::Color32| {
+            pixel
+                .iter()
+                .zip(color.to_array())
+                .all(|(drawn, wanted)| drawn.abs_diff(wanted) <= 2)
+        };
+        // A pixel samples the middle of its row, so the first and last are a fraction
+        // of the ramp short of the colours the ends themselves hold.
+        let (first, last) = (column(0), column(image.height() - 1));
+        assert!(
+            near(first, crate::scaffold_scenes::wgpu::TOP),
+            "the ramp starts from the top knob's colour at the first row: {first:?}"
+        );
+        assert!(
+            near(last, crate::scaffold_scenes::wgpu::BOTTOM),
+            "and reaches the bottom knob's at the last, so the trim cut nothing off it: {last:?}"
+        );
+        // The green channel spans 173 down to 43 between the two, so it reads the ramp
+        // more finely than the eye does.
+        let greens: Vec<u8> = (0..image.height()).map(|y| column(y)[1]).collect();
+        assert!(
+            greens.windows(2).all(|pair| pair[0] >= pair[1]),
+            "one ramp top to bottom, never doubling back"
+        );
+        // The two ends of a band gradient sit flat; these have moved a fifth of the way.
+        let fifth = image.height() / 5;
+        assert!(
+            greens[0] - greens[fifth as usize] > 10
+                && greens[(image.height() - 1 - fifth) as usize] - greens[greens.len() - 1] > 10,
+            "and it is under way at both ends rather than flat there: {greens:?}"
+        );
+    }
+
+    /// egui fills one half of a rect and a shader returns the same colour for the other.
+    /// A step between them means shader-drawn content cannot sit beside egui-drawn content
+    /// without a seam — and a backdrop behind a component is exactly that arrangement.
+    ///
+    /// Read as the run of that colour across the middle row: it has to reach past the join,
+    /// and hold one value the whole way.
+    #[test]
+    fn a_shader_fill_and_an_egui_fill_of_one_colour_meet_without_a_seam() {
+        let tint = "#6C9CD8";
+        let image = wgpu_shot("wgpu::colour", egui::vec2(400.0, 200.0), &[("tint", tint)]);
+        let filled = egui::Color32::from_hex(tint)
+            .expect("a hex colour")
+            .to_array();
+
+        let middle = image.height() / 2;
+        let across: Vec<[u8; 4]> = (0..image.width())
+            .map(|x| image.get_pixel(x, middle).0)
+            .collect();
+        let first = across
+            .iter()
+            .position(|drawn| *drawn == filled)
+            .expect("the fill crosses the middle row");
+        let last = across
+            .iter()
+            .rposition(|drawn| *drawn == filled)
+            .expect("the fill crosses the middle row");
+        let join = across.len() / 2;
+        assert!(
+            first < join && last > join,
+            "the fill runs {first}..={last}, which does not reach both sides of the join at {join}"
+        );
+        assert!(
+            across[first..=last].iter().all(|drawn| *drawn == filled),
+            "and holds one value the whole way: {:?}",
+            &across[first..=last]
+        );
+    }
+
+    /// egui's render pass carries no depth attachment, so a solid drawn straight into it
+    /// is sorted by submission order alone and its far faces land on the near ones.
+    /// A callback bringing its own pass and depth buffer sorts them — the scene has both,
+    /// behind a toggle.
+    ///
+    /// Counted in distinct colours: the sorted cube shows the three faces turned towards
+    /// the viewer, the unsorted one shows whichever were drawn last as well.
+    /// The depth run is also what says the offscreen pass ran headlessly at all,
+    /// since it goes through an encoder and a texture nothing else here touches.
+    #[test]
+    fn a_depth_buffer_the_callback_brings_sorts_what_the_egui_pass_cannot() {
+        let cube = |depth| {
+            let shot = wgpu_shot(
+                "wgpu::depth",
+                egui::vec2(320.0, 280.0),
+                &[("depth buffer", depth)],
+            );
+            shot.pixels()
+                .map(|pixel| pixel.0)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+        let (sorted, unsorted) = (cube("true"), cube("false"));
+        assert!(
+            sorted < unsorted,
+            "the depth buffer leaves fewer faces showing: {sorted} colours sorted, \
+             {unsorted} unsorted"
         );
     }
 

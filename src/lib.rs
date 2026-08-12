@@ -32,6 +32,10 @@ extern crate self as gallery;
 /// Re-exported so a host writes `gallery::eframe::Result` without depending on eframe,
 /// and so both sides link the same one. Bumping it is a breaking change here.
 pub use eframe;
+/// Likewise, for a scene drawing through a wgpu paint callback ([`SceneCtx::render_state`]).
+/// Through eframe rather than a dependency of gallery's own: egui-wgpu is version-locked
+/// to egui, and an instance declaring its own would drag a second egui in.
+pub use eframe::egui_wgpu;
 /// Likewise — and a scene reaches `egui::Color32` through the prelude, declaring none itself.
 pub use egui;
 /// Likewise, for a host installing asset loaders. The loaders are feature-gated and off here,
@@ -223,11 +227,13 @@ pub(crate) struct ShellState {
 /// a raw GL context needs to know `gl` is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Renderer {
-    /// egui's wgpu backend. Pure-egui scenes; [`SceneCtx::gl_loader`] is `None`.
+    /// egui's wgpu backend. [`SceneCtx::render_state`] is `Some`, so a scene can draw
+    /// through a wgpu paint callback; [`SceneCtx::gl_loader`] is `None`.
     Wgpu,
     /// egui's glow (OpenGL) backend. [`SceneCtx::gl_loader`] is `Some`,
     /// so a scene can render non-egui content — femtovg into an offscreen
-    /// FBO — and show it via [`SceneCtx::register_native_texture`].
+    /// FBO — and show it via [`SceneCtx::register_native_texture`];
+    /// [`SceneCtx::render_state`] is `None`.
     Glow,
 }
 
@@ -637,6 +643,8 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 } else if let (Some(scene), Some(key)) = (scene, &key) {
                     let store = self.state.knobs.entry(key.clone()).or_default();
                     let targets = self.state.targets.entry(key.clone()).or_default();
+                    // Cloned rather than borrowed: `GlDeps` below takes `frame` mutably.
+                    let wgpu = frame.wgpu_render_state().cloned();
                     let gl_deps = match (gl_loader.clone(), gl.as_deref()) {
                         (Some(loader), Some(gl)) => Some(GlDeps {
                             loader,
@@ -648,7 +656,8 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         }),
                         _ => None,
                     };
-                    let reported = collecting(|| _ = render_canvas(ui, scene, store, gl_deps));
+                    let reported =
+                        collecting(|| _ = render_canvas(ui, scene, store, gl_deps, wgpu));
                     self.state.actions.extend(key, reported);
                 }
             });
@@ -685,6 +694,7 @@ pub(crate) fn render_canvas(
     scene: &SceneEntry,
     store: &mut Vec<Knob>,
     gl_deps: Option<GlDeps<'_>>,
+    wgpu: Option<egui_wgpu::RenderState>,
 ) -> egui::Vec2 {
     egui::ScrollArea::both()
         .auto_shrink(false)
@@ -692,7 +702,7 @@ pub(crate) fn render_canvas(
             let declared = egui::Frame::new()
                 .inner_margin(egui::Margin::same(16))
                 .show(ui, |ui| {
-                    let mut ctx = SceneCtx::new(store, gl_deps);
+                    let mut ctx = SceneCtx::new(store, gl_deps, wgpu);
                     (scene.render)(&mut ctx, ui);
                     ctx.declared()
                 })
@@ -1087,13 +1097,6 @@ fn install_context(cc: &eframe::CreationContext<'_>, setup: impl FnOnce(&egui::C
     fonts::install(&cc.egui_ctx);
     cc.egui_ctx.all_styles_mut(apply_default_style);
     setup(&cc.egui_ctx);
-    // Surface format for wgpu paint-callback scenes — egui-wgpu won't hand it to them.
-    if let Some(rs) = cc.wgpu_render_state.as_ref() {
-        rs.renderer
-            .write()
-            .callback_resources
-            .insert(rs.target_format);
-    }
 }
 
 /// Overrides for a scripted run; an ordinary session sets none.
@@ -1541,4 +1544,7 @@ mod scaffold_scenes {
     mod notices;
     #[path = "padding.scene.rs"]
     mod padding;
+    // `pub(crate)` unlike its siblings, so its colour constants can be asserted on.
+    #[path = "wgpu.scene.rs"]
+    pub(crate) mod wgpu;
 }

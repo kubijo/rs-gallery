@@ -99,6 +99,19 @@ owns and shows inline. `ctx.offscreen_input(...)` shows it the same way and hand
 it — press, move, release and wheel, in the image's own pixels — so content with its own hit-testing is as live in the
 gallery as it is on the device.
 
+Under the wgpu renderer, `ctx.render_state()` hands the scene egui's own `RenderState` — the device, the queue, and the
+target format a render pipeline has to be built against. A scene builds its pipeline on first draw, caches it in the
+renderer's `callback_resources`, and draws through an `egui_wgpu::Callback` inside egui's render pass. The state reaches
+a headless capture as well as a window, so a shader-drawn scene renders the same pixels into a PNG as on screen. It is
+`None` under glow, where a scene falls back to ordinary egui drawing.
+
+[`wgpu.scene.rs`](template/wgpu.scene.rs) is a group of scenes over that: a gradient backdrop taking its colours through
+a uniform buffer, a shader measuring in device pixels (which a window and a capture do not agree on), a callback egui
+scissors inside a scrolling stage, an egui fill meeting a shader fill of the same colour, a clock-driven one that never
+settles, and a cube. The cube is where the inline route runs out — egui's render pass carries no depth attachment, so a
+solid drawn straight into it sorts by submission order — and its `depth buffer` knob switches to the route anything
+three-dimensional needs, a pass of the callback's own recorded in `prepare` and sampled back in `paint`.
+
 A renderer that cannot be pointed at a foreign framebuffer goes the other way round: draw into a texture of your own,
 register it once, and hand it to `ctx.texture_stage(ui, stage, StageTexture::new(id, size))` for the stage chrome with
 no copy. `.showing(..)` draws part of a loosely-allocated texture, which is how a content-sized stage settles its height
@@ -189,7 +202,8 @@ proportions. One capture writes no sheet and says so, a sheet of one image being
 Capture follows the renderer the instance configures. Under `Renderer::Glow` it paints through an OpenGL context taken
 off an EGL device — no window, no display server — so a scene drawing with `ctx.offscreen(...)` captures its real
 content. That needs an EGL driver present; without one the run stops and says so, rather than quietly producing a
-picture the window would never show.
+picture the window would never show. Under `Renderer::Wgpu` the capture carries the render state a window does, so a
+scene painting through a wgpu callback is captured rather than left out of the PNG.
 
 ## How it works
 
@@ -203,8 +217,8 @@ Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` 
 ## Status & roadmap
 
 Discovery, the tree, hot-reload, knobs — reading and writing them from the scene — source view, SVG icons and headless
-capture all work, on either renderer. Open: a wgpu-native offscreen path (glow has `ctx.offscreen`) and publishing to
-crates.io.
+capture all work, on either renderer. Open: a wgpu offscreen texture path (glow has `ctx.offscreen`; wgpu draws inline
+through `ctx.render_state`) and publishing to crates.io.
 
 ## License
 

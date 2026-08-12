@@ -7,7 +7,7 @@
 //! the host per scene, so they survive hot-reloads. Under the glow renderer it also exposes offscreen GL
 //! rendering (see [`SceneCtx::offscreen`]).
 
-use eframe::glow;
+use eframe::{egui_wgpu, glow};
 
 use crate::knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
 use crate::offscreen::{GlDeps, ImageInput, Offscreen, StageTexture};
@@ -30,6 +30,7 @@ pub struct SceneCtx<'a> {
     /// Counts this frame's `offscreen` calls, so each keeps its own render target.
     offscreens: usize,
     gl: Option<GlDeps<'a>>,
+    wgpu: Option<egui_wgpu::RenderState>,
 }
 
 /// A choice knob found by label: which option it sits on, and what it may sit on.
@@ -167,13 +168,18 @@ stage_from!(f32, f64, u16, i16, u32, i32, usize, isize);
 pub const PADDING: i8 = 16;
 
 impl<'a> SceneCtx<'a> {
-    pub(crate) fn new(knobs: &'a mut Vec<Knob>, gl: Option<GlDeps<'a>>) -> Self {
+    pub(crate) fn new(
+        knobs: &'a mut Vec<Knob>,
+        gl: Option<GlDeps<'a>>,
+        wgpu: Option<egui_wgpu::RenderState>,
+    ) -> Self {
         Self {
             knobs,
             cursor: 0,
             stages: 0,
             offscreens: 0,
             gl,
+            wgpu,
         }
     }
 
@@ -519,6 +525,25 @@ impl<'a> SceneCtx<'a> {
             });
         });
         shown
+    }
+
+    /// The wgpu render state — `Some` only under [`Renderer::Wgpu`](crate::Renderer::Wgpu),
+    /// so a scene met by `None` falls back to ordinary egui drawing.
+    /// In a window and in a headless capture alike,
+    /// so a scene drawing through wgpu renders the same pixels into both.
+    ///
+    /// What an [`egui_wgpu::Callback`] scene cannot reach otherwise: a render pipeline
+    /// is created against `target_format`, and the renderer keeps the built pipeline
+    /// in [`callback_resources`](egui_wgpu::Renderer::callback_resources),
+    /// where [`paint`](egui_wgpu::CallbackTrait::paint) looks it up.
+    ///
+    /// Do that insert from the scene, keyed by a type the scene declares. Entries are keyed
+    /// by `TypeId`, so insert and lookup then name one compilation unit's type — the dylib's,
+    /// which is also the only side a `--hot` rebuild replaces. Look the entry up on every
+    /// frame and build it when it is missing, and a swap costs at most one rebuild.
+    #[must_use]
+    pub fn render_state(&self) -> Option<egui_wgpu::RenderState> {
+        self.wgpu.clone()
     }
 
     /// The GL proc-address loader — `Some` only under [`Renderer::Glow`](crate::Renderer::Glow). Build a
@@ -942,7 +967,7 @@ mod tests {
     fn slider_declares_at_its_default_then_returns_the_stored_value() {
         let mut knobs = Vec::new();
         assert_eq!(
-            SceneCtx::new(&mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
+            SceneCtx::new(&mut knobs, None, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
             0.5
         );
         assert_eq!(knobs.len(), 1);
@@ -950,7 +975,7 @@ mod tests {
             *value = 0.8;
         }
         assert_eq!(
-            SceneCtx::new(&mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
+            SceneCtx::new(&mut knobs, None, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
             0.8
         );
         assert_eq!(knobs.len(), 1);
@@ -959,12 +984,12 @@ mod tests {
     #[test]
     fn a_knob_is_recreated_when_its_label_changes() {
         let mut knobs = Vec::new();
-        SceneCtx::new(&mut knobs, None).slider("a", 0.5, 0.0, 1.0, 0.1);
+        SceneCtx::new(&mut knobs, None, None).slider("a", 0.5, 0.0, 1.0, 0.1);
         if let Knob::Slider { value, .. } = &mut knobs[0] {
             *value = 0.9;
         }
         assert_eq!(
-            SceneCtx::new(&mut knobs, None).slider("b", 0.2, 0.0, 1.0, 0.1),
+            SceneCtx::new(&mut knobs, None, None).slider("b", 0.2, 0.0, 1.0, 0.1),
             0.2
         );
     }
@@ -972,7 +997,7 @@ mod tests {
     #[test]
     fn declared_counts_the_knobs_used_this_frame() {
         let mut knobs = Vec::new();
-        let mut ctx = SceneCtx::new(&mut knobs, None);
+        let mut ctx = SceneCtx::new(&mut knobs, None, None);
         ctx.slider("a", 0.0, 0.0, 1.0, 0.1);
         ctx.toggle("b", false);
         assert_eq!(ctx.declared(), 2);
@@ -982,7 +1007,7 @@ mod tests {
     fn select_clamps_an_out_of_range_default_to_the_last_option() {
         let mut knobs = Vec::new();
         assert_eq!(
-            SceneCtx::new(&mut knobs, None).select("s", &["x", "y"], 9),
+            SceneCtx::new(&mut knobs, None, None).select("s", &["x", "y"], 9),
             1
         );
     }
@@ -991,7 +1016,7 @@ mod tests {
     fn buttons_declares_a_select_knob_in_the_buttons_style() {
         let mut knobs = Vec::new();
         assert_eq!(
-            SceneCtx::new(&mut knobs, None).buttons("mode", &["a", "b", "c"], 1),
+            SceneCtx::new(&mut knobs, None, None).buttons("mode", &["a", "b", "c"], 1),
             1
         );
         assert!(matches!(
@@ -1007,12 +1032,12 @@ mod tests {
     #[test]
     fn changing_a_choice_style_at_the_same_label_recreates_the_knob() {
         let mut knobs = Vec::new();
-        SceneCtx::new(&mut knobs, None).radio("m", &["a", "b"], 0);
+        SceneCtx::new(&mut knobs, None, None).radio("m", &["a", "b"], 0);
         if let Knob::Select { value, .. } = &mut knobs[0] {
             *value = 1;
         }
         assert_eq!(
-            SceneCtx::new(&mut knobs, None).buttons("m", &["a", "b"], 0),
+            SceneCtx::new(&mut knobs, None, None).buttons("m", &["a", "b"], 0),
             0,
             "switching style at the same label drops the stored value"
         );
@@ -1022,7 +1047,7 @@ mod tests {
     fn every_knob_kind_takes_a_scene_write_and_reads_it_back() {
         let mut knobs = Vec::new();
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
             ctx.toggle("on", false);
             ctx.text("name", "before");
@@ -1031,7 +1056,7 @@ mod tests {
             ctx.pad2d("aim", Pad2DSpec::default());
         }
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             assert!(ctx.set_slider("amt", 0.75));
             assert!(ctx.set_toggle("on", true));
             assert!(ctx.set_text("name", "after"));
@@ -1039,7 +1064,7 @@ mod tests {
             assert!(ctx.set_select("gear", "d"));
             assert!(ctx.set_pad2d("aim", 0.25, -0.5));
         }
-        let mut ctx = SceneCtx::new(&mut knobs, None);
+        let mut ctx = SceneCtx::new(&mut knobs, None, None);
         assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.75);
         assert!(ctx.toggle("on", false));
         assert_eq!(ctx.text("name", "before"), "after");
@@ -1058,7 +1083,7 @@ mod tests {
     fn a_written_value_clamps_to_the_knob_and_snaps_to_its_step() {
         let mut knobs = Vec::new();
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             ctx.slider("amt", 0.5, 0.0, 1.0, 0.25);
             // A step the range is not a multiple of, so its last stop overshoots the end.
             ctx.slider("odd", 0.0, 0.0, 1.0, 0.6);
@@ -1066,7 +1091,7 @@ mod tests {
             ctx.pad2d("aim", Pad2DSpec::default());
         }
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             assert!(ctx.set_slider("amt", 7.0), "an overshoot still lands");
             assert_eq!(
                 ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
@@ -1078,7 +1103,7 @@ mod tests {
             assert!(ctx.set_select_index("gear", 9));
             assert!(ctx.set_pad2d("aim", 5.0, -5.0));
         }
-        let mut ctx = SceneCtx::new(&mut knobs, None);
+        let mut ctx = SceneCtx::new(&mut knobs, None, None);
         assert_eq!(
             ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
             0.5,
@@ -1105,12 +1130,12 @@ mod tests {
     fn a_select_write_takes_an_option_label_but_not_a_stranger() {
         let mut knobs = Vec::new();
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             ctx.select("gear", &["p", "d", "r"], 0);
             ctx.select("empty", &[], 0);
         }
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             assert!(ctx.set_select("gear", "r"));
             assert!(
                 !ctx.set_select("gear", "x"),
@@ -1122,7 +1147,7 @@ mod tests {
             );
         }
         assert_eq!(
-            SceneCtx::new(&mut knobs, None).select("gear", &["p", "d", "r"], 0),
+            SceneCtx::new(&mut knobs, None, None).select("gear", &["p", "d", "r"], 0),
             2,
             "the dropped writes left the landed one alone"
         );
@@ -1132,14 +1157,14 @@ mod tests {
     fn a_write_to_a_missing_knob_is_dropped_without_a_phantom() {
         let mut knobs = Vec::new();
         assert!(
-            !SceneCtx::new(&mut knobs, None).set_slider("amt", 1.0),
+            !SceneCtx::new(&mut knobs, None, None).set_slider("amt", 1.0),
             "nothing is declared yet on the first frame"
         );
         assert!(knobs.is_empty(), "a miss creates no control");
 
-        SceneCtx::new(&mut knobs, None).toggle("amt", false);
+        SceneCtx::new(&mut knobs, None, None).toggle("amt", false);
         assert!(
-            !SceneCtx::new(&mut knobs, None).set_slider("amt", 1.0),
+            !SceneCtx::new(&mut knobs, None, None).set_slider("amt", 1.0),
             "the label exists, but on another kind"
         );
         assert_eq!(knobs.len(), 1);
@@ -1149,17 +1174,17 @@ mod tests {
     fn a_non_finite_write_is_dropped_rather_than_stored() {
         let mut knobs = Vec::new();
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
             ctx.pad2d("aim", Pad2DSpec::default());
         }
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             assert!(!ctx.set_slider("amt", f32::NAN));
             assert!(!ctx.set_slider("amt", f32::INFINITY));
             assert!(!ctx.set_pad2d("aim", f32::NAN, 0.0));
         }
-        let mut ctx = SceneCtx::new(&mut knobs, None);
+        let mut ctx = SceneCtx::new(&mut knobs, None, None);
         assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.5);
         assert_eq!(
             ctx.pad2d("aim", Pad2DSpec::default()),
@@ -1170,9 +1195,9 @@ mod tests {
     #[test]
     fn a_write_lands_before_an_accessor_later_the_same_frame() {
         let mut knobs = Vec::new();
-        SceneCtx::new(&mut knobs, None).slider("amt", 0.5, 0.0, 1.0, 0.0);
+        SceneCtx::new(&mut knobs, None, None).slider("amt", 0.5, 0.0, 1.0, 0.0);
         // It holds last frame's slot, so a write before this frame's declaration finds it.
-        let mut ctx = SceneCtx::new(&mut knobs, None);
+        let mut ctx = SceneCtx::new(&mut knobs, None, None);
         assert!(ctx.set_slider("amt", 0.9));
         assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.9);
     }
@@ -1181,7 +1206,7 @@ mod tests {
     fn a_written_value_survives_exactly_as_long_as_its_knob_stays_declared() {
         let mut knobs = Vec::new();
         {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
             ctx.toggle("b", false);
             assert!(ctx.set_slider("a", 0.7));
@@ -1189,13 +1214,13 @@ mod tests {
         }
         // The scene stops declaring `b`; the shell truncates as `render_canvas` does.
         let declared = {
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
             ctx.declared()
         };
         knobs.truncate(declared);
 
-        let mut ctx = SceneCtx::new(&mut knobs, None);
+        let mut ctx = SceneCtx::new(&mut knobs, None, None);
         assert_eq!(
             ctx.slider("a", 0.1, 0.0, 1.0, 0.0),
             0.7,
@@ -1236,7 +1261,7 @@ mod tests {
     fn the_macro_accepts_every_stage_form() {
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             let mut drawn = 0;
 
             crate::stage!(ctx, ui, |ui| {
@@ -1295,7 +1320,7 @@ mod tests {
         let room = std::cell::Cell::new(0.0);
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             room.set(ui.available_height());
             let before = ui.min_rect().height();
             ctx.stage(
@@ -1331,7 +1356,7 @@ mod tests {
         let corners = std::cell::RefCell::new(Vec::new());
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             ui.horizontal_wrapped(|ui| {
                 for width in [60.0, 60.0, 60.0] {
                     ctx.stage(ui, Stage::Fixed(egui::vec2(width, 40.0)), |ui| {
@@ -1362,7 +1387,7 @@ mod tests {
         let corners = std::cell::RefCell::new(Vec::new());
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             corners.borrow_mut().clear();
             // Each a third of the pane, so once the checkerboard padding is counted
             // at most two fit beside each other and four need more than one row.
@@ -1404,7 +1429,7 @@ mod tests {
         let took = std::cell::RefCell::new(Vec::new());
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             took.borrow_mut().clear();
             for spec in [
                 StageSpec::from(Stage::Fixed(egui::vec2(80.0, 40.0))),
@@ -1436,7 +1461,7 @@ mod tests {
 
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             let shown = ctx.texture_stage(
                 ui,
                 Stage::Fit,
@@ -1464,7 +1489,7 @@ mod tests {
         let rows = std::cell::RefCell::new(Vec::new());
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             rows.borrow_mut().clear();
             let sizes = [egui::vec2(40.0, 30.0); 3];
             ctx.matrix(ui, &sizes, |ui, _| {
@@ -1488,7 +1513,7 @@ mod tests {
         let corners = std::cell::RefCell::new(Vec::new());
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let mut knobs = Vec::new();
-            let mut ctx = SceneCtx::new(&mut knobs, None);
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
             ui.horizontal_wrapped(|ui| {
                 for _ in 0..3 {
                     ctx.stage(ui, Stage::Fit, |ui| {
@@ -1518,7 +1543,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             egui::ScrollArea::both().show(ui, |ui| {
                 let mut knobs = Vec::new();
-                let mut ctx = SceneCtx::new(&mut knobs, None);
+                let mut ctx = SceneCtx::new(&mut knobs, None, None);
                 room.set(ui.available_height());
                 let before = ui.min_rect().height();
                 ctx.stage(ui, Stage::Fill.scrollable(), |ui| {
