@@ -243,7 +243,9 @@ pub(crate) fn compose(
 ) -> Result<image::RgbaImage, Diagnostic> {
     let packed = pack(&panels).ok_or_else(|| Diagnostic::new("these captures will not pack"))?;
     let size = egui::vec2(packed.width as f32, packed.height as f32);
-    let mut harness = open(size, session, setup, |cc, _| {
+    // One for one: the packer measured the panels in pixels, so the sheet lays out
+    // in as many points and each capture lands on it at the size it was taken.
+    let mut harness = open(size, 1.0, session, setup, |cc, _| {
         Sheet::new(&cc.egui_ctx, panels, packed)
     })?;
     harness.run_steps(1);

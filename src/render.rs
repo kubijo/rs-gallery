@@ -41,7 +41,12 @@ pub(crate) struct Shot {
     /// Where the PNG goes.
     /// `None` for a listing-only run.
     pub(crate) out: Option<Utf8PathBuf>,
+    /// The canvas to lay out on, in points.
     pub(crate) size: egui::Vec2,
+    /// Device pixels to the point, as a display's scale factor would set it.
+    /// The layout is unmoved — `size` is still points — so the PNG is the same
+    /// picture at `scale` times the pixels. [`DEFAULT_SCALE`] is one for one.
+    pub(crate) scale: f32,
     /// Knob key (exact label, else a case-insensitive regex)
     /// to the value it should take.
     pub(crate) knobs: Vec<KnobOverride>,
@@ -73,6 +78,26 @@ pub(crate) struct KnobOverride {
 /// The window's own inner size (see `run_with`),
 /// so a headless canvas defaults to a shape the shell already renders at.
 pub(crate) const DEFAULT_SIZE: egui::Vec2 = egui::vec2(1280.0, 720.0);
+
+/// One pixel to the point, so a shot's PNG comes out the size it asked to lay out at.
+pub(crate) const DEFAULT_SCALE: f32 = 1.0;
+
+/// The most a shot may magnify. Nothing needs more, and a stray `--scale 100` would
+/// otherwise ask the GPU for a texture in the tens of gigabytes before anything checked.
+const MAX_SCALE: f32 = 8.0;
+
+/// Refuse a scale that would not render.
+///
+/// # Errors
+/// For anything but a finite number above zero, up to [`MAX_SCALE`].
+pub(crate) fn check_scale(scale: f32) -> Result<(), String> {
+    if scale.is_finite() && scale > 0.0 && scale <= MAX_SCALE {
+        return Ok(());
+    }
+    Err(format!(
+        "`scale = {scale}` is not a magnification: it takes a number above 0, up to {MAX_SCALE}"
+    ))
+}
 
 /// Frames drawn before the capture.
 ///
@@ -199,6 +224,7 @@ pub(crate) fn render(
                     path: &file.path,
                     width: file.size.width,
                     height: file.size.height,
+                    scale: file.scale,
                     bytes: file.bytes,
                     settled: file.frames.motion == Motion::Settled,
                     frames: file.frames.drawn,
@@ -258,6 +284,8 @@ fn gather(
             width: image.width(),
             height: image.height(),
         },
+        // The panels land at the size they were taken, whatever scale took them.
+        scale: DEFAULT_SCALE,
         bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
         // A sheet is drawn once from images already taken; there is nothing for it to settle.
         frames: Frames {
@@ -271,6 +299,8 @@ fn gather(
 struct OutputFile {
     path: Utf8PathBuf,
     size: Size,
+    /// Device pixels to the point, which `size` is already multiplied by.
+    scale: f32,
     bytes: u64,
     frames: Frames,
 }
@@ -307,6 +337,9 @@ struct ShotReport<'a> {
     path: &'a Utf8Path,
     width: u32,
     height: u32,
+    /// Device pixels to the point, which `width` and `height` are already multiplied by.
+    /// Without it a shot taken at 2× reads as one laid out twice as large.
+    scale: f32,
     bytes: u64,
     /// `false` when a `settle` shot ran out of frames still animating —
     /// the image is a moment the frame count landed on, not one the scene chose.
@@ -409,7 +442,8 @@ fn rows(written: &[OutputFile]) -> Vec<String> {
 /// its offscreen texture on. `None` under wgpu, whose capture needs no GL context.
 pub(crate) type GlPainter = std::rc::Rc<std::cell::RefCell<egui_glow::Painter>>;
 
-/// A harness drawing `app` headlessly at `size`, on the renderer the consumer configured.
+/// A harness drawing `app` headlessly at `size` points, `scale` device pixels to the point,
+/// on the renderer the consumer configured.
 ///
 /// The renderer is set before the app is built: the harness runs `setup_eframe` first,
 /// and that is what leaves a GL context on the `CreationContext` the closure reads.
@@ -420,14 +454,14 @@ pub(crate) type GlPainter = std::rc::Rc<std::cell::RefCell<egui_glow::Painter>>;
 /// On a platform with no headless glow capture, when glow is what was configured.
 pub(crate) fn open<A: eframe::App + 'static>(
     size: egui::Vec2,
+    scale: f32,
     session: &Session,
     setup: &impl Fn(&egui::Context),
     app: impl FnOnce(&eframe::CreationContext<'_>, Option<GlPainter>) -> A,
 ) -> Result<egui_kittest::Harness<'static, A>, Diagnostic> {
     let builder = egui_kittest::Harness::builder()
         .with_size(size)
-        // Pinned, so the PNG's pixel dimensions are the requested size rather than a scaled one.
-        .with_pixels_per_point(1.0);
+        .with_pixels_per_point(scale);
     let (painter, builder) = match session {
         #[cfg(not(target_vendor = "apple"))]
         Session::Glow(capture) => (Some(capture.painter()), builder.renderer(capture.clone())),
@@ -486,7 +520,7 @@ fn draw(
     size: egui::Vec2,
 ) -> Result<SceneFrame, Diagnostic> {
     let wgpu_session = matches!(session, Session::Wgpu);
-    let mut harness = open(size, session, setup, |cc, painter| {
+    let mut harness = open(size, shot.scale, session, setup, |cc, painter| {
         let wgpu = cc.wgpu_render_state.clone();
         // Loudly, because the quiet alternative is worse: a capture without the render state
         // still writes a PNG, minus every paint callback the window would have drawn.
@@ -618,7 +652,7 @@ fn shoot(
     if shot.template {
         print!(
             "{}",
-            capture_template(&scene, &harness.state().knobs, shot.size)
+            capture_template(&scene, &harness.state().knobs, shot.size, shot.scale)
         );
     }
     if let Some(out) = &shot.out {
@@ -626,7 +660,11 @@ fn shoot(
         let image = harness
             .render()
             .map_err(|reason| format!("render `{}`: {reason}", scene.name))?;
-        let image = if shot.trim { trim(image, drawn) } else { image };
+        let image = if shot.trim {
+            trim(image, drawn, shot.scale)
+        } else {
+            image
+        };
         write_png(&image, out)?;
         let written = OutputFile {
             path: landed(out),
@@ -634,6 +672,7 @@ fn shoot(
                 width: image.width(),
                 height: image.height(),
             },
+            scale: shot.scale,
             bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
             frames,
         };
@@ -651,13 +690,15 @@ struct ShotOutput {
 /// Crop the background a roomy `size` leaves around the canvas.
 ///
 /// The size stays as asked — `Fill` stages and any breakpoint lay out against it —
-/// so only the image is cut. [`open`] pins the scale, so a point is a pixel.
+/// so only the image is cut. `drawn` is what the canvas came to in points,
+/// which `scale` turns into the pixels the crop is measured in.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "a canvas is a few thousand non-negative pixels at most"
 )]
-fn trim(image: image::RgbaImage, drawn: egui::Vec2) -> image::RgbaImage {
+fn trim(image: image::RgbaImage, drawn: egui::Vec2, scale: f32) -> image::RgbaImage {
+    let drawn = drawn * scale;
     let width = (drawn.x.ceil() as u32).clamp(1, image.width());
     let height = (drawn.y.ceil() as u32).clamp(1, image.height());
     if (width, height) == image.dimensions() {
@@ -990,6 +1031,9 @@ struct Recipe {
     out: Option<Utf8PathBuf>,
     /// Canvas size for any shot that doesn't state its own.
     size: Option<String>,
+    /// Device pixels to the point for any shot that doesn't state its own.
+    /// One for one unless asked otherwise.
+    scale: Option<f32>,
     /// Gather every shot onto one image here, alongside their own PNGs.
     /// Off unless asked for.
     sheet: Option<Utf8PathBuf>,
@@ -1012,6 +1056,7 @@ struct RecipeShot {
     name: String,
     scene: String,
     size: Option<String>,
+    scale: Option<f32>,
     frames: Option<u32>,
     trim: Option<bool>,
     settle: Option<bool>,
@@ -1066,10 +1111,13 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                 )
             })?;
             check_frames(shot.frames).map_err(|e| format!("shot `{}`: {e}", shot.name))?;
+            let scale = shot.scale.or(recipe.scale).unwrap_or(DEFAULT_SCALE);
+            check_scale(scale).map_err(|e| format!("shot `{}`: {e}", shot.name))?;
             Ok(Shot {
                 scene: shot.scene.clone(),
                 out: Some(base.join(format!("{}.png", shot.name))),
                 size: parse_size(size).map_err(|e| format!("shot `{}`: {e}", shot.name))?,
+                scale,
                 knobs: shot
                     .knobs
                     .iter()
@@ -1122,15 +1170,23 @@ fn scalar(key: &str, value: &toml::Value) -> Result<String, String> {
 /// The generated file renders exactly what `--render` would,
 /// so the first edit is the state you were after — nothing has to be looked up.
 /// Labels arrive already quoted the way TOML needs them.
-fn capture_template(scene: &SceneEntry, knobs: &[Knob], size: egui::Vec2) -> String {
+fn capture_template(scene: &SceneEntry, knobs: &[Knob], size: egui::Vec2, scale: f32) -> String {
     let (width, height) = (size.x, size.y);
     let (name, key) = (slug(scene.name), scene_key(scene));
+    // Stated only when it was asked for, so the ordinary recipe carries no line
+    // about a magnification nobody wants — and a `--scale` run still generates
+    // what it just rendered.
+    let magnified = if scale == DEFAULT_SCALE {
+        String::new()
+    } else {
+        format!("scale = {scale}\n")
+    };
     let mut out = formatdoc! {r#"
         # Generated by `--init-capture`: every knob at the value its scene declared.
         # Renders what `--render` alone would — change a value and it renders something else.
         out = "renders"
         size = "{width}x{height}"
-        # Uncomment once there is a second shot: gathers them onto one captioned image.
+        {magnified}# Uncomment once there is a second shot: gathers them onto one captioned image.
         # sheet = "sheet.png"
 
         [[shot]]
@@ -1225,6 +1281,7 @@ mod tests {
                     width: 640,
                     height: 360,
                 },
+                scale: DEFAULT_SCALE,
                 bytes: 1,
                 frames: Frames {
                     drawn: 1,
@@ -1237,6 +1294,7 @@ mod tests {
                     width: 1280,
                     height: 720,
                 },
+                scale: DEFAULT_SCALE,
                 bytes: 1,
                 frames: Frames {
                     drawn: 1,
@@ -1555,6 +1613,7 @@ mod tests {
                 frames: None,
                 trim: true,
                 settle: false,
+                scale: DEFAULT_SCALE,
                 list: false,
                 template: false,
             }],
@@ -1667,6 +1726,7 @@ mod tests {
             frames: None,
             trim: true,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -1751,6 +1811,7 @@ mod tests {
                     frames: Some(6),
                     trim: true,
                     settle: false,
+                    scale: DEFAULT_SCALE,
                     list: false,
                     template: false,
                 }],
@@ -1808,6 +1869,7 @@ mod tests {
                 frames: Some(5),
                 trim: true,
                 settle: true,
+                scale: DEFAULT_SCALE,
                 list: false,
                 template: false,
             }],
@@ -1877,6 +1939,7 @@ mod tests {
             frames: None,
             trim: true,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -1945,6 +2008,7 @@ mod tests {
             frames: None,
             trim: true,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -2025,6 +2089,7 @@ mod tests {
             frames: Some(CAP),
             trim: true,
             settle,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -2175,6 +2240,7 @@ mod tests {
                 frames: None,
                 trim: true,
                 settle: false,
+                scale: DEFAULT_SCALE,
                 list: false,
                 template: false,
             }],
@@ -2264,6 +2330,7 @@ mod tests {
                 frames: None,
                 trim: true,
                 settle: false,
+                scale: DEFAULT_SCALE,
                 list: false,
                 template: false,
             }],
@@ -2354,6 +2421,7 @@ mod tests {
             frames: None,
             trim: true,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -2483,6 +2551,7 @@ mod tests {
             frames: None,
             trim: true,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -2526,6 +2595,7 @@ mod tests {
             frames: None,
             trim: true,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -2600,6 +2670,7 @@ mod tests {
             frames: None,
             trim: true,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -2654,6 +2725,7 @@ mod tests {
             frames: None,
             trim: true,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -2691,7 +2763,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            capture_template(&scene, &knobs, egui::vec2(480.0, 480.0)),
+            capture_template(&scene, &knobs, egui::vec2(480.0, 480.0), DEFAULT_SCALE),
             indoc! {r##"
                 # Generated by `--init-capture`: every knob at the value its scene declared.
                 # Renders what `--render` alone would — change a value and it renders something else.
@@ -2752,7 +2824,7 @@ mod tests {
                 invert_y: false,
             },
         ];
-        let generated = capture_template(&scene, &declared, egui::vec2(320.0, 200.0));
+        let generated = capture_template(&scene, &declared, egui::vec2(320.0, 200.0), 2.0);
 
         let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
             .expect("a UTF-8 temp dir")
@@ -2778,6 +2850,11 @@ mod tests {
                 Knob::Group { .. } => {}
             }
         }
+        assert_eq!(
+            shots[0].scale, 2.0,
+            "a run that magnified generates a recipe that magnifies, or it renders \
+             something other than what it was generated from"
+        );
         let mut unmatched: Vec<&KnobOverride> = shots[0].knobs.iter().collect();
         apply(&mut store, &shots[0].knobs, &mut unmatched)
             .expect("every generated key names its knob");
@@ -3053,6 +3130,7 @@ mod tests {
                 frames: None,
                 trim: true,
                 settle: false,
+                scale: DEFAULT_SCALE,
                 list: false,
                 template: false,
             }],
@@ -3097,6 +3175,7 @@ mod tests {
             frames: None,
             trim,
             settle: false,
+            scale: DEFAULT_SCALE,
             list: false,
             template: false,
         };
@@ -3142,31 +3221,30 @@ mod tests {
         );
     }
 
-    /// A wgpu paint callback is scene content egui's shapes never carry, so a shot has to be
-    /// checked against it twice over: the harness must hand the render state to the scene —
-    /// without it a capture still writes a clean PNG, minus everything the window would have
-    /// drawn through wgpu — and the trim must keep the whole rect the callback drew into.
-    /// The last row is where a short trim would show, the callback being the only thing on it.
-    ///
-    /// The template's gradient scene is the subject: its end colours reach the shader only
-    /// through the uniform buffer its callback uploads.
-    /// Finding them in the pixels is evidence the uniforms arrived, not that a pipeline ran.
     /// Shoot one of the template's wgpu scenes and read the PNG back.
     ///
     /// Through [`Linked`](crate::Linked), which reads the test binary's inventory —
     /// `scaffold_scenes` has filled it with the scenes a scaffold ships.
-    fn wgpu_shot(scene: &str, size: egui::Vec2, knobs: &[(&str, &str)]) -> image::RgbaImage {
+    /// The PNG is named for the scene and the scale, so two shots of one scene
+    /// do not overwrite each other before both have been read.
+    fn wgpu_shot(
+        scene: &str,
+        size: egui::Vec2,
+        scale: f32,
+        knobs: &[(&str, &str)],
+    ) -> image::RgbaImage {
         use crate::SceneSource as _;
 
         let out = Utf8PathBuf::from_path_buf(std::env::temp_dir())
             .expect("a UTF-8 temp dir")
             .join("gallery-wgpu")
-            .join(format!("{}.png", slug(scene)));
+            .join(format!("{}-at-{scale}.png", slug(scene)));
         let capture = Capture {
             shots: vec![Shot {
                 scene: scene.to_owned(),
                 out: Some(out.clone()),
                 size,
+                scale,
                 knobs: knobs
                     .iter()
                     .map(|(key, value)| KnobOverride {
@@ -3197,10 +3275,19 @@ mod tests {
             .to_rgba8()
     }
 
+    /// A wgpu paint callback is scene content egui's shapes never carry, so a shot has to be
+    /// checked against it twice over: the harness must hand the render state to the scene —
+    /// without it a capture still writes a clean PNG, minus everything the window would have
+    /// drawn through wgpu — and the trim must keep the whole rect the callback drew into.
+    /// The last row is where a short trim would show, the callback being the only thing on it.
+    ///
+    /// The template's gradient scene is the subject: its end colours reach the shader only
+    /// through the uniform buffer its callback uploads.
+    /// Finding them in the pixels is evidence the uniforms arrived, not that a pipeline ran.
     #[test]
     fn a_wgpu_paint_callback_lands_in_a_trimmed_capture() {
         let asked = egui::vec2(640.0, 360.0);
-        let image = wgpu_shot("wgpu::gradient", asked, &[]);
+        let image = wgpu_shot("wgpu::gradient", asked, DEFAULT_SCALE, &[]);
         // Down the middle, where the ramp runs.
         let column = |y: u32| image.get_pixel(image.width() / 2, y).0;
         let near = |pixel: [u8; 4], color: egui::Color32| {
@@ -3245,7 +3332,12 @@ mod tests {
     #[test]
     fn a_shader_fill_and_an_egui_fill_of_one_colour_meet_without_a_seam() {
         let tint = "#6C9CD8";
-        let image = wgpu_shot("wgpu::colour", egui::vec2(400.0, 200.0), &[("tint", tint)]);
+        let image = wgpu_shot(
+            "wgpu::colour",
+            egui::vec2(400.0, 200.0),
+            DEFAULT_SCALE,
+            &[("tint", tint)],
+        );
         let filled = egui::Color32::from_hex(tint)
             .expect("a hex colour")
             .to_array();
@@ -3289,6 +3381,7 @@ mod tests {
             let shot = wgpu_shot(
                 "wgpu::depth",
                 egui::vec2(320.0, 280.0),
+                DEFAULT_SCALE,
                 &[("depth buffer", depth)],
             );
             shot.pixels()
@@ -3301,6 +3394,55 @@ mod tests {
             sorted < unsorted,
             "the depth buffer leaves fewer faces showing: {sorted} colours sorted, \
              {unsorted} unsorted"
+        );
+    }
+
+    /// A window follows its display's scale factor while a capture takes the one it is given,
+    /// so the two draw the same scene at different pixel counts. `scale` is what lets a shot
+    /// say which, and this is the property it has to keep: a layout stated in points comes out
+    /// the same picture at that many times the pixels, while anything a shader measured
+    /// in device pixels is exactly where it was.
+    ///
+    /// The template's `device pixels` scene holds both halves — a stage sized in points,
+    /// and a ring of a fixed pixel radius drawn inside it.
+    /// Doubling the scale doubles the PNG and leaves the ring alone.
+    /// It also covers the trim, which counts in pixels off a canvas measured in points
+    /// and would crop to a quarter of the image if it took one for the other.
+    #[test]
+    fn a_scale_takes_the_same_layout_to_more_pixels_and_leaves_device_pixels_alone() {
+        let size = egui::vec2(400.0, 300.0);
+        let single = wgpu_shot("wgpu::device", size, 1.0, &[]);
+        let double = wgpu_shot("wgpu::device", size, 2.0, &[]);
+
+        // Each side is rounded up to a whole pixel, so a doubled one can land just off twice.
+        let doubled = |single: u32, double: u32| double.abs_diff(single * 2) <= 2;
+        assert!(
+            doubled(single.width(), double.width()) && doubled(single.height(), double.height()),
+            "{}×{} at 1× should come back about {}×{} at 2×, not {}×{}",
+            single.width(),
+            single.height(),
+            single.width() * 2,
+            single.height() * 2,
+            double.width(),
+            double.height()
+        );
+
+        // The ring is the only strongly blue thing drawn: the rules are a dimmed version of it,
+        // the checkerboard and the panel are grey, and the caption is grey text.
+        let ring_across = |image: &image::RgbaImage| {
+            let blue = |[r, _, b, _]: [u8; 4]| b > 180 && b.saturating_sub(r) > 60;
+            let lit: Vec<u32> = (0..image.width())
+                .filter(|x| (0..image.height()).any(|y| blue(image.get_pixel(*x, y).0)))
+                .collect();
+            let (first, last) = (lit.first().copied(), lit.last().copied());
+            last.zip(first).map(|(last, first)| last - first + 1)
+        };
+        let single_ring = ring_across(&single).expect("the ring is drawn at 1×");
+        let double_ring = ring_across(&double).expect("the ring is drawn at 2×");
+        assert!(
+            double_ring.abs_diff(single_ring) <= 4,
+            "the ring is stated in device pixels, so it spans {single_ring} at 1× and should \
+             span about as many at 2×, not {double_ring}"
         );
     }
 
@@ -3351,6 +3493,7 @@ mod tests {
                 frames: None,
                 trim: true,
                 settle: false,
+                scale: DEFAULT_SCALE,
                 list: false,
                 template: false,
             }],

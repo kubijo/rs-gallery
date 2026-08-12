@@ -149,12 +149,19 @@ A size is where the scene lays itself out, not a crop of the result. A scene tha
 for — a wide table, a tall list — is captured whole, at the size it turned out to need, rather than cut off at the edge
 the way the window would scroll it.
 
+A size is in points, the unit a window lays out in; `scale` says how many device pixels go to one of them, as a
+display's scale factor does. `--scale 2` is what a HiDPI screen shows: the same layout at four times the pixels. It
+matters for anything a scene measures in device pixels rather than points — a shader drawing a fixed-pixel feature holds
+its size while the rest of the picture grows — which is the one thing a window and a capture would otherwise silently
+disagree about.
+
 That uses the scene's default knobs, rarely the state worth seeing. Other states go in a capture recipe;
 `just capture-init <scene>` writes one with the knobs already filled in, and `just capture` renders every shot in it:
 
 ```toml
 out = "renders" # relative to this file; `just capture <file> <dir>` overrides it
-size = "640x360" # for any shot that doesn't state its own
+size = "640x360" # in points, for any shot that doesn't state its own
+scale = 2 # optional; device pixels to the point, one for one unless set
 sheet = "sheet.png" # optional; gathers the run onto one captioned image as well
 settle = true # optional; shoot each scene once it stops animating, `frames` being the most to draw
 report = "capture.json" # optional; what the run came to, for something other than a person to read

@@ -148,6 +148,8 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
     // `--frames` also drives a windowed profiling run, where any count is meaningful,
     // so it is checked here rather than by clap.
     render::check_frames(cli.frames).unwrap_or_else(|reason| fail(&reason.into()));
+    let scale = cli.scale.unwrap_or(render::DEFAULT_SCALE);
+    render::check_scale(scale).unwrap_or_else(|reason| fail(&reason.into()));
     Some(render::Capture {
         shots: vec![render::Shot {
             scene,
@@ -157,6 +159,7 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
                 .as_deref()
                 .map_or(Ok(render::DEFAULT_SIZE), render::parse_size)
                 .unwrap_or_else(|reason| fail(&reason.into())),
+            scale,
             knobs: Vec::new(),
             frames: cli.frames,
             trim: !cli.no_trim,
@@ -208,6 +211,11 @@ struct Cli {
     #[arg(long, value_name = "WxH")]
     size: Option<String>,
 
+    /// Device pixels to the point, as a display's scale factor would set it — the same
+    /// picture at that many times the pixels [default: 1]
+    #[arg(long, value_name = "N")]
+    scale: Option<f32>,
+
     /// Keep the whole canvas, rather than cropping the PNG to what the scene drew
     #[arg(long)]
     no_trim: bool,
@@ -221,7 +229,7 @@ struct Cli {
     init_capture: bool,
 
     /// Render every shot in a capture recipe (TOML, relative to the config) and exit
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["render", "scene", "list_knobs", "init_capture", "size", "no_trim"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["render", "scene", "list_knobs", "init_capture", "size", "scale", "no_trim"])]
     capture: Option<Utf8PathBuf>,
 
     /// Where --capture writes, overriding the recipe's own `out`

@@ -6,8 +6,12 @@
 
 # Where the PNGs go, relative to this file. `just capture <file> <dir>` overrides it.
 out = "renders"
-# The canvas each shot renders at, unless it says otherwise.
+# The canvas each shot renders at, unless it says otherwise. In points, as a window measures.
 size = "640x360"
+# Device pixels to the point, as a display's scale factor sets it — the same layout at that many
+# times the pixels. One for one unless set, here or on a shot. `scale = 2` is what a HiDPI screen
+# shows; anything a scene sizes in device pixels stays put while the rest of the picture grows.
+# scale = 2
 # Each PNG is cropped to what its scene drew; `trim = false` here or on a shot keeps the whole canvas.
 # Gather every shot onto one captioned image too. Drop the line to write only the shots themselves.
 sheet = "sheet.png"
