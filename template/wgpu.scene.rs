@@ -179,19 +179,34 @@ fn fs_main(in: Face) -> @location(0) vec4f {
 }
 ";
 
-/// Puts a rendered texture on screen, which is how anything drawn in a pass of its own
-/// reaches egui's.
-const BLIT: &str = r"
-@group(0) @binding(0) var rendered: texture_2d<f32>;
-@group(0) @binding(1) var taps: sampler;
-
-@fragment
-fn fs_main(in: Corner) -> @location(0) vec4f {
-    return textureSample(rendered, taps, in.uv);
-}
-";
-
 // --- What the scenes keep on the GPU ---
+
+/// Which pass a pipeline is built for. A colour format, a sample count and a depth attachment
+/// are all part of what a pipeline is, so the two passes are not interchangeable
+/// and a shader wanted in both places is compiled twice.
+#[derive(Clone, Copy)]
+enum Target {
+    /// egui's own render pass, reached through an [`egui_wgpu::Callback`].
+    Egui,
+    /// The target [`SceneCtx::render_pass`] hands over, which carries depth.
+    Scene,
+}
+
+impl Target {
+    fn colour(self, state: &egui_wgpu::RenderState) -> wgpu::TextureFormat {
+        match self {
+            Self::Egui => state.target_format,
+            Self::Scene => ScenePass::FORMAT,
+        }
+    }
+
+    fn samples(self) -> u32 {
+        match self {
+            Self::Egui => MSAA_SAMPLES,
+            Self::Scene => ScenePass::SAMPLES,
+        }
+    }
+}
 
 /// A fullscreen pipeline and the uniform buffer feeding it.
 struct Program {
@@ -202,9 +217,18 @@ struct Program {
 
 impl Program {
     /// `words` is how many `f32`s the shader's `Params` holds, which sizes the buffer.
-    fn new(state: &egui_wgpu::RenderState, label: &str, fragment: &str, words: usize) -> Self {
+    /// `target` is what it draws into — egui's own pass, or the one
+    /// [`SceneCtx::render_pass`] hands over, which agrees with it on nothing
+    /// and so needs a pipeline of its own.
+    fn new(
+        state: &egui_wgpu::RenderState,
+        label: &str,
+        fragment: &str,
+        words: usize,
+        target: Target,
+    ) -> Self {
         let module = module(state, label, &format!("{FULLSCREEN}{fragment}"));
-        let pipeline = fullscreen_pipeline(state, label, &module, None);
+        let pipeline = fullscreen_pipeline(state, label, &module, target, None);
         let uniforms = state.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: uniform_size(words),
@@ -233,81 +257,16 @@ impl Program {
     }
 }
 
-/// The cube's two ways of reaching the screen, and the target the second one needs.
+/// The cube's two ways of reaching the screen.
 struct Solid {
-    /// Straight into egui's render pass, which carries no depth attachment.
+    /// Straight into egui's render pass, which carries no depth attachment — so this one
+    /// is sorted by the order its faces were submitted and nothing else.
     inline: wgpu::RenderPipeline,
-    /// Into a pass of the scene's own, which does.
-    offscreen: wgpu::RenderPipeline,
-    blit: wgpu::RenderPipeline,
-    taps: wgpu::Sampler,
-    format: wgpu::TextureFormat,
+    /// Into the target [`SceneCtx::render_pass`] hands over, which has depth.
+    /// A separate pipeline because a depth attachment is part of what one is built against.
+    sorted: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bound: wgpu::BindGroup,
-    target: Option<Target>,
-}
-
-/// Where the offscreen pass draws: a colour texture the blit samples, and the depth buffer
-/// that is the whole point of having a pass at all. Kept until the rect asks for another size.
-struct Target {
-    size: [u32; 2],
-    color: wgpu::TextureView,
-    depth: wgpu::TextureView,
-    bound: wgpu::BindGroup,
-}
-
-impl Target {
-    fn new(device: &wgpu::Device, solid: &Solid, size: [u32; 2]) -> Self {
-        let extent = wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        };
-        let plane = |label, format, usage| {
-            device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: extent,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        };
-        let color = plane(
-            "cube colour",
-            solid.format,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
-        let depth = plane(
-            "cube depth",
-            wgpu::TextureFormat::Depth32Float,
-            wgpu::TextureUsages::RENDER_ATTACHMENT,
-        );
-        let bound = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cube blit"),
-            layout: &solid.blit.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&color),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&solid.taps),
-                },
-            ],
-        });
-        Self {
-            size,
-            color,
-            depth,
-            bound,
-        }
-    }
 }
 
 /// Every scene in this file, in one `callback_resources` entry.
@@ -317,6 +276,7 @@ struct Shaders {
     gradient: Program,
     pixels: Program,
     swatch: Program,
+    swatch_pass: Program,
     ripple: Program,
     solid: Solid,
 }
@@ -363,33 +323,19 @@ impl Shaders {
                 resource: uniforms.as_entire_binding(),
             }],
         });
-        let blit = module(state, "cube blit", &format!("{FULLSCREEN}{BLIT}"));
         Self {
-            gradient: Program::new(state, "gradient", GRADIENT, 9),
-            pixels: Program::new(state, "device pixels", PIXELS, 4),
-            swatch: Program::new(state, "swatch", SWATCH, 4),
-            ripple: Program::new(state, "ripple", RIPPLE, 4),
+            gradient: Program::new(state, "gradient", GRADIENT, 9, Target::Egui),
+            pixels: Program::new(state, "device pixels", PIXELS, 4, Target::Egui),
+            swatch: Program::new(state, "swatch", SWATCH, 4, Target::Egui),
+            // The same fill again for the other route, so `colour match` can show all three
+            // paths to a pixel side by side.
+            swatch_pass: Program::new(state, "swatch pass", SWATCH, 4, Target::Scene),
+            ripple: Program::new(state, "ripple", RIPPLE, 4, Target::Egui),
             solid: Solid {
-                inline: cube_pipeline(state, "cube inline", &cube, &pipelines, false),
-                offscreen: cube_pipeline(state, "cube offscreen", &cube, &pipelines, true),
-                // Blended, since the offscreen pass clears to nothing
-                // and only the cube is meant to land on the canvas.
-                blit: fullscreen_pipeline(
-                    state,
-                    "cube blit",
-                    &blit,
-                    Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                ),
-                taps: state.device.create_sampler(&wgpu::SamplerDescriptor {
-                    label: Some("cube blit"),
-                    mag_filter: wgpu::FilterMode::Nearest,
-                    min_filter: wgpu::FilterMode::Nearest,
-                    ..Default::default()
-                }),
-                format: state.target_format,
+                inline: cube_pipeline(state, "cube inline", &cube, &pipelines, Target::Egui),
+                sorted: cube_pipeline(state, "cube sorted", &cube, &pipelines, Target::Scene),
                 uniforms,
                 bound,
-                target: None,
             },
         }
     }
@@ -408,6 +354,7 @@ fn fullscreen_pipeline(
     state: &egui_wgpu::RenderState,
     label: &str,
     module: &wgpu::ShaderModule,
+    target: Target,
     blend: Option<wgpu::BlendState>,
 ) -> wgpu::RenderPipeline {
     state
@@ -423,14 +370,20 @@ fn fullscreen_pipeline(
                 buffers: &[],
             },
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            // A fullscreen fill covers every pixel once and sorts nothing, but gallery's pass
+            // carries depth and a pipeline is matched against all of it — so it still declares
+            // the state, just one that tests nothing.
+            depth_stencil: matches!(target, Target::Scene).then(|| ScenePass::depth_state(false)),
+            multisample: wgpu::MultisampleState {
+                count: target.samples(),
+                ..Default::default()
+            },
             fragment: Some(wgpu::FragmentState {
                 module,
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: state.target_format,
+                    format: target.colour(state),
                     blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -440,12 +393,14 @@ fn fullscreen_pipeline(
         })
 }
 
+/// The cube is built twice, once for each `target`: a colour format, a sample count and a depth
+/// attachment are all part of what a pipeline is, and the two passes agree on none of them.
 fn cube_pipeline(
     state: &egui_wgpu::RenderState,
     label: &str,
     module: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
-    depth: bool,
+    target: Target,
 ) -> wgpu::RenderPipeline {
     state
         .device
@@ -461,19 +416,17 @@ fn cube_pipeline(
             // Every face drawn, back ones included: culling them would hide the missing depth
             // buffer, a convex solid having nothing left to sort once its far side is gone.
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: depth.then(|| wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
+            // Sorted where there is a buffer to sort with, which is the whole comparison.
+            depth_stencil: matches!(target, Target::Scene).then(|| ScenePass::depth_state(true)),
+            multisample: wgpu::MultisampleState {
+                count: target.samples(),
+                ..Default::default()
+            },
             fragment: Some(wgpu::FragmentState {
                 module,
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(state.target_format.into())],
+                targets: &[Some(target.colour(state).into())],
             }),
             multiview_mask: None,
             cache: None,
@@ -533,77 +486,27 @@ impl CallbackTrait for Draw {
     }
 }
 
-/// One frame's draw of the cube, either way round.
+/// One frame's draw of the cube straight into egui's pass — the route with no depth to be had.
 struct Spin {
     turned: f32,
-    /// In points: [`prepare`](CallbackTrait::prepare) is told the size of the screen
-    /// but not of the rect, so a target sized to the rect
-    /// has to be measured before the callback goes out.
-    rect: egui::Rect,
-    depth: bool,
+    aspect: f32,
 }
 
 impl CallbackTrait for Spin {
     fn prepare(
         &self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
-        screen: &ScreenDescriptor,
-        encoder: &mut wgpu::CommandEncoder,
+        _screen: &ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let size = self.rect.size() * screen.pixels_per_point;
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a rect on a canvas is a few thousand non-negative pixels at most"
-        )]
-        let size = [size.x.round() as u32, size.y.round() as u32].map(|side| side.max(1));
-        let solid = &mut shaders_mut(resources).solid;
+        let solid = &shaders(resources).solid;
         queue.write_buffer(
             &solid.uniforms,
             0,
-            &uniform_bytes(&[self.turned, aspect(self.rect)]),
+            &uniform_bytes(&[self.turned, self.aspect]),
         );
-        if !self.depth {
-            return Vec::new();
-        }
-        if solid
-            .target
-            .as_ref()
-            .is_none_or(|target| target.size != size)
-        {
-            solid.target = Some(Target::new(device, solid, size));
-        }
-        let target = solid.target.as_ref().expect("just made if it was missing");
-        // Recorded on egui's own encoder, which submits it before the pass that paints below.
-        let mut pass = encoder
-            .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cube"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.color,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &target.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        // Cleared to the far plane, so the nearest face at each pixel wins.
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            })
-            .forget_lifetime();
-        pass.set_pipeline(&solid.offscreen);
-        pass.set_bind_group(0, &solid.bound, &[]);
-        pass.draw(0..36, 0..1);
         Vec::new()
     }
 
@@ -614,18 +517,9 @@ impl CallbackTrait for Spin {
         resources: &CallbackResources,
     ) {
         let solid = &shaders(resources).solid;
-        match solid.target.as_ref().filter(|_| self.depth) {
-            Some(target) => {
-                pass.set_pipeline(&solid.blit);
-                pass.set_bind_group(0, &target.bound, &[]);
-                pass.draw(0..3, 0..1);
-            }
-            None => {
-                pass.set_pipeline(&solid.inline);
-                pass.set_bind_group(0, &solid.bound, &[]);
-                pass.draw(0..36, 0..1);
-            }
-        }
+        pass.set_pipeline(&solid.inline);
+        pass.set_bind_group(0, &solid.bound, &[]);
+        pass.draw(0..36, 0..1);
     }
 }
 
@@ -635,10 +529,14 @@ fn shaders(resources: &CallbackResources) -> &Shaders {
         .expect("the scene builds these before it stages a callback")
 }
 
-fn shaders_mut(resources: &mut CallbackResources) -> &mut Shaders {
-    resources
-        .get_mut()
-        .expect("the scene builds these before it stages a callback")
+/// Take what a [`SceneCtx::render_pass`] draw needs out of `callback_resources` before the draw
+/// begins, so its closure holds no borrow of the renderer.
+/// Every wgpu handle is a refcount, so cloning one out costs nothing.
+///
+/// A callback needs none of this — it is handed the resources — but a pass of the scene's own
+/// runs from the scene body, where the context is already borrowed for the drawing.
+fn lifted<T>(state: &egui_wgpu::RenderState, pick: impl FnOnce(&Shaders) -> T) -> T {
+    pick(shaders(&state.renderer.read().callback_resources))
 }
 
 /// Whether this file's GPU half is in the renderer and a callback can be staged.
@@ -778,27 +676,58 @@ fn clipped(ctx: &mut SceneCtx, ui: &mut Ui) {
     );
 }
 
-/// The same colour twice: egui fills the left half, the shader returns it on the right.
-/// A seam down the middle is the two paths disagreeing about colour space — which matters
-/// the moment shader-drawn content has to sit behind or beside anything egui drew.
+/// The same colour by all three routes to a pixel, flush against each other:
+/// egui fills the left, a callback into egui's own pass fills the middle,
+/// and a pass into gallery's target fills the right. A seam is a route disagreeing about
+/// colour space, which matters the moment shader-drawn content has to sit behind
+/// or beside anything egui drew.
+///
+/// The right band is the one to watch. It goes into a texture and is sampled back out,
+/// so its colour rounds to eight bits twice over and can land a step off the other two.
 #[scene("colour match")]
 fn colour_match(ctx: &mut SceneCtx, ui: &mut Ui) {
+    const BAND: u32 = 90;
+
     let tint = ctx.color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
     if !ready(ctx, ui) {
         return;
     }
+    let Some(state) = ctx.render_state() else {
+        return;
+    };
+    let (pipeline, bound, uniforms) = lifted(&state, |shaders| {
+        let program = &shaders.swatch_pass;
+        (
+            program.pipeline.clone(),
+            program.bound.clone(),
+            program.uniforms.clone(),
+        )
+    });
 
-    stage!(ctx, ui, (260, 120), |ui| {
-        let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
-        let (egui_half, shader_half) = rect.split_left_right_at_fraction(0.5);
-        ui.painter().rect_filled(egui_half, 0, tint);
+    ui.horizontal(|ui| {
+        // No spacing, so the three meet with nothing between them to hide a step.
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let band = egui::vec2(BAND as f32, BAND as f32);
+        let (painted, _) = ui.allocate_exact_size(band, egui::Sense::hover());
+        ui.painter().rect_filled(painted, 0, tint);
+
+        let (called, _) = ui.allocate_exact_size(band, egui::Sense::hover());
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-            shader_half,
+            called,
             Draw {
                 program: |shaders| &shaders.swatch,
                 uniforms: uniform_bytes(&channels(tint)),
             },
         ));
+
+        let filled = uniform_bytes(&channels(tint));
+        ctx.render_pass(ui, [BAND, BAND], |target| {
+            target.queue().write_buffer(&uniforms, 0, &filled);
+            let pass = target.pass();
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bound, &[]);
+            pass.draw(0..3, 0..1);
+        });
     });
 }
 
@@ -830,30 +759,70 @@ fn animated(ctx: &mut SceneCtx, ui: &mut Ui) {
     ui.ctx().request_repaint();
 }
 
-/// Where an inline callback runs out: egui's render pass carries no depth attachment.
-/// A solid drawn straight into it is sorted by nothing but the order its faces were submitted,
-/// so the far side of the cube lands on top of the near one.
+/// The same cube twice, by the two routes wgpu content can take.
 ///
-/// Turning `depth buffer` on takes the other route, the one anything three-dimensional ends up
-/// on: the callback records a pass of its own in `prepare`, with a colour texture and a depth
-/// buffer it owns, and `paint` puts the result on screen as a sampled texture.
+/// On the left, an inline callback: egui's render pass carries no depth attachment,
+/// so the solid is sorted by nothing but the order its faces were submitted
+/// and its far side lands on top of the near one.
+/// On the right, [`SceneCtx::render_pass`]: gallery hands over a target with a depth buffer,
+/// and the same shader comes out a cube.
+///
+/// The scene keeps no texture, no depth buffer and no resize rule of its own — only the second
+/// pipeline, since a depth attachment is part of what a pipeline is built against.
 #[scene("depth")]
 fn depth(ctx: &mut SceneCtx, ui: &mut Ui) {
     let turned = ctx.slider("turned", 0.6, 0.0, std::f32::consts::TAU, 0.01);
-    let depth = ctx.toggle("depth buffer", true);
+    // Both sides take it, so the two stay comparable — and gallery's target is reallocated
+    // to follow, which is the half of it a fixed size would never ask for.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a slider bounded well inside a pixel count"
+    )]
+    let side = ctx.slider("side", 200.0, 80.0, 260.0, 10.0) as u32;
     if !ready(ctx, ui) {
         return;
     }
+    let Some(state) = ctx.render_state() else {
+        return;
+    };
 
-    stage!(ctx, ui, (260, 200), |ui| {
-        let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
-        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-            rect,
-            Spin {
-                turned,
-                rect,
-                depth,
-            },
-        ));
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label("egui's pass — no depth");
+            stage!(ctx, ui, (side, side), |ui| {
+                let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+                ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                    rect,
+                    Spin {
+                        turned,
+                        aspect: aspect(rect),
+                    },
+                ));
+            });
+        });
+        ui.vertical(|ui| {
+            ui.label("a pass of the scene's own");
+            let (pipeline, bound, uniforms) = lifted(&state, |shaders| {
+                let solid = &shaders.solid;
+                (
+                    solid.sorted.clone(),
+                    solid.bound.clone(),
+                    solid.uniforms.clone(),
+                )
+            });
+            ctx.render_pass_stage(ui, Stage::Fit, [side, side], |target| {
+                // Off the target rather than off `side`, so the cube stays square
+                // whatever shape the target is asked for.
+                let [wide, high] = target.size().map(|side| side as f32);
+                target
+                    .queue()
+                    .write_buffer(&uniforms, 0, &uniform_bytes(&[turned, wide / high]));
+                let pass = target.pass();
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bound, &[]);
+                pass.draw(0..36, 0..1);
+            });
+        });
     });
 }

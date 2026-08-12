@@ -11,6 +11,7 @@ use eframe::{egui_wgpu, glow};
 
 use crate::knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
 use crate::offscreen::{GlDeps, ImageInput, Offscreen, StageTexture};
+use crate::pass::{ScenePass, WgpuDeps};
 
 /// What a scene receives each frame alongside its [`Ui`](egui::Ui): the knob accessors,
 /// and the methods that draw. Those take the `Ui` to draw into rather than holding one,
@@ -30,7 +31,7 @@ pub struct SceneCtx<'a> {
     /// Counts this frame's `offscreen` calls, so each keeps its own render target.
     offscreens: usize,
     gl: Option<GlDeps<'a>>,
-    wgpu: Option<egui_wgpu::RenderState>,
+    wgpu: Option<WgpuDeps<'a>>,
 }
 
 /// A choice knob found by label: which option it sits on, and what it may sit on.
@@ -167,11 +168,14 @@ stage_from!(f32, f64, u16, i16, u32, i32, usize, isize);
 /// unless a stage says otherwise ([`StageSpec::padding`]).
 pub const PADDING: i8 = 16;
 
+/// What a [`render_pass`](SceneCtx::render_pass) scene shows where it cannot draw.
+const PASS_NEEDS_WGPU: &str = "render_pass() needs the wgpu renderer";
+
 impl<'a> SceneCtx<'a> {
     pub(crate) fn new(
         knobs: &'a mut Vec<Knob>,
         gl: Option<GlDeps<'a>>,
-        wgpu: Option<egui_wgpu::RenderState>,
+        wgpu: Option<WgpuDeps<'a>>,
     ) -> Self {
         Self {
             knobs,
@@ -543,7 +547,98 @@ impl<'a> SceneCtx<'a> {
     /// frame and build it when it is missing, and a swap costs at most one rebuild.
     #[must_use]
     pub fn render_state(&self) -> Option<egui_wgpu::RenderState> {
-        self.wgpu.clone()
+        self.wgpu.as_ref().map(|deps| deps.state.clone())
+    }
+
+    /// Render non-egui content into a texture of `size` pixels and show it inline. gallery owns
+    /// the colour texture and the depth buffer (one per call site, kept across frames, resized in
+    /// place, registered once), begins a cleared render pass on them, and shows the result.
+    /// Inside `draw`, build a pipeline against [`ScenePass::FORMAT`], [`ScenePass::SAMPLES`] and
+    /// [`ScenePass::depth_state`] — all three, since a pipeline is matched against the whole of
+    /// what the pass carries — and draw into [`ScenePass::pass`].
+    /// Wgpu renderer only; under glow it shows a hint instead.
+    ///
+    /// This is the route for anything that has to sort itself — a mesh, a scene with overlapping
+    /// solids — because egui's own render pass carries no depth attachment, so a callback drawing
+    /// straight into it is ordered by nothing but the order its triangles were submitted.
+    ///
+    /// Call sites are told apart by the order the scene makes them, as knobs are, so a scene
+    /// drawing several images gives each its own; one behind a toggle shifts every call site
+    /// after it to a new target.
+    pub fn render_pass(
+        &mut self,
+        ui: &mut egui::Ui,
+        size: impl Into<[u32; 2]>,
+        draw: impl FnOnce(&mut ScenePass<'_>),
+    ) -> egui::Response {
+        self.painted(ui, size.into(), draw, egui::Sense::hover())
+    }
+
+    /// [`render_pass`](Self::render_pass) on a stage: the checkerboard, size caption and collapse
+    /// toggle egui content gets, so a rendered frame reads as the same kind of thing as a widget.
+    /// `None` while the stage is folded, which is also when `draw` never runs:
+    /// a fold costs no drawing.
+    ///
+    /// `stage` sizes the box as it does for any content, so [`Stage::Fit`] is the image itself;
+    /// `size` is the texture's own, in pixels.
+    pub fn render_pass_stage(
+        &mut self,
+        ui: &mut egui::Ui,
+        stage: impl Into<StageSpec>,
+        size: impl Into<[u32; 2]>,
+        draw: impl FnOnce(&mut ScenePass<'_>),
+    ) -> Option<egui::Response> {
+        let size = size.into();
+        let spec = stage.into();
+        // Claimed whether or not the drawing runs, so folding one stage away doesn't move
+        // the targets of the call sites after it.
+        let at = self.offscreens;
+        self.offscreens += 1;
+        let drawn = self
+            .staging_open(ui)
+            .then(|| self.wgpu.as_mut().map(|deps| deps.render(at, size, draw)));
+
+        let mut shown = None;
+        self.stage(ui, spec, |ui| {
+            shown = Some(match drawn.flatten() {
+                Some(tex_id) => ui.add(Self::sized_image(tex_id, size, egui::Sense::hover())),
+                None => ui.colored_label(egui::Color32::YELLOW, PASS_NEEDS_WGPU),
+            });
+        });
+        shown
+    }
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "small, non-negative pixel dimensions"
+    )]
+    fn sized_image(
+        tex_id: egui::TextureId,
+        size: [u32; 2],
+        sense: egui::Sense,
+    ) -> egui::Image<'static> {
+        let sized =
+            egui::load::SizedTexture::new(tex_id, egui::vec2(size[0] as f32, size[1] as f32));
+        // No V flip, unlike a GL attachment: a wgpu texture is top-left origin already.
+        egui::Image::new(sized).sense(sense)
+    }
+
+    fn painted(
+        &mut self,
+        ui: &mut egui::Ui,
+        size: [u32; 2],
+        draw: impl FnOnce(&mut ScenePass<'_>),
+        sense: egui::Sense,
+    ) -> egui::Response {
+        // Counted even under glow, so a call site keeps the same slot whichever renderer
+        // the scene meets.
+        let at = self.offscreens;
+        self.offscreens += 1;
+        let Some(deps) = self.wgpu.as_mut() else {
+            return ui.colored_label(egui::Color32::YELLOW, PASS_NEEDS_WGPU);
+        };
+        let tex_id = deps.render(at, size, draw);
+        ui.add(Self::sized_image(tex_id, size, sense))
     }
 
     /// The GL proc-address loader — `Some` only under [`Renderer::Glow`](crate::Renderer::Glow). Build a

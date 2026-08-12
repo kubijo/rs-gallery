@@ -60,19 +60,13 @@ name = "wgpu-gradient"
 scene = "wgpu::gradient"
 knobs = { bias = 1.6 }
 
-# The same solid twice. Without a depth buffer the far faces land on the near ones, since
-# egui's render pass has none to lend; with one the callback renders in a pass of its own.
+# The same solid by both routes, side by side. Drawn into egui's own render pass the far faces
+# land on the near ones, that pass carrying no depth buffer to sort them; drawn into the target
+# `ctx.render_pass` hands over, which does, it comes out a cube.
 [[shot]]
-name = "wgpu-depth-off"
+name = "wgpu-depth"
 scene = "wgpu::depth"
-size = "320x280"
-knobs = { "depth buffer" = false }
-
-[[shot]]
-name = "wgpu-depth-on"
-scene = "wgpu::depth"
-size = "320x280"
-knobs = { "depth buffer" = true }
+size = "520x300"
 
 [[shot]]
 name = "orbit-mid-spin"

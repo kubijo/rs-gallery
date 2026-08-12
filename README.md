@@ -105,12 +105,19 @@ renderer's `callback_resources`, and draws through an `egui_wgpu::Callback` insi
 a headless capture as well as a window, so a shader-drawn scene renders the same pixels into a PNG as on screen. It is
 `None` under glow, where a scene falls back to ordinary egui drawing.
 
-[`wgpu.scene.rs`](template/wgpu.scene.rs) is a group of scenes over that: a gradient backdrop taking its colours through
+That callback draws into egui's own render pass, which carries no depth attachment — so a solid drawn through one is
+sorted by the order its triangles were submitted and nothing else. `ctx.render_pass(ui, size, |target| ...)` is the
+other route: gallery owns a colour texture and a depth buffer (one per call site, resized in place, registered once),
+begins a cleared pass on them, and shows the result inline. It is the wgpu counterpart to `ctx.offscreen` under glow,
+and what anything three-dimensional wants. A pipeline drawing through it is built against `ScenePass::FORMAT`,
+`ScenePass::SAMPLES` and `ScenePass::depth_state(..)` — all three, since wgpu matches a pipeline against everything the
+pass carries, including a depth buffer it never means to test.
+
+[`wgpu.scene.rs`](template/wgpu.scene.rs) is a group of scenes over both: a gradient backdrop taking its colours through
 a uniform buffer, a shader measuring in device pixels (which a window and a capture do not agree on), a callback egui
-scissors inside a scrolling stage, an egui fill meeting a shader fill of the same colour, a clock-driven one that never
-settles, and a cube. The cube is where the inline route runs out — egui's render pass carries no depth attachment, so a
-solid drawn straight into it sorts by submission order — and its `depth buffer` knob switches to the route anything
-three-dimensional needs, a pass of the callback's own recorded in `prepare` and sampled back in `paint`.
+scissors inside a scrolling stage, one colour drawn three ways to show the routes agree on it, a clock-driven one that
+never settles, and a cube drawn twice side by side — through egui's pass, where its far faces land on the near ones, and
+through a pass of its own, where it comes out a cube.
 
 A renderer that cannot be pointed at a foreign framebuffer goes the other way round: draw into a texture of your own,
 register it once, and hand it to `ctx.texture_stage(ui, stage, StageTexture::new(id, size))` for the stage chrome with

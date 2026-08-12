@@ -461,7 +461,13 @@ pub(crate) fn open<A: eframe::App + 'static>(
 ) -> Result<egui_kittest::Harness<'static, A>, Diagnostic> {
     let builder = egui_kittest::Harness::builder()
         .with_size(size)
-        .with_pixels_per_point(scale);
+        .with_pixels_per_point(scale)
+        // The predictable options a snapshot wants — software texture filtering, no dithering —
+        // with the sample count spelled from the one place the window reads it too.
+        .with_render_options(eframe::egui_wgpu::RendererOptions {
+            msaa_samples: crate::MSAA_SAMPLES,
+            ..eframe::egui_wgpu::RendererOptions::PREDICTABLE
+        });
     let (painter, builder) = match session {
         #[cfg(not(target_vendor = "apple"))]
         Session::Glow(capture) => (Some(capture.painter()), builder.renderer(capture.clone())),
@@ -536,6 +542,7 @@ fn draw(
             painter,
             targets: Vec::new(),
             wgpu,
+            passes: Vec::new(),
             wanted: egui::Vec2::ZERO,
         }
     })?;
@@ -725,6 +732,8 @@ struct Canvas {
     /// `Some` only under a wgpu capture — [`SceneCtx::render_state`](crate::SceneCtx::render_state),
     /// as the window's `Frame` carries it.
     wgpu: Option<eframe::egui_wgpu::RenderState>,
+    /// This scene's cached `render_pass` targets, as the shell keeps them per scene.
+    passes: Vec<crate::PassTarget>,
     /// What the last frame's canvas came to — the size a shot has to be at least as big as.
     wanted: egui::Vec2,
 }
@@ -740,6 +749,7 @@ impl eframe::App for Canvas {
             painter,
             targets,
             wgpu,
+            passes,
             wanted,
         } = self;
         let gl_deps = match (loader.clone(), gl.as_deref(), painter.as_ref()) {
@@ -757,7 +767,11 @@ impl eframe::App for Canvas {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(PANEL_BG))
             .show(ui, |ui| {
-                *wanted = render_canvas(ui, scene, knobs, gl_deps, wgpu.clone());
+                let wgpu_deps = wgpu.clone().map(|state| crate::WgpuDeps {
+                    state,
+                    targets: passes,
+                });
+                *wanted = render_canvas(ui, scene, knobs, gl_deps, wgpu_deps);
             });
     }
 }
@@ -3323,14 +3337,17 @@ mod tests {
         );
     }
 
-    /// egui fills one half of a rect and a shader returns the same colour for the other.
+    /// One colour by the three routes a pixel can take — egui's own fill, a callback
+    /// into egui's render pass, and a pass into the target
+    /// [`SceneCtx::render_pass`](crate::SceneCtx::render_pass) hands over.
     /// A step between them means shader-drawn content cannot sit beside egui-drawn content
-    /// without a seam — and a backdrop behind a component is exactly that arrangement.
+    /// without a seam, and a backdrop behind a component is exactly that arrangement.
     ///
-    /// Read as the run of that colour across the middle row: it has to reach past the join,
-    /// and hold one value the whole way.
+    /// The third is the loose one: it goes into a texture and is sampled back out, so it rounds
+    /// to eight bits twice and can land a step off. A step is the tolerance here — a colour
+    /// space read wrong would be tens of them.
     #[test]
-    fn a_shader_fill_and_an_egui_fill_of_one_colour_meet_without_a_seam() {
+    fn one_colour_comes_out_the_same_by_every_route_a_scene_can_draw_it() {
         let tint = "#6C9CD8";
         let image = wgpu_shot(
             "wgpu::colour",
@@ -3342,58 +3359,99 @@ mod tests {
             .expect("a hex colour")
             .to_array();
 
-        let middle = image.height() / 2;
+        // The three bands are flush and equally wide, so the middle of each third is inside one.
+        let row = image.height() / 2;
         let across: Vec<[u8; 4]> = (0..image.width())
-            .map(|x| image.get_pixel(x, middle).0)
+            .map(|x| image.get_pixel(x, row).0)
             .collect();
+        let opaque = |drawn: &[u8; 4]| drawn[3] == u8::MAX && drawn != &crate::PANEL_BG.to_array();
         let first = across
             .iter()
-            .position(|drawn| *drawn == filled)
-            .expect("the fill crosses the middle row");
+            .position(opaque)
+            .expect("the bands cross the middle row");
         let last = across
             .iter()
-            .rposition(|drawn| *drawn == filled)
-            .expect("the fill crosses the middle row");
-        let join = across.len() / 2;
-        assert!(
-            first < join && last > join,
-            "the fill runs {first}..={last}, which does not reach both sides of the join at {join}"
-        );
-        assert!(
-            across[first..=last].iter().all(|drawn| *drawn == filled),
-            "and holds one value the whole way: {:?}",
-            &across[first..=last]
-        );
+            .rposition(opaque)
+            .expect("the bands cross the middle row");
+        let band = (last - first + 1) / 3;
+        for (route, at) in [
+            ("egui's own fill", first + band / 2),
+            ("a callback", first + band + band / 2),
+            ("a pass of the scene's own", first + 2 * band + band / 2),
+        ] {
+            let drawn = across[at];
+            let off = drawn
+                .iter()
+                .zip(filled)
+                .map(|(drawn, wanted)| drawn.abs_diff(wanted))
+                .max()
+                .unwrap_or(u8::MAX);
+            assert!(
+                off <= 1,
+                "{route} came out {drawn:?} against {filled:?}, {off} steps away"
+            );
+        }
     }
 
     /// egui's render pass carries no depth attachment, so a solid drawn straight into it
     /// is sorted by submission order alone and its far faces land on the near ones.
-    /// A callback bringing its own pass and depth buffer sorts them — the scene has both,
-    /// behind a toggle.
+    /// A target from [`SceneCtx::render_pass`](crate::SceneCtx::render_pass) carries one,
+    /// and the same shader through it comes out a cube. The template's `depth` scene draws
+    /// both, side by side, so one shot holds the comparison.
     ///
-    /// Counted in distinct colours: the sorted cube shows the three faces turned towards
-    /// the viewer, the unsorted one shows whichever were drawn last as well.
-    /// The depth run is also what says the offscreen pass ran headlessly at all,
-    /// since it goes through an encoder and a texture nothing else here touches.
+    /// Counted in saturated colours, which are the cube's faces and nothing else in the
+    /// picture: the sorted half shows the three faces turned towards the viewer,
+    /// the unsorted half shows whichever were drawn last as well.
+    /// It is also what says the offscreen pass ran headlessly at all,
+    /// going as it does through an encoder and a texture nothing else here touches.
+    ///
+    /// The `side` override is not idle: a shot declares knobs on its first frame and applies
+    /// the recipe from the second, so asking for anything but the default is what makes the
+    /// scene reallocate gallery's target mid-run and re-point the texture egui already holds.
     #[test]
-    fn a_depth_buffer_the_callback_brings_sorts_what_the_egui_pass_cannot() {
-        let cube = |depth| {
-            let shot = wgpu_shot(
-                "wgpu::depth",
-                egui::vec2(320.0, 280.0),
-                DEFAULT_SCALE,
-                &[("depth buffer", depth)],
-            );
-            shot.pixels()
-                .map(|pixel| pixel.0)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
+    fn a_pass_of_the_scenes_own_sorts_a_solid_the_egui_pass_cannot() {
+        let shot = wgpu_shot(
+            "wgpu::depth",
+            egui::vec2(520.0, 300.0),
+            DEFAULT_SCALE,
+            &[("side", "140")],
+        );
+        // Greys are the chrome — checkerboard, panel, captions — and every face is a tint.
+        // Binned, because a face that went through gallery's texture rounds to eight bits twice
+        // and comes back as two neighbouring values; counted, so the blended pixels along an
+        // edge can be left out below.
+        let faces = |half: std::ops::Range<u32>| {
+            let mut seen = std::collections::BTreeMap::new();
+            for (x, y) in half.flat_map(|x| (0..shot.height()).map(move |y| (x, y))) {
+                let [r, g, b, _] = shot.get_pixel(x, y).0;
+                if r.max(g).max(b) - r.min(g).min(b) > 40 {
+                    *seen.entry([r >> 2, g >> 2, b >> 2]).or_insert(0_u32) += 1;
+                }
+            }
+            seen
         };
-        let (sorted, unsorted) = (cube("true"), cube("false"));
+        let middle = shot.width() / 2;
+        let (unsorted, sorted) = (faces(0..middle), faces(middle..shot.width()));
         assert!(
-            sorted < unsorted,
-            "the depth buffer leaves fewer faces showing: {sorted} colours sorted, \
-             {unsorted} unsorted"
+            sorted.len() < unsorted.len(),
+            "the half with a depth buffer leaves fewer faces showing: {} tints sorted, \
+             {} unsorted",
+            sorted.len(),
+            unsorted.len()
+        );
+
+        // A face is thousands of pixels; anything under that is a blend along an edge.
+        let faces = |tints: &std::collections::BTreeMap<[u8; 3], u32>| {
+            tints.values().filter(|count| **count > 1_000).count()
+        };
+        assert_eq!(
+            faces(&sorted),
+            3,
+            "the sorted half shows the three faces turned towards the viewer: {sorted:?}"
+        );
+        assert!(
+            faces(&unsorted) > 3,
+            "and the unsorted half shows more, having kept whichever were drawn last: {unsorted:?}"
         );
     }
 

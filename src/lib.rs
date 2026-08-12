@@ -61,6 +61,7 @@ mod hot;
 mod knobs;
 mod launcher;
 mod offscreen;
+mod pass;
 mod perf;
 mod render;
 mod sheet;
@@ -77,6 +78,8 @@ use knobs::{KnobStore, render_knobs};
 pub use launcher::launch;
 use offscreen::{GlDeps, RenderTarget, TargetStore};
 pub use offscreen::{ImageInput, Offscreen, Pointer, StageTexture};
+pub use pass::ScenePass;
+use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
 use svg::Icons;
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
@@ -88,8 +91,9 @@ pub mod prelude {
     pub use egui::Ui;
 
     pub use crate::{
-        ImageInput, Offscreen, PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, Stage,
-        StageSpec, StageTexture, action, egui, scene, scene_meta, stage,
+        ImageInput, MSAA_SAMPLES, Offscreen, PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx,
+        SceneEntry, ScenePass, Stage, StageSpec, StageTexture, action, egui, scene, scene_meta,
+        stage,
     };
 }
 
@@ -217,6 +221,7 @@ pub(crate) struct ShellState {
     show_actions: bool,
     knobs: KnobStore,
     targets: TargetStore,
+    passes: PassStore,
     actions: Log,
 }
 
@@ -236,6 +241,18 @@ pub enum Renderer {
     /// [`SceneCtx::render_state`] is `None`.
     Glow,
 }
+
+/// How many samples egui's own render pass is configured for, on the window and on the
+/// headless capture alike — the count a pipeline drawing into that pass through an
+/// [`egui_wgpu::Callback`] has to match.
+///
+/// egui-wgpu hands a scene the colour format and nothing else, so a pipeline that guessed
+/// the sample count would bind cleanly right up until the number moved under it.
+/// Gallery sets both sides from here instead, and a scene spells this rather than a literal.
+///
+/// One, because egui antialiases by feathering rather than by sampling.
+/// [`ScenePass::SAMPLES`] is the separate count for a target gallery renders into.
+pub const MSAA_SAMPLES: u32 = 1;
 
 /// A GL function-pointer loader (eframe's `get_proc_address`).
 /// Version-agnostic: hand it to femtovg's `OpenGl::new_from_function_cstr`
@@ -643,8 +660,12 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 } else if let (Some(scene), Some(key)) = (scene, &key) {
                     let store = self.state.knobs.entry(key.clone()).or_default();
                     let targets = self.state.targets.entry(key.clone()).or_default();
+                    let passes = self.state.passes.entry(key.clone()).or_default();
                     // Cloned rather than borrowed: `GlDeps` below takes `frame` mutably.
-                    let wgpu = frame.wgpu_render_state().cloned();
+                    let wgpu = frame.wgpu_render_state().cloned().map(|state| WgpuDeps {
+                        state,
+                        targets: passes,
+                    });
                     let gl_deps = match (gl_loader.clone(), gl.as_deref()) {
                         (Some(loader), Some(gl)) => Some(GlDeps {
                             loader,
@@ -694,7 +715,7 @@ pub(crate) fn render_canvas(
     scene: &SceneEntry,
     store: &mut Vec<Knob>,
     gl_deps: Option<GlDeps<'_>>,
-    wgpu: Option<egui_wgpu::RenderState>,
+    wgpu: Option<WgpuDeps<'_>>,
 ) -> egui::Vec2 {
     egui::ScrollArea::both()
         .auto_shrink(false)
@@ -1121,11 +1142,22 @@ pub(crate) fn run_with<S: SceneSource + 'static>(
         Renderer::Wgpu => eframe::Renderer::Wgpu,
         Renderer::Glow => eframe::Renderer::Glow,
     };
+    // Only under wgpu, whose render pass this count is about. glow reads the same field to
+    // constrain glutin's search for a config (`with_multisampling` above zero), where asking
+    // for one sample is not the same as asking for none — and no wgpu pipeline is built there
+    // to match anyway.
+    let multisampling = match settings.renderer {
+        Renderer::Wgpu => {
+            u16::try_from(MSAA_SAMPLES).expect("a sample count is a small power of two")
+        }
+        Renderer::Glow => 0,
+    };
     eframe::run_native(
         title,
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),
             renderer,
+            multisampling,
             ..Default::default()
         },
         Box::new(|cc| {
