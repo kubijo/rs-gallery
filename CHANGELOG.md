@@ -3,6 +3,20 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
+## 2026-08-13
+
+- **`SceneCtx::matrix_with`** — the matrix's columns with the staging left to the caller: the callback takes
+  `(&mut SceneCtx, &mut Ui, usize)`, so a cell can reach a knob, `texture_stage`, or a staging method a host has added
+  to `SceneCtx` itself. `matrix` holds `&mut self` and stages every cell for you, which leaves its callback the only
+  borrow there is — so a host that renders its widgets elsewhere and hands gallery the texture, staging through methods
+  of its own, could not use the one reflow layout gallery ships, and its variants could only stack. `matrix` is this
+  with a `stage` per cell now, so the column arithmetic exists once and no downstream reimplements it; its signature,
+  its layout, and the order it claims stages in are all unchanged. Passed over: publishing the column count alone hands
+  out the number but not the layout, leaving every caller to rebuild the grid and the row breaks; and a `matrix` generic
+  over a staging strategy puts a type parameter on the only reflow layout there is, when the closure already is the
+  strategy. The scaffold's `matrix.scene.rs` gains a scene giving each breakpoint a copy length of its own, so one size
+  can be pushed past what it holds while the rest stay put.
+
 ## 2026-08-11
 
 - **Sheets pack denser, on `binpack2d` rather than `rectangle-pack`.** A capture whose panels' aspects spread wide — a

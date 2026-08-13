@@ -82,7 +82,9 @@ declares up front and a stage's isn't known until it has drawn.)
 
 For the common case of one component at several sizes, `ctx.matrix(ui, &sizes, |ui, at| ..)` puts each on its own stage
 in as many columns as the pane holds, aligned in a grid and reflowing as the window resizes —
-[`matrix.scene.rs`](template/matrix.scene.rs).
+[`matrix.scene.rs`](template/matrix.scene.rs). `ctx.matrix_with(ui, &sizes, |ctx, ui, at| ..)` gives the same columns
+with the staging left to the caller, for a cell that needs the context back — a knob of its own, or a staging method the
+host added to `SceneCtx` itself.
 
 On the context, `ctx.slider(...)`, `ctx.toggle(...)`, `ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare
 **controls** (knobs). Calling one registers the control in the right-hand panel *and* returns its current value, so

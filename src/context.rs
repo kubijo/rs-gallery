@@ -214,11 +214,29 @@ impl<'a> SceneCtx<'a> {
     ///
     /// A grid rather than a wrapping row: the columns line up for comparison,
     /// and nothing is packed — the order given is the order shown.
+    ///
+    /// A cell needing more than a `Ui` takes [`matrix_with`](Self::matrix_with) instead.
     pub fn matrix(
         &mut self,
         ui: &mut egui::Ui,
         sizes: &[egui::Vec2],
         mut add: impl FnMut(&mut egui::Ui, usize),
+    ) {
+        self.matrix_with(ui, sizes, |ctx, ui, at| {
+            ctx.stage(ui, sizes[at], |ui| add(ui, at));
+        });
+    }
+
+    /// [`matrix`](Self::matrix)'s columns with the staging left to the caller,
+    /// so a cell can call a knob, [`texture_stage`](Self::texture_stage),
+    /// or whatever the host added to `SceneCtx` itself.
+    ///
+    /// `sizes` only measures the columns here — what a cell is staged at is the caller's to pass on.
+    pub fn matrix_with(
+        &mut self,
+        ui: &mut egui::Ui,
+        sizes: &[egui::Vec2],
+        mut add: impl FnMut(&mut Self, &mut egui::Ui, usize),
     ) {
         let Some(widest) = sizes.iter().map(|size| size.x).reduce(f32::max) else {
             return;
@@ -235,8 +253,8 @@ impl<'a> SceneCtx<'a> {
         let across = (ui.available_width() / cell).floor().max(1.0) as usize;
 
         egui::Grid::new(id).show(ui, |ui| {
-            for (at, size) in sizes.iter().enumerate() {
-                self.stage(ui, *size, |ui| add(ui, at));
+            for at in 0..sizes.len() {
+                add(self, ui, at);
                 if (at + 1) % across == 0 {
                     ui.end_row();
                 }
@@ -1598,6 +1616,92 @@ mod tests {
         assert!(
             rows.windows(2).all(|pair| pair[0] == pair[1]),
             "three 40-wide stages fit across the pane together: {rows:?}"
+        );
+    }
+
+    /// `matrix` stages through `matrix_with`, so the column arithmetic is one copy, not two.
+    #[test]
+    fn a_caller_staged_matrix_lays_out_as_the_staged_one_does() {
+        /// Where each cell's content starts, over sizes uneven enough to catch a mismeasured column.
+        fn corners(caller_stages: bool) -> Vec<egui::Pos2> {
+            let corners = std::cell::RefCell::new(Vec::new());
+            let mut harness = egui_kittest::Harness::new_ui(|ui| {
+                let mut knobs = Vec::new();
+                let mut ctx = SceneCtx::new(&mut knobs, None, None);
+                corners.borrow_mut().clear();
+                let sizes = [
+                    egui::vec2(70.0, 30.0),
+                    egui::vec2(110.0, 30.0),
+                    egui::vec2(90.0, 30.0),
+                    egui::vec2(70.0, 40.0),
+                ];
+                if caller_stages {
+                    ctx.matrix_with(ui, &sizes, |ctx, ui, at| {
+                        ctx.stage(ui, sizes[at], |ui| {
+                            corners.borrow_mut().push(ui.min_rect().min);
+                            ui.label("cell");
+                        });
+                    });
+                } else {
+                    ctx.matrix(ui, &sizes, |ui, _| {
+                        corners.borrow_mut().push(ui.min_rect().min);
+                        ui.label("cell");
+                    });
+                }
+            });
+            harness.run_steps(3);
+            corners.borrow().clone()
+        }
+
+        let staged = corners(false);
+        let by_caller = corners(true);
+        assert_eq!(staged.len(), 4, "every cell drew: {staged:?}");
+        assert_eq!(
+            staged, by_caller,
+            "staging for the caller puts the cells where staging by hand does"
+        );
+    }
+
+    /// What `matrix` cannot host: its callback holds the only borrow of the context,
+    /// so a cell can reach nothing else on it.
+    #[test]
+    fn a_matrix_cell_can_stage_through_a_method_of_the_host_s_own() {
+        /// Stands in for the staging methods a host adds over `SceneCtx` from outside.
+        trait Captioned {
+            fn captioned(&mut self, ui: &mut egui::Ui, size: egui::Vec2, caption: &str);
+        }
+        impl Captioned for SceneCtx<'_> {
+            fn captioned(&mut self, ui: &mut egui::Ui, size: egui::Vec2, caption: &str) {
+                self.stage(ui, size, |ui| {
+                    ui.label(caption);
+                });
+            }
+        }
+
+        let order = std::cell::RefCell::new(Vec::new());
+        let staged = std::cell::Cell::new(0);
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let mut knobs = Vec::new();
+            let mut ctx = SceneCtx::new(&mut knobs, None, None);
+            order.borrow_mut().clear();
+            let sizes = [egui::vec2(60.0, 30.0); 5];
+            ctx.matrix_with(ui, &sizes, |ctx, ui, at| {
+                order.borrow_mut().push(at);
+                ctx.captioned(ui, sizes[at], "cell");
+            });
+            staged.set(ctx.stages);
+        });
+        harness.run_steps(2);
+
+        assert_eq!(
+            order.borrow().as_slice(),
+            [0, 1, 2, 3, 4].as_slice(),
+            "cells run in the order given"
+        );
+        assert_eq!(
+            staged.get(),
+            5,
+            "and each claimed one stage, so the call sites after them keep their own targets"
         );
     }
 

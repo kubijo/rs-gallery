@@ -50,6 +50,34 @@ fn breakpoints(ctx: &mut SceneCtx, ui: &mut Ui) {
     });
 }
 
+/// A copy length per breakpoint, which is the question a size matrix asks:
+/// give the narrow one the long string and it outgrows the box it was staged at.
+/// Pushing one size alone means a knob declared inside the cell, which `matrix_with` allows.
+#[scene("copy length")]
+fn copy_length(ctx: &mut SceneCtx, ui: &mut Ui) {
+    /// What the knob calls each length, and the body text it stands for.
+    const COPY: [(&str, &str); 2] = [
+        ("short", "Version 4.2.1 is ready."),
+        (
+            "long",
+            "Version 4.2.1 is ready to install. The device restarts once, keeps its settings, \
+             and reconnects on its own.",
+        ),
+    ];
+
+    let sizes = sizes();
+    let lengths = COPY.map(|(length, _)| length);
+    ctx.matrix_with(ui, &sizes, |ctx, ui, at| {
+        let (name, ..) = BREAKPOINTS[at];
+        let chosen = ctx.buttons(&format!("{name} copy"), &lengths, 0);
+        ctx.stage(ui, sizes[at], |ui| {
+            ui.label(egui::RichText::new(name).small());
+            ui.label(egui::RichText::new("Firmware update").size(16.0).strong());
+            ui.label(COPY[chosen].1);
+        });
+    });
+}
+
 /// The same breakpoints stacked, for comparison — one scroll each.
 #[scene("stacked")]
 fn stacked(ctx: &mut SceneCtx, ui: &mut Ui) {
