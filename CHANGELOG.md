@@ -3,6 +3,41 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
+## 2026-08-15
+
+- **A scenes crate finds its own scenes.** `build.rs` reads `gallery.toml` itself now, so a bare `cargo build` compiles
+  in the scenes a launcher run does. Before, the globs reached it only through `GALLERY_SCENE_GLOBS`, which only the
+  launcher sets — so any other cargo invocation built a scene-less dylib that linked and passed. It is quiet by
+  construction: the tell is an `unused extern crate` warning on the `extern crate self as …` line, and a CI job
+  type-checking the scenes green-lit code it had never compiled unless it restated the globs in its runner. That
+  restatement was the real cost — a second place to write the glob set down, and the one thing this arrangement exists
+  to avoid.
+- **`GALLERY_CONFIG` replaces `GALLERY_SCENE_GLOBS`**, and carries the config's path rather than the globs it declares.
+  Both sides then read one file through one function ([`gallery_build::Config`](gallery-build/src/lib.rs), moved there
+  from the launcher with `resolve_glob`), so they cannot arrive at two spellings of one glob — which cargo compares as
+  strings, and rebuilds on. It is set only when the config is not the one `build.rs` finds beside `CARGO_MANIFEST_DIR`,
+  because `rerun-if-env-changed` puts the variable in the build script's fingerprint: one that appears and disappears as
+  you alternate a launcher run with a bare build rebuilds the dylib every time, whatever the globs come to.
+  `GALLERY_SCENE_GLOBS` is still honoured where something sets it, so a consumer pinned to an older gallery keeps
+  working.
+- **The generated scene includes are written only when they differ.** The file is `include!`d, so rewriting it with
+  identical bytes still recompiles the crate — a fresh mtime is all it takes.
+- **`build.rs` watches the directories the scenes are in, not the tree they were found in.** Cargo takes a watched
+  directory's newest descendant, so a directory the build writes into is one the build dirties itself: watch it and
+  every build makes the next one stale. That is what the static prefix of each glob was — for scenes living beside their
+  components it is a repo root, holding the crate's `target/` and its `.git`, and a `git status` between two builds was
+  enough to rebuild the dylib. A scene's own directory is not that, `build_output` having already dropped the matches
+  under a cache tag — except where `OUT_DIR` sits beneath it, which is the scaffold's own layout with `target/` beside
+  the scenes, so that one goes unwatched too. The cost is notice that a scene was *added* to such a directory; every
+  scene file is still watched one by one, so editing one still rebuilds, and a `CARGO_TARGET_DIR` outside the crate or
+  scenes one directory down gets the notice back.
+- **The launcher drops the variables cargo set for the shell itself** before shelling out — `CARGO_MANIFEST_DIR`, the
+  `CARGO_PKG_*` set, `OUT_DIR` and the rest describing the running binary. Inherited, they reach every build script
+  cargo then runs and land in its fingerprint: `ring` reads `CARGO_MANIFEST_DIR`, so it saw the variable present under a
+  launcher run and absent under a bare `cargo build`, rebuilt on every alternation, and took `rustls`, `ureq`, `gallery`
+  and the scenes dylib with it. This was the larger half of the rebuild-churn a consumer reported; the config path being
+  stable is the other. `CARGO_HOME`, `CARGO_TARGET_DIR` and the other settings are the user's and stay.
+
 ## 2026-08-14
 
 - **A scene's egui ids are scoped by the scene.** The canvas was handed the panel's `Ui` as it stood, so every id

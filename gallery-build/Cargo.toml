@@ -9,3 +9,5 @@ description = "Build-script helper for gallery: discovers *.scene.rs by glob and
 [dependencies]
 camino = "1"
 glob = "0.3"
+serde = { version = "1", features = ["derive"] }
+toml = "1"

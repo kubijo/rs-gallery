@@ -2,7 +2,6 @@
 //! it, and open the window — plus the cargo plumbing that does the building and the watching.
 
 use std::{
-    fs,
     io::{IsTerminal as _, Write as _},
     process::Command,
     sync::{Arc, Mutex},
@@ -68,18 +67,9 @@ pub fn launch(
         .config
         .clone()
         .unwrap_or_else(|| Utf8Path::new(manifest_dir).join("gallery.toml"));
-    let config_path = config_path
-        .canonicalize_utf8()
-        .unwrap_or_else(|e| panic!("config `{config_path}`: {e}"));
-    let config = read_config(&config_path);
-    let base = config_path.parent().unwrap_or_else(|| Utf8Path::new("."));
-    let globs: Vec<String> = config
-        .scene_globs
-        .iter()
-        .map(|glob| resolve_glob(base, glob))
-        .collect();
+    let config = gallery_build::Config::read(&config_path).unwrap_or_else(|e| panic!("{e}"));
 
-    build_lib(manifest_dir, &globs, headless(&cli));
+    build_lib(manifest_dir, &config.path, headless(&cli));
     // The dylib is `lib<crate>.so`; the crate's lib name is the package name with dashes as underscores.
     let mut source = HotDylib::new(&package.replace('-', "_"), cli.hot)
         .expect("load the freshly built scenes dylib");
@@ -87,7 +77,7 @@ pub fn launch(
 
     // Everything above is how scenes get here at all, so a headless run branches only where the window
     // would have opened — before any watcher, which nothing would be left to shut down.
-    if let Some(capture) = shots(&cli, &config_path) {
+    if let Some(capture) = shots(&cli, &config.path) {
         return match render::render(&manifest, settings.renderer, &setup, &capture) {
             Ok(()) => Ok(()),
             Err(reason) => fail(&reason),
@@ -104,7 +94,7 @@ pub fn launch(
     };
 
     let watcher = if cli.hot {
-        spawn_watcher(manifest_dir, &globs)
+        spawn_watcher(manifest_dir, &config)
     } else {
         None
     };
@@ -237,39 +227,12 @@ struct Cli {
     out: Option<Utf8PathBuf>,
 }
 
-#[derive(serde::Deserialize)]
-struct Config {
-    scene_globs: Vec<String>,
-    #[serde(default = "default_title")]
-    title: String,
-}
-
-fn default_title() -> String {
-    "gallery".to_owned()
-}
-
-fn read_config(path: &Utf8Path) -> Config {
-    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read `{path}`: {e}"));
-    toml::from_str(&text).unwrap_or_else(|e| panic!("parse `{path}`: {e}"))
-}
-
-/// Resolve a config-relative glob to an absolute one. Canonicalizes the directory prefix (up to the
-/// first wildcard) so `..` is gone before it reaches `glob`, which walks components literally.
-fn resolve_glob(config_dir: &Utf8Path, glob: &str) -> String {
-    let wildcard = glob.find(['*', '?', '[']).unwrap_or(glob.len());
-    let split = glob[..wildcard].rfind('/').map_or(0, |slash| slash + 1);
-    let (dir, pattern) = glob.split_at(split);
-    let base = config_dir.join(dir);
-    let base = base.canonicalize_utf8().unwrap_or(base);
-    base.join(pattern).into_string()
-}
-
 /// Build the scenes dylib once, blocking, so the loader finds a `.so` on first launch.
 ///
 /// A headless run's entire output is the paths it wrote, which a screen of `Compiling` lines
 /// buries. `--quiet` drops that progress and still lets errors through.
-fn build_lib(manifest_dir: &str, globs: &[String], quiet: bool) {
-    let mut command = cargo(manifest_dir, globs);
+fn build_lib(manifest_dir: &str, config: &Utf8Path, quiet: bool) {
+    let mut command = cargo(manifest_dir, config);
     command.args(["build", "--lib"]);
     if quiet {
         command.arg("--quiet");
@@ -330,10 +293,10 @@ type Watcher = Arc<Mutex<Box<dyn ChildWrapper>>>;
 /// Rebuild the scenes dylib on every scene change; each fresh `.so` is what [`HotDylib`] reloads.
 /// The watcher runs as a process group (unix) / job object (windows), so killing it takes down
 /// its whole tree — on window close (via the returned handle) and on Ctrl-C/SIGTERM (via the handler).
-fn spawn_watcher(manifest_dir: &str, globs: &[String]) -> Option<Watcher> {
-    let mut command = cargo(manifest_dir, globs);
+fn spawn_watcher(manifest_dir: &str, config: &gallery_build::Config) -> Option<Watcher> {
+    let mut command = cargo(manifest_dir, &config.path);
     command.arg("watch");
-    for dir in watch_dirs(manifest_dir, globs) {
+    for dir in watch_dirs(manifest_dir, &config.globs) {
         command.args(["-w", &dir]);
     }
     // Same profile as `build_lib`, or the rebuilt dylib lands where the reloader never looks.
@@ -368,13 +331,55 @@ fn spawn_watcher(manifest_dir: &str, globs: &[String]) -> Option<Watcher> {
     Some(child)
 }
 
-/// A cargo command in the crate dir, carrying the resolved globs to the scenes `build.rs`.
-fn cargo(manifest_dir: &str, globs: &[String]) -> Command {
+/// A cargo command in the crate dir, naming the config only where `build.rs` would not find it.
+///
+/// The path rather than the globs it declares, so a bare `cargo build` and this one read the same
+/// file rather than restating each other's globs. And nothing at all for the usual config:
+/// a variable named in `rerun-if-env-changed` is part of the build script's fingerprint,
+/// so one appearing and disappearing as you alternate rebuilds the dylib whatever the globs say.
+fn cargo(manifest_dir: &str, config: &Utf8Path) -> Command {
     let mut command = Command::new("cargo");
+    command.current_dir(manifest_dir);
+    for name in inherited_from_cargo() {
+        command.env_remove(name);
+    }
+    if config != default_config(manifest_dir) {
+        command.env("GALLERY_CONFIG", config.as_str());
+    }
     command
-        .current_dir(manifest_dir)
-        .env("GALLERY_SCENE_GLOBS", globs.join("\n"));
-    command
+}
+
+/// The variables cargo set for *this* binary, which describe the package the shell was launched from
+/// and mean nothing to the build it is asking for.
+///
+/// They are inherited otherwise, and a build script that reads one has it in its fingerprint.
+/// `ring` reads `CARGO_MANIFEST_DIR`: cargo saw it present under the launcher and absent under
+/// a bare `cargo build`, so `ring` rebuilt on every alternation and took the dylib with it.
+///
+/// `CARGO_HOME`, `CARGO_TARGET_DIR` and the rest of the settings are the user's, and stay.
+fn inherited_from_cargo() -> Vec<String> {
+    std::env::vars()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            name.starts_with("CARGO_PKG_")
+                || matches!(
+                    name.as_str(),
+                    "CARGO_MANIFEST_DIR"
+                        | "CARGO_MANIFEST_PATH"
+                        | "CARGO_CRATE_NAME"
+                        | "CARGO_BIN_NAME"
+                        | "CARGO_PRIMARY_PACKAGE"
+                        | "OUT_DIR"
+                )
+        })
+        .collect()
+}
+
+/// The `gallery.toml` a scenes `build.rs` reads when nothing points it elsewhere,
+/// canonicalised as [`gallery_build::Config`] canonicalises the one it is given.
+fn default_config(manifest_dir: &str) -> Utf8PathBuf {
+    let path = Utf8Path::new(manifest_dir).join("gallery.toml");
+    path.canonicalize_utf8().unwrap_or(path)
 }
 
 /// Dirs for cargo-watch to monitor: the crate plus each glob's base dir — scene files usually live
@@ -395,13 +400,6 @@ fn watch_dirs(manifest_dir: &str, globs: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resolve_glob_joins_the_config_dir_and_keeps_the_wildcard_tail() {
-        let resolved = resolve_glob(Utf8Path::new("cfg"), "a/b/*.scene.rs");
-        assert!(resolved.contains("a/b"));
-        assert!(resolved.ends_with("*.scene.rs"));
-    }
 
     /// Through clap rather than a hand-built `Cli`, so the flags themselves are part of what is tested.
     fn cli(args: &[&str]) -> Cli {
@@ -483,10 +481,53 @@ mod tests {
         );
     }
 
+    /// Cargo sets these for the shell binary it launched. Inherited into the build the shell asks
+    /// for, they reach every build script cargo runs and land in its fingerprint — `ring` reads
+    /// `CARGO_MANIFEST_DIR`, so it rebuilt whenever a launcher run and a bare `cargo build`
+    /// alternated, and the scenes dylib came with it.
     #[test]
-    fn a_cargo_command_runs_in_the_crate_and_carries_the_globs_in_its_environment() {
-        let globs = ["/a/*.scene.rs".to_owned(), "/b/*.scene.rs".to_owned()];
-        let command = cargo("/work/app", &globs);
+    fn a_cargo_command_drops_what_cargo_set_for_the_shell_itself() {
+        let command = cargo("/work/app", Utf8Path::new("/work/app/gallery.toml"));
+        let dropped: Vec<&str> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .filter_map(|(name, _)| name.to_str())
+            .collect();
+
+        assert!(
+            dropped.contains(&"CARGO_MANIFEST_DIR"),
+            "the one that was observed rebuilding: {dropped:?}"
+        );
+        assert!(
+            dropped.iter().any(|name| name.starts_with("CARGO_PKG_")),
+            "and the rest describing this package: {dropped:?}"
+        );
+        assert!(
+            !dropped.contains(&"CARGO_HOME") && !dropped.contains(&"CARGO_TARGET_DIR"),
+            "settings are the user's, not ours to drop: {dropped:?}"
+        );
+    }
+
+    #[test]
+    fn a_cargo_command_runs_in_the_crate_and_names_only_a_config_of_its_own() {
+        let carried = |command: &Command| {
+            command
+                .get_envs()
+                .find(|(key, _)| key.to_str() == Some("GALLERY_CONFIG"))
+                .map(|(_, value)| {
+                    value
+                        .and_then(std::ffi::OsStr::to_str)
+                        .unwrap_or("")
+                        .to_owned()
+                })
+        };
+
+        // The one `build.rs` finds by itself. Saying it anyway would put the variable in the build
+        // script's fingerprint, and a bare `cargo build` in between would then rebuild the dylib.
+        let usual = cargo("/work/app", Utf8Path::new("/work/app/gallery.toml"));
+        assert_eq!(carried(&usual), None, "the default goes unsaid");
+
+        let command = cargo("/work/app", Utf8Path::new("/elsewhere/gallery.toml"));
 
         assert_eq!(command.get_program(), "cargo");
         assert_eq!(
@@ -494,15 +535,11 @@ mod tests {
             Some(std::path::Path::new("/work/app")),
             "cargo runs in the scenes crate, not wherever the shell was"
         );
-        let carried = command
-            .get_envs()
-            .find(|(key, _)| key.to_str() == Some("GALLERY_SCENE_GLOBS"))
-            .and_then(|(_, value)| value)
-            .and_then(std::ffi::OsStr::to_str)
-            .expect("the globs reach `build.rs` through the environment");
         assert_eq!(
-            carried, "/a/*.scene.rs\n/b/*.scene.rs",
-            "newline-separated, the way `discover_from_env` splits them"
+            carried(&command).as_deref(),
+            Some("/elsewhere/gallery.toml"),
+            "a config from elsewhere is named — the file itself, for `build.rs` to read the globs \
+             out of rather than be told them"
         );
     }
 

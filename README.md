@@ -223,9 +223,10 @@ scene painting through a wgpu callback is captured rather than left out of the P
 
 ## How it works
 
-`#[scene]` self-registers through [`inventory`]; `build.rs` globs the scene files and compiles them in; `launch!` reads
-`gallery.toml`, builds them into the crate's dylib and runs the shell. The dylib is what `--hot` swaps without
-restarting — still one crate.
+`#[scene]` self-registers through [`inventory`]; `build.rs` reads `gallery.toml` and compiles in the scene files its
+globs match; `launch!` reads the same file, builds them into the crate's dylib and runs the shell. The globs are written
+down once and both go to them, so a bare `cargo build` — a CI type-check, an editor — finds the scenes a run finds. The
+dylib is what `--hot` swaps without restarting — still one crate.
 
 Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` proc-macro), `gallery-build` (the
 `build.rs` helper).
