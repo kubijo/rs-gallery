@@ -710,6 +710,10 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
 /// Shared with the headless renderer, which draws it as the whole viewport:
 /// a captured PNG is then the same pixels the window shows for a canvas that size,
 /// and stays so as the chrome around it changes.
+///
+/// Scoped by the scene: two of one shape would otherwise derive one id and share the scroll
+/// offset, folded stages and widget memory egui keeps under it — the scroll area included,
+/// so each scene keeps its own place in the canvas.
 pub(crate) fn render_canvas(
     ui: &mut egui::Ui,
     scene: &SceneEntry,
@@ -717,21 +721,24 @@ pub(crate) fn render_canvas(
     gl_deps: Option<GlDeps<'_>>,
     wgpu: Option<WgpuDeps<'_>>,
 ) -> egui::Vec2 {
-    egui::ScrollArea::both()
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            let declared = egui::Frame::new()
-                .inner_margin(egui::Margin::same(16))
-                .show(ui, |ui| {
-                    let mut ctx = SceneCtx::new(store, gl_deps, wgpu);
-                    (scene.render)(&mut ctx, ui);
-                    ctx.declared()
-                })
-                .inner;
-            // Drop knobs the scene stopped declaring this frame.
-            store.truncate(declared);
-        })
-        .content_size
+    ui.push_id(scene_key(scene), |ui| {
+        egui::ScrollArea::both()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                let declared = egui::Frame::new()
+                    .inner_margin(egui::Margin::same(16))
+                    .show(ui, |ui| {
+                        let mut ctx = SceneCtx::new(store, gl_deps, wgpu);
+                        (scene.render)(&mut ctx, ui);
+                        ctx.declared()
+                    })
+                    .inner;
+                // Drop knobs the scene stopped declaring this frame.
+                store.truncate(declared);
+            })
+            .content_size
+    })
+    .inner
 }
 
 /// Gold folders, blue scene markers.
@@ -1339,6 +1346,69 @@ mod tests {
             harness.state().state.selected.as_deref(),
             Some(wanted.as_str()),
             "the requested scene is selected, not the first one"
+        );
+    }
+
+    /// Rendered a frame apart, as switching scenes does — within one frame
+    /// the parent's own counter would tell them apart and prove nothing.
+    #[test]
+    fn two_scenes_of_one_shape_derive_ids_of_their_own() {
+        thread_local! {
+            static SEEN: std::cell::RefCell<Vec<(&'static str, egui::Id)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        fn records(tag: &'static str, ui: &egui::Ui) {
+            SEEN.with_borrow_mut(|seen| seen.push((tag, ui.next_auto_id())));
+        }
+        // Two bodies rather than one: the tag is what tells their ids apart afterwards.
+        fn one(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+            records("one", ui);
+            ui.label("a widget");
+        }
+        fn two(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+            records("two", ui);
+            ui.label("a widget");
+        }
+
+        let scenes = [
+            SceneEntry {
+                render: one,
+                ..scene("one", "m", true)
+            },
+            SceneEntry {
+                render: two,
+                ..scene("two", "m", false)
+            },
+        ];
+        let frame = std::cell::Cell::new(0);
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let showing = &scenes[frame.get() % scenes.len()];
+            frame.set(frame.get() + 1);
+            let mut store = Vec::new();
+            render_canvas(ui, showing, &mut store, None, None);
+        });
+        harness.run_steps(4);
+
+        let seen = SEEN.take();
+        let ids = |tag| {
+            seen.iter()
+                .filter(|(at, _)| *at == tag)
+                .map(|(_, id)| *id)
+                .collect::<Vec<egui::Id>>()
+        };
+        let (one, two) = (ids("one"), ids("two"));
+        assert!(
+            !one.is_empty() && !two.is_empty(),
+            "both scenes drew: {seen:?}"
+        );
+        assert!(
+            one.windows(2).all(|pair| pair[0] == pair[1])
+                && two.windows(2).all(|pair| pair[0] == pair[1]),
+            "a scene derives the same id on every frame it draws: {seen:?}"
+        );
+        assert_ne!(
+            one[0], two[0],
+            "and the other scene's is not the same id: {seen:?}"
         );
     }
 

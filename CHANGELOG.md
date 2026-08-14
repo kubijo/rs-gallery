@@ -3,6 +3,29 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
+## 2026-08-14
+
+- **A scene's egui ids are scoped by the scene.** The canvas was handed the panel's `Ui` as it stood, so every id
+  derived inside a scene came off the parent and the order the widgets were called in, and nothing said which scene was
+  drawing. Two scenes reaching a widget at the same point in the same shape therefore derived the *same* id and shared
+  whatever egui keeps under it — scroll offsets, folded stages, collapsing headers, any `Memory`-backed widget state.
+  Knobs never broke the tie, since they draw in the Controls panel rather than on the canvas, so scenes differing only
+  in their knobs still arrived at their first canvas widget together. `render_canvas` pushes `scene_key` now, which is
+  the identity the selection and the per-scene target caches already run on: it comes off the module path and the
+  scene's name, so a hot reload that renumbers everything else leaves it alone, and both the window and the headless
+  renderer go through that one function, so a capture and a window cannot disagree about it. The knob store is untouched
+  — knob values are keyed by label in gallery's own state, never by an egui id.
+- **A capture no longer depends on what was shot before it.** Each shot already gets a harness of its own, so egui's
+  memory cannot cross between them; a scene's own cache is another matter, living in the scenes dylib that outlives
+  every harness. A consumer keying one render target per stage by the id it derived found two scenes sharing an entry,
+  and the retained state inside it, so the same scene at the same knobs captured differently depending on whether its
+  neighbour had been shot first in that process — deterministic, and wrong. Scoping the canvas is the fix rather than
+  keying that one cache, because the cache is only what noticed: everything else derived from a scene's ids was already
+  crossing between scenes in a window, where the context is shared for the session and nothing gets a fresh one.
+- **The canvas scroll area is inside the scope**, so each scene keeps its own place in the canvas rather than inheriting
+  wherever the last one was left. Switching scenes used to land you partway down a scene you had just opened; coming
+  back to one now returns you to where you were, as its knobs already did.
+
 ## 2026-08-13
 
 - **`SceneCtx::matrix_with`** — the matrix's columns with the staging left to the caller: the callback takes

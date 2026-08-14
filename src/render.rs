@@ -1847,6 +1847,103 @@ mod tests {
         );
     }
 
+    /// Each shot gets its own harness, so egui's own memory cannot cross between them.
+    /// A scene's own cache can: it lives in the scenes dylib, which outlives every harness,
+    /// and one keyed by the id the scene derives is what this guards.
+    ///
+    /// The bar counts frames drawn under that id — twice as long if it inherited a neighbour's.
+    #[test]
+    fn a_shot_captures_the_same_whether_or_not_another_scene_ran_first() {
+        thread_local! {
+            /// Frames drawn under each derived id — a render target a scene keeps, in miniature.
+            static DRAWN: std::cell::RefCell<std::collections::HashMap<egui::Id, f32>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
+        fn counts_against_its_id(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+            let id = ui.next_auto_id();
+            crate::stage!(ctx, ui, (120, 40), move |ui: &mut egui::Ui| {
+                let frames = DRAWN.with_borrow_mut(|drawn| {
+                    let frames = drawn.entry(id).or_insert(0.0);
+                    *frames += 1.0;
+                    *frames
+                });
+                // Bars rather than a number: a font would round the difference away.
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(100.0, 20.0), egui::Sense::hover());
+                let bar = frames * 8.0;
+                assert!(
+                    bar < rect.width(),
+                    "a bar at {frames} frames has room to grow, so an inherited count \
+                     shows longer rather than saturating to the same width"
+                );
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(rect.min, egui::vec2(bar, 20.0)),
+                    0.0,
+                    egui::Color32::from_rgb(0x6C, 0x9C, 0xD8),
+                );
+            });
+        }
+        // One body, two identities — which is the whole of what tells the ids apart.
+        let scene = |name: &'static str| SceneEntry {
+            render: counts_against_its_id,
+            name,
+            module_path: "reference",
+            default: name == "neighbour",
+            order: 0,
+            source: "",
+        };
+        let manifest = Manifest {
+            scenes: vec![scene("neighbour"), scene("subject")],
+            groups: Vec::new(),
+        };
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-scene-ids");
+        let shot = |scene: &str, out: &Utf8PathBuf| Shot {
+            scene: scene.to_owned(),
+            out: Some(out.clone()),
+            size: egui::vec2(200.0, 120.0),
+            knobs: Vec::new(),
+            frames: None,
+            trim: true,
+            settle: false,
+            scale: DEFAULT_SCALE,
+            list: false,
+            template: false,
+        };
+        // Cleared between the runs, since the two are standing in for two separate processes.
+        let run = |shots: Vec<Shot>, out: &Utf8PathBuf| {
+            DRAWN.with_borrow_mut(std::collections::HashMap::clear);
+            let capture = Capture {
+                shots,
+                sheet: None,
+                report: None,
+            };
+            render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+                .expect("the shots render");
+            std::fs::read(out).expect("the capture was written")
+        };
+
+        let after = dir.join("after.png");
+        let alone = dir.join("alone.png");
+        let following = run(
+            vec![
+                shot("neighbour", &dir.join("neighbour.png")),
+                shot("subject", &after),
+            ],
+            &after,
+        );
+        let by_itself = run(vec![shot("subject", &alone)], &alone);
+
+        assert_eq!(
+            following,
+            by_itself,
+            "the subject captured {} bytes after its neighbour and {} bytes alone",
+            following.len(),
+            by_itself.len()
+        );
+    }
+
     /// A run hands back what it did as JSON, so an unattended loop reads a file
     /// rather than scraping the text meant for a person.
     ///
