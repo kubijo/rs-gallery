@@ -124,7 +124,9 @@ def _cut(level: Level) -> None:
 
     run("git", "add", "-A", cwd=here)
     run("git", "commit", "-q", "-m", f"release: v{version}", cwd=here)
-    run("git", "tag", f"v{version}", cwd=here)
+    # Annotated, and not for the notes alone: `git push --follow-tags` skips lightweight tags,
+    # so a release would never leave the machine that cut it.
+    run("git", "tag", "-a", f"v{version}", "-m", "\n".join([f"v{version}", "", *notes]), cwd=here)
     out.print(
         Panel.fit(
             f"[bold green]v{version}[/] is committed and tagged.\n"

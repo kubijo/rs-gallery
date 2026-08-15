@@ -5,6 +5,9 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **`just tag` cuts an annotated tag, carrying the release notes.** `git push --follow-tags` pushes annotated tags and
+  leaves lightweight ones behind without a word — v0.1.0 reached the remote only because it was pushed by name.
+
 ## [0.1.0] - 2026-08-15
 
 - **A `--hot` run says in the window what it is doing.** A chip in the scenes panel's corner follows the cycle —
