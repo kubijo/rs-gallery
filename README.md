@@ -20,6 +20,9 @@ so it is safe to run inside one — the instance carries its own `[workspace]`. 
 glob and title, or copy [`template/`](template) and fill the `{{ … }}` markers by hand. It ships a runnable
 `example.scene.rs` and a standalone `justfile`, so the first `just run` already shows something.
 
+The scaffolded dependency tracks the default branch. Add `tag = "v0.1.0"` beside the `git` key — in both `gallery` and
+`gallery-build` — to hold a release instead; `just update` then reports what has landed since it.
+
 `just run` opens the window; `just hot` rebuilds and hot-swaps scenes as you edit them. (Both wrap `cargo run`, so plain
 `cargo run` / `cargo run -- --hot` work too.) Without a window at all, `just render` and `just capture` write scenes to
 PNGs — see [Rendering scenes to images](#rendering-scenes-to-images).
@@ -234,6 +237,21 @@ dylib is what `--hot` swaps without restarting — still one crate.
 
 Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` proc-macro), `gallery-build` (the
 `build.rs` helper).
+
+## Cutting a release
+
+Write the notes under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) as the work lands, then, from a clean `main`:
+
+```bash
+just tag minor        # or major, or patch
+```
+
+It bumps `[workspace.package] version` — the one place a version is written, inherited by all three crates — dates the
+`## [Unreleased]` heading to it, refreshes the lockfile, and prints what it is about to do before asking. On yes it
+re-reads its own edits (`just release-check v<version>`), runs `just validate`, then commits and tags `v<version>`.
+Pushing is yours: `git push --follow-tags`.
+
+CI runs the same `release-check` on a tag push, along with the rest of the gate, so what is released is what passed.
 
 ## Status & roadmap
 

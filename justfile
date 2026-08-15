@@ -43,6 +43,14 @@ validate:
 snapshots:
     @UPDATE_SNAPSHOTS=1 just in-shell gallery-test the_reference_images_match
 
+# Cut a release: bump LEVEL (major|minor|patch), date the changelog, commit and tag — on confirmation.
+tag LEVEL:
+    @just in-shell gallery-release tag {{ LEVEL }}
+
+# Check TAG against the version the manifests carry and the CHANGELOG documents, before cutting it.
+release-check TAG:
+    @just in-shell gallery-release check {{ TAG }}
+
 # Report direct dependencies with a newer version available.
 outdated:
     @just in-shell cargo outdated --root-deps-only

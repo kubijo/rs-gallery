@@ -1,13 +1,13 @@
 [package]
 name = "gallery"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+repository.workspace = true
 # Code is Unlicense; the bundled Noto fallback fonts (fonts/noto/) are SIL OFL 1.1.
 license = "Unlicense AND OFL-1.1"
 description = "egui-shelled component catalog: a fixed egui shell + Storybook-style scene discovery (config globs, `#[scene]` + inventory)."
 readme = "README.md"
-repository = "https://github.com/kubijo/rs-gallery"
 keywords = ["egui", "components", "gui", "catalog", "preview"]
 categories = ["gui", "development-tools"]
 
@@ -80,3 +80,12 @@ glow = "0.16"
 members = ["gallery-macros", "gallery-build"]
 # The instance scaffold isn't a real crate here — its manifest carries `cargo generate` placeholders.
 exclude = ["template"]
+
+# What the three crates share, so a release moves one line and `just release-check` has one answer
+# to compare a tag against. Their licenses differ (only this one bundles fonts) and so do their
+# descriptions, so those stay where they are.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+repository = "https://github.com/kubijo/rs-gallery"

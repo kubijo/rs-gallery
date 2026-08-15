@@ -2,6 +2,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -40,6 +41,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: scripts/ci-coverage.sh coverage.txt
+  # A tag has to name the version the manifests and the CHANGELOG carry. The other jobs run on the
+  # tagged commit too, so what is released is what passed.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just release-check ${{ github.ref_name }}
   # Informational reports on push + PR; each `just` recipe is the single source of truth (run locally too).
   report:
     runs-on: ubuntu-latest

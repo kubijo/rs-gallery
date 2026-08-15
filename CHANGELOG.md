@@ -3,7 +3,9 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
-## 2026-08-15
+## [Unreleased]
+
+## [0.1.0] - 2026-08-15
 
 - **A `--hot` run says in the window what it is doing.** A chip in the scenes panel's corner follows the cycle —
   watching, changed, building with its elapsed, swapping, reloaded — and a failed build puts a red bar over the canvas

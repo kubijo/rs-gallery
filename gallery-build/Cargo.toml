@@ -1,8 +1,9 @@
 [package]
 name = "gallery-build"
-version = "0.1.0"
-publish = false
-edition = "2024"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+repository.workspace = true
 license = "Unlicense"
 description = "Build-script helper for gallery: discovers *.scene.rs by glob and emits their module includes."
 

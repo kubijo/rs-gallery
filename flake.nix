@@ -7,10 +7,27 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # `tools/` has real dependencies now, so nix builds its environment from the same `uv.lock`
+    # uv resolves — one lockfile rather than a nix-side restatement of it.
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.uv2nix.follows = "uv2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, rust-overlay }:
+    { self, nixpkgs, rust-overlay, pyproject-nix, uv2nix, pyproject-build-systems }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (
@@ -22,11 +39,29 @@
       formatterFor = pkgs: import ./nix/formatter.nix pkgs;
       checkerFor = pkgs: import ./nix/checker.nix pkgs;
       testFor = pkgs: import ./nix/test.nix { inherit pkgs; };
+
+      # `tools/`, built from its own `uv.lock`: the interpreter is pinned here, the dependency set
+      # comes from the file uv resolves, and the console scripts (`gallery-perf`, `gallery-release`)
+      # land on PATH. `deps.all` takes the dev group with it, which is what runs the tests.
+      pythonToolsFor =
+        pkgs:
+        let
+          workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./tools; };
+          pythonSet =
+            (pkgs.callPackage pyproject-nix.build.packages { python = pkgs.python314; }).overrideScope
+              (nixpkgs.lib.composeManyExtensions [
+                pyproject-build-systems.overlays.default
+                (workspace.mkPyprojectOverlay { sourcePreference = "wheel"; })
+              ]);
+        in
+        pythonSet.mkVirtualEnv "gallery-tools-env" workspace.deps.all;
+
       validateFor = pkgs: import ./nix/validate.nix {
         inherit pkgs;
         formatter = formatterFor pkgs;
         checker = checkerFor pkgs;
         test = testFor pkgs;
+        pythonTools = pythonToolsFor pkgs;
       };
     in
     {
@@ -60,21 +95,23 @@
             pkgs.just
             (formatterFor pkgs)
             (checkerFor pkgs)
-            # Rust toolchain from rust-toolchain.toml (rust-overlay) + test/deps tooling.
             (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
             pkgs.cargo-nextest
             pkgs.cargo-llvm-cov
-            (validateFor pkgs) # `validate`: the full gate
-            (testFor pkgs) # `gallery-test`: the tests, with a GL stack for the capture ones
+            (validateFor pkgs)
+            (testFor pkgs)
             pkgs.cargo-outdated
             pkgs.cargo-deny
             pkgs.cargo-generate
+            # The tools' own environment: their interpreter, their dependencies, and the console
+            # scripts the `just` recipes call. `uv` stays for maintaining the lockfile it is built
+            # from.
+            (pythonToolsFor pkgs)
             pkgs.uv
             pkgs.ruff
             pkgs.ty
             pkgs.samply
-            pkgs.binutils # addr2line, for `gallery-perf symbolicate`
-            # egui/eframe build tooling.
+            pkgs.binutils
             pkgs.pkg-config
           ];
           # egui/wgpu dlopen these at runtime (examples, or a consumer's binary).

@@ -7,10 +7,9 @@ actual `cargo publish`. Research: crates.io Trusted Publishing (RFC 3691), Cargo
 
 ### Manifests
 
-- [ ] Flip `publish = false` on all three crates (`gallery`, `gallery-macros`, `gallery-build`).
-- [ ] Add `repository = "https://github.com/kubijo/rs-gallery"` to `gallery-macros` + `gallery-build` (`gallery` already
-  has it). Recommended metadata, and it's the repo a Trusted Publisher binds to; `license`/`description`/`readme`/
-  `keywords`/`categories` are already set.
+- [ ] Flip `publish` in `[workspace.package]`, which all three inherit — one line, not three. `repository` is inherited
+  from there too (it is the repo a Trusted Publisher binds to), and
+  `license`/`description`/`readme`/`keywords`/`categories` are already set per crate.
 
 ### Publish order (path-dep rule)
 
@@ -34,8 +33,11 @@ actual `cargo publish`. Research: crates.io Trusted Publishing (RFC 3691), Cargo
 
 ### Tagging
 
-- [ ] Tag every release for `version ↔ commit` auditability. Workspace convention: `<pkg>-v<version>` (e.g.
-  `gallery-v0.1.0`), or a single `v0.1.0` if the three version in lockstep.
+Settled: a single `v<version>` tag while the three crates version in lockstep, and the CHANGELOG section it belongs to
+is headed `## [<version>] - <date>` — the shape `--check-updates` reads. Per-crate `<pkg>-v<version>` tags only become
+necessary if they ever diverge. Date-based versions were weighed and dropped: semver's three segments are numeric and
+its dash suffix is a *pre*-release, so a same-day re-cut had nowhere to go that both git and cargo would order alike.
+
 - [ ] Consider `release-plz` — release PR from the Keep-a-Changelog `CHANGELOG.md` → tag → publish.
 
 ## Perf: honest measurement, profiling, scene snapshots

@@ -1,17 +1,17 @@
 # `validate`: the full local gate — formatting, repo lint, clippy, and the tests under coverage
 # (text + HTML for humans, lcov + cobertura for CI, into .tmp/coverage).
-{ pkgs, formatter, checker, test }:
+{ pkgs, formatter, checker, test, pythonTools }:
 pkgs.writeShellApplication {
   name = "validate";
   runtimeInputs = [
     (pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml)
     pkgs.cargo-llvm-cov
     pkgs.cargo-nextest
-    pkgs.uv
     pkgs.ty
     formatter
     checker
     test
+    pythonTools
   ];
   text = ''
     repofmt --fail-on-change
@@ -23,10 +23,10 @@ pkgs.writeShellApplication {
     # Once with every feature on: the forwarded `egui_extras` gates are off by default,
     # so a default-only run never builds the code they pull in.
     cargo clippy --workspace --all-targets --all-features -- -D warnings
-    # tools/ is its own uv project, and both of these resolve imports
-    # from its root — run them there rather than through repochk,
-    # which lints file by file and would see no project at all.
-    (cd tools && ty check && uv run --frozen pytest -q)
+    # tools/ is its own uv project, and both of these resolve imports from its root — run them
+    # there rather than through repochk, which lints file by file and would see no project at all.
+    # The environment is the one nix built from `uv.lock`, so nothing is resolved at gate time.
+    (cd tools && ty check --python ${pythonTools} . && pytest -q)
     # `--no-report` accumulates into the target dir by design,
     # so without this the reports merge every earlier run:
     # records whose structural hash has since changed surface
