@@ -5,6 +5,33 @@ so a minor release may carry a breaking change.
 
 ## 2026-08-15
 
+- **A `--hot` run says in the window what it is doing.** A chip in the scenes panel's corner follows the cycle —
+  watching, changed, building with its elapsed, swapping, reloaded — and a failed build puts a red bar over the canvas
+  that opens what cargo said, each message in the colour of its level. All of it was terminal-only before, and a failure
+  was worse than hidden: cargo leaves the dylib alone, so the window went on drawing the last scenes that built,
+  indistinguishable from an edit that changed nothing. The chip is painted into chrome rather than laid out over the
+  canvas, so nothing it reports covers a scene or shifts a control as the words change width. A run without `--hot`
+  draws none of it.
+- **Gallery watches, builds and opens the scenes itself; `cargo watch` and `hot-lib-reloader` are gone.** A build
+  gallery starts is one it can read as it happens, through cargo's documented `--message-format=json`; the watcher it
+  used to spawn kept the cycle to itself and the terminal, and was an undeclared binary besides — missing, cargo exited
+  101, the spawn reported success, and `--hot` silently ran cold. The opening is its own for a different reason: a
+  library a scene has drawn from can never be closed. Its widget state is a `Box<dyn Any>` whose vtable lives in the
+  library that boxed it, held by egui's `Memory` as long as its `Context` — so each rebuild is opened over the last and
+  none unmapped, at a mapping per rebuild. `notify` and `libloading` were already in the tree under what they replace.
+  Two deliberate differences: `.gitignore` goes unhonoured (a missed edit costs more than a spare build), and an edit
+  landing mid-build queues rather than restarting it, so cargo is never killed part-written.
+- **The shell's own components are scenes now** — `just shell-scenes` opens a gallery of gallery: the chip in every
+  phase, the failure bar at each count, the knob widgets side by side, the tree, the actions log, the frame-cost meter,
+  the icons, the carets and rails. States a run reaches one at a time, some only when something breaks. They live inside
+  the crate behind a feature, because the chrome they pose is `pub(crate)` — the component itself, not a copy that
+  drifts — and reach the shell through `Linked`, as a host that links its own scenes does; `mod shell_scenes` is the
+  sibling of `mod scaffold_scenes`. It paid for itself at once: the build report had its 80%-of-window bound baked into
+  its body, so it ignored the size its caller asked for.
+- **A rebuild that compiled nothing is not shown as one.** Cargo marks every artifact it did not rebuild as fresh, and a
+  build of nothing but those wrote no dylib — so the chip goes back to watching instead of waiting out a swap that never
+  comes. It keeps a directory of generated files from reading as a rebuild every time one lands, and is what lets the
+  filter afford to err towards rebuilding.
 - **A scenes crate finds its own scenes.** `build.rs` reads `gallery.toml` itself now, so a bare `cargo build` compiles
   in the scenes a launcher run does. Before, the globs reached it only through `GALLERY_SCENE_GLOBS`, which only the
   launcher sets — so any other cargo invocation built a scene-less dylib that linked and passed. It is quiet by

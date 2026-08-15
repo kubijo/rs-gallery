@@ -4,16 +4,18 @@
 use std::{
     io::{IsTerminal as _, Write as _},
     process::Command,
-    sync::{Arc, Mutex},
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
-use process_wrap::std::{ChildWrapper, CommandWrap};
 
 use crate::{
-    HotDylib, RunOptions, SceneSource, Settings, diagnostic::Diagnostic, render, run_with,
-    tree::resolve_scene, update::check_updates,
+    HotDylib, RunOptions, SceneSource, Settings,
+    diagnostic::Diagnostic,
+    render, run_with,
+    tree::resolve_scene,
+    update::check_updates,
+    watch::{self, HotStatus, SceneWatcher},
 };
 
 /// The consumer's entire `main`. Both arguments are required
@@ -70,9 +72,15 @@ pub fn launch(
     let config = gallery_build::Config::read(&config_path).unwrap_or_else(|e| panic!("{e}"));
 
     build_lib(manifest_dir, &config.path, headless(&cli));
+    // Made here because both sides are handed it from here: the watcher reports into it,
+    // and the shell draws from it.
+    let hot = HotStatus::new();
     // The dylib is `lib<crate>.so`; the crate's lib name is the package name with dashes as underscores.
     let mut source = HotDylib::new(&package.replace('-', "_"), cli.hot)
         .expect("load the freshly built scenes dylib");
+    if cli.hot {
+        source.hot = Some(hot.clone());
+    }
     let manifest = source.manifest();
 
     // Everything above is how scenes get here at all, so a headless run branches only where the window
@@ -88,20 +96,16 @@ pub fn launch(
     let scene = cli.scene.as_ref().map(|pattern| {
         resolve_scene(&manifest.scenes, pattern).unwrap_or_else(|reason| fail(&reason))
     });
+    let watcher = cli.hot.then(|| watch_scenes(manifest_dir, &config, &hot));
     let options = RunOptions {
         frames: cli.frames,
         scene: scene.map(crate::tree::scene_key),
-    };
-
-    let watcher = if cli.hot {
-        spawn_watcher(manifest_dir, &config)
-    } else {
-        None
+        hot: cli.hot.then_some(hot),
     };
     let result = run_with(&config.title, source, settings, setup, options);
-    // Window closed normally: stop the watcher (the Ctrl-C/SIGTERM path is handled in spawn_watcher).
+    // Window closed normally: stop the watcher (the Ctrl-C/SIGTERM path is handled in watch_scenes).
     if let Some(watcher) = &watcher {
-        let _ = watcher.lock().unwrap().kill();
+        watcher.stop();
     }
     result
 }
@@ -232,13 +236,9 @@ struct Cli {
 /// A headless run's entire output is the paths it wrote, which a screen of `Compiling` lines
 /// buries. `--quiet` drops that progress and still lets errors through.
 fn build_lib(manifest_dir: &str, config: &Utf8Path, quiet: bool) {
-    let mut command = cargo(manifest_dir, config);
-    command.args(["build", "--lib"]);
+    let mut command = build_command(manifest_dir, config);
     if quiet {
         command.arg("--quiet");
-    }
-    if let Some(profile) = host_profile() {
-        command.args(["--profile", &profile]);
     }
     let progress = Progress::start(quiet);
     let built = command.status().is_ok_and(|status| status.success());
@@ -273,6 +273,16 @@ impl Progress {
     }
 }
 
+/// The build the first one and every rebuild both run, so they write the one dylib the loader reads.
+fn build_command(manifest_dir: &str, config: &Utf8Path) -> Command {
+    let mut command = cargo(manifest_dir, config);
+    command.args(["build", "--lib"]);
+    if let Some(profile) = host_profile() {
+        command.args(["--profile", &profile]);
+    }
+    command
+}
+
 /// The cargo profile this binary was built under, read off its own path: cargo drops the host binary
 /// in `<target>/<profile-dir>/`, and every profile's directory is its own name — `dev` alone differs,
 /// building into `debug`.
@@ -286,49 +296,35 @@ fn host_profile() -> Option<String> {
     Some(if dir == "debug" { "dev" } else { dir }.to_owned())
 }
 
-/// A running hot-reload watcher, shared so both the window-close path
-/// and the signal handler can kill it.
-type Watcher = Arc<Mutex<Box<dyn ChildWrapper>>>;
+/// Rebuild the scenes dylib on every scene change; each fresh `.so` is what [`HotDylib`] reloads,
+/// and the cycle between the two is what `hot` carries to the shell.
+///
+/// A build runs as a process group (unix) / job object (windows), so killing it takes down its whole
+/// tree — on window close (via the returned handle) and on Ctrl-C/SIGTERM (via the handler).
+fn watch_scenes(
+    manifest_dir: &str,
+    config: &gallery_build::Config,
+    hot: &HotStatus,
+) -> SceneWatcher {
+    let dirs = watch_dirs(manifest_dir, &config.globs);
+    // Owned by the closure: it outlives this call, being what every later rebuild is made from.
+    let manifest_dir = manifest_dir.to_owned();
+    let config = config.path.clone();
+    let watcher = watch::spawn(
+        dirs,
+        Box::new(move || build_command(&manifest_dir, &config)),
+        hot,
+    );
 
-/// Rebuild the scenes dylib on every scene change; each fresh `.so` is what [`HotDylib`] reloads.
-/// The watcher runs as a process group (unix) / job object (windows), so killing it takes down
-/// its whole tree — on window close (via the returned handle) and on Ctrl-C/SIGTERM (via the handler).
-fn spawn_watcher(manifest_dir: &str, config: &gallery_build::Config) -> Option<Watcher> {
-    let mut command = cargo(manifest_dir, &config.path);
-    command.arg("watch");
-    for dir in watch_dirs(manifest_dir, &config.globs) {
-        command.args(["-w", &dir]);
-    }
-    // Same profile as `build_lib`, or the rebuilt dylib lands where the reloader never looks.
-    let rebuild = match host_profile() {
-        Some(profile) => format!("build --lib --profile {profile}"),
-        None => "build --lib".to_owned(),
-    };
-    command.args(["-x", &rebuild]);
-
-    let mut wrapped = CommandWrap::from(command);
-    #[cfg(unix)]
-    wrapped.wrap(process_wrap::std::ProcessGroup::leader());
-    #[cfg(windows)]
-    wrapped.wrap(process_wrap::std::JobObject);
-
-    let child = match wrapped.spawn() {
-        Ok(child) => Arc::new(Mutex::new(child)),
-        Err(e) => {
-            eprintln!("gallery: `cargo watch` did not start — edits will not rebuild: {e}");
-            return None;
-        }
-    };
-
-    let on_signal = Arc::clone(&child);
+    let on_signal = watcher.clone();
     if let Err(e) = ctrlc::set_handler(move || {
-        let _ = on_signal.lock().unwrap().kill();
+        on_signal.stop();
         std::process::exit(130);
     }) {
-        eprintln!("gallery: no signal handler — the watcher may outlive the window: {e}");
+        eprintln!("gallery: no signal handler — a build may outlive the window: {e}");
     }
 
-    Some(child)
+    watcher
 }
 
 /// A cargo command in the crate dir, naming the config only where `build.rs` would not find it.

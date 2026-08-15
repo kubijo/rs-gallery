@@ -204,10 +204,12 @@ where
     Discovered { modules, watch }
 }
 
-/// Whether a match came out of a build directory rather than a source tree.
+/// Whether a path came out of a build directory rather than a source tree.
 ///
 /// A `**` glob from a crate root walks straight into `target/`, where a scene file is cargo's own
 /// copy — compiling it in would declare the same scenes twice.
+/// The launcher's watcher asks the same of every file event,
+/// a directory the build writes into being one it would rebuild for forever.
 ///
 /// What marks it is the `CACHEDIR.TAG` cargo writes there, not the name:
 /// a source directory called `target` keeps its scenes, and any other cache
@@ -215,7 +217,8 @@ where
 ///
 /// The walk still descends either way, which only costs time
 /// — `glob` takes no directory to prune.
-fn build_output(path: &Utf8Path) -> bool {
+#[must_use]
+pub fn build_output(path: &Utf8Path) -> bool {
     path.ancestors()
         .any(|dir| dir.join("CACHEDIR.TAG").is_file())
 }

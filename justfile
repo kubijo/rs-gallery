@@ -23,6 +23,10 @@ demo-wgpu *args:
 demo-femtovg *args:
     @scripts/demo.sh femtovg {{ args }}
 
+# Browse the shell's own components — every state of the chrome gallery draws around a scene.
+shell-scenes *args:
+    @cargo run --example shell-scenes --features shell-scenes {{ args }}
+
 # Record a CPU profile of SCENE (a key fragment, e.g. `orbit`) into .tmp/reports/REPORT.
 profile SCENE="" REPORT="00-latest" FRAMES="600":
     @scripts/profile.sh {{ SCENE }} {{ REPORT }} {{ FRAMES }}

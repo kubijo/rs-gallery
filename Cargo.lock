@@ -1289,15 +1289,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
-name = "file-id"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1fc6a637b6dc58414714eddd9170ff187ecb0933d4c7024d1abbd23a3cc26e9"
-dependencies = [
- "windows-sys 0.60.2",
-]
-
-[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1460,11 +1451,12 @@ dependencies = [
  "gallery-macros",
  "glow 0.16.0",
  "glutin",
- "hot-lib-reloader",
  "image",
  "indoc",
  "inventory",
+ "libloading",
  "lyon",
+ "notify",
  "percent-encoding",
  "process-wrap",
  "regex",
@@ -1759,32 +1751,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "hot-lib-reloader"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15ab81229a2ea97fe1c9c31f36b2f1a7850304fb3dac5790fa2e9804ea68111a"
-dependencies = [
- "crc32fast",
- "hot-lib-reloader-macro",
- "libloading",
- "log",
- "notify",
- "notify-debouncer-full",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "hot-lib-reloader-macro"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62680ce3b216830fc95e1fbcc769bfb7ed8f98b92058102b3a731258b0d9d0e1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "http"
@@ -2355,20 +2321,6 @@ dependencies = [
  "mio",
  "walkdir",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "notify-debouncer-full"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb7fd166739789c9ff169e654dc1501373db9d80a4c3f972817c8a4d7cf8f34e"
-dependencies = [
- "crossbeam-channel",
- "file-id",
- "log",
- "notify",
- "parking_lot",
- "walkdir",
 ]
 
 [[package]]

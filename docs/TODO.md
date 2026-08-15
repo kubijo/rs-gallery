@@ -107,6 +107,12 @@ past a handful of images, and a structural target beside the pixel one.
 
 ## Later
 
+- [ ] The first build of a `--hot` run reports only to the terminal — `build_lib` blocks before the window exists, so
+  the compile you wait longest for has nowhere to show. Little stands in the way: the loader tolerates a missing dylib
+  and the header draws with no scenes, so the window could open first and the watcher's first build fill it. Against it:
+  you are looking at the terminal when you launch, and the blocking build stays anyway for headless runs and for
+  `--scene`, which resolves against the manifest before the window opens. Revisit for a gallery launched from an
+  editor's task runner, where no terminal is visible.
 - [ ] Auto-re-sync an instance's scaffolded files (`justfile` / `build.rs` / `main.rs`) from upstream as the template
   evolves. Hard to do safely — it must not clobber consumer edits — so `just update`'s "you're behind, here's what
   changed" is the lightweight stand-in for now.

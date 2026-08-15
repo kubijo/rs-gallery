@@ -24,7 +24,9 @@ gallery-macros = { path = "gallery-macros" }
 # The launcher and a scenes `build.rs` must resolve `gallery.toml`'s globs to the same strings,
 # so the reading lives in the crate the build script already pulls in.
 gallery-build = { path = "gallery-build" }
-hot-lib-reloader = "0.8"
+# Gallery opens the scenes dylib itself; a reloader that closes the one it replaces cannot be used.
+libloading = "0.8"
+notify = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
@@ -53,6 +55,12 @@ indoc = "2"
 # Forwarded egui_extras loader gates, so an instance enables one without declaring egui_extras.
 extras-svg = ["egui_extras/svg"]
 extras-image = ["egui_extras/image"]
+# The shell's own chrome as scenes (`just shell-scenes`). Off by default: a consumer's sidebar is theirs.
+shell-scenes = []
+
+[[example]]
+name = "shell-scenes"
+required-features = ["shell-scenes"]
 
 [dev-dependencies]
 # `snapshot` here, not above: its differ would otherwise land in every consumer's binary for something

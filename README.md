@@ -24,6 +24,10 @@ glob and title, or copy [`template/`](template) and fill the `{{ … }}` markers
 `cargo run` / `cargo run -- --hot` work too.) Without a window at all, `just render` and `just capture` write scenes to
 PNGs — see [Rendering scenes to images](#rendering-scenes-to-images).
 
+A `--hot` run says where it has got to in the window: a chip in the scenes panel's corner follows the cycle — watching,
+changed, building with its elapsed, reloaded — and a failed build puts a bar over the canvas that opens what cargo said.
+The terminal still gets cargo's output as it always did.
+
 > The instance package must not be named `gallery` — its scenes dylib would clash with the framework crate at link time
 > (the binary and directory still can). The scaffold names it `app-gallery`; that field is a plain literal rather than a
 > placeholder, so rename it by hand.

@@ -65,10 +65,15 @@ mod pass;
 mod perf;
 mod render;
 mod sheet;
+// Gallery's own chrome as scenes, off unless asked for: a consumer's sidebar is theirs.
+// The sibling of `scaffold_scenes` below, which type-checks the template's.
+#[cfg(feature = "shell-scenes")]
+mod shell_scenes;
 mod style;
 mod svg;
 mod tree;
 mod update;
+mod watch;
 pub use actions::action;
 use actions::{Log, collecting, render_actions};
 pub use context::{PADDING, SceneCtx, Stage, StageSpec};
@@ -83,6 +88,7 @@ use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
 use svg::Icons;
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
+use watch::{HotStatus, render_build_bar, render_hot_chip};
 
 /// Common imports for scene files: `use gallery::prelude::*;`
 /// then bare `scene_meta!` / `#[scene]`.
@@ -208,6 +214,7 @@ impl SceneSource for Linked {
 /// The selected scene (by stable key), the sidebar filter,
 /// the Preview/Source and debug-overlay toggles,
 /// the scenes / controls / performance panel toggles,
+/// whether a failed build's report is open,
 /// and each scene's persisted knob values.
 #[derive(Default)]
 pub(crate) struct ShellState {
@@ -219,6 +226,7 @@ pub(crate) struct ShellState {
     show_scenes: bool,
     show_controls: bool,
     show_actions: bool,
+    show_build: bool,
     knobs: KnobStore,
     targets: TargetStore,
     passes: PassStore,
@@ -382,6 +390,8 @@ pub struct Gallery<S: SceneSource> {
     /// A `--scene` request: a whole key, already matched by the launcher,
     /// and selected on the first frame once the tree exists.
     scene_request: Option<String>,
+    /// The rebuild cycle to show, `Some` under `--hot`: a run with no watcher says nothing.
+    hot: Option<HotStatus>,
     /// The GL proc-address loader, `Some` under [`Renderer::Glow`]
     /// — handed to scenes as [`SceneCtx::gl_loader`].
     gl_loader: Option<GlLoader>,
@@ -412,6 +422,7 @@ impl<S: SceneSource> Gallery<S> {
             perf_pos: None,
             frames_left: None,
             scene_request: None,
+            hot: None,
             gl_loader,
             gl,
         }
@@ -540,6 +551,10 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                                 );
                             });
                         });
+                    // Painted after the tree, so a list long enough to reach it runs underneath.
+                    if let Some(hot) = &self.hot {
+                        render_hot_chip(ui, ui.max_rect(), hot);
+                    }
                 });
         } else {
             collapsed_panel(
@@ -631,14 +646,19 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(PANEL_BG))
             .show(ui, |ui| {
-                if let Some(scene) = scene {
-                    // The same header bar as the side panels,
-                    // so all three line up in height and style.
+                {
+                    // The same header bar as the side panels, so all three line up.
+                    // Drawn with no scene too, or a failure would have nothing to sit under.
                     let mut header = header_bar(ui);
-                    header.label(header_title(&breadcrumb(scene, &manifest.groups)));
+                    if let Some(scene) = scene {
+                        header.label(header_title(&breadcrumb(scene, &manifest.groups)));
+                    }
                     // Tight padding keeps the cluster within the slim header bar.
                     header.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
+                        if scene.is_none() {
+                            return;
+                        }
                         ui.selectable_value(&mut self.state.show_source, true, "Source");
                         ui.selectable_value(&mut self.state.show_source, false, "Preview");
                         #[cfg(debug_assertions)]
@@ -651,6 +671,12 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         ui.checkbox(&mut self.state.show_actions, "Actions")
                             .on_hover_text("What the scene reports happening");
                     });
+                }
+
+                // Between the header and the canvas, which a failure is about:
+                // the scenes on it are the last that built, not the ones on disk.
+                if let Some(hot) = &self.hot {
+                    render_build_bar(ui, hot, &mut self.state.show_build);
                 }
 
                 if self.state.show_source {
@@ -962,7 +988,7 @@ const HEADER_H: f32 = 20.0;
 /// A collapsed side panel shrinks to this width
 /// — a rail just wide enough for the expand caret.
 const RAIL_W: f32 = 30.0;
-const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(0x1A, 0x1A, 0x1A);
+pub(crate) const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(0x1A, 0x1A, 0x1A);
 const HEADER_BG: egui::Color32 = egui::Color32::from_rgb(0x26, 0x26, 0x26);
 pub(crate) const HAIRLINE: egui::Color32 = egui::Color32::from_rgb(0x39, 0x39, 0x39);
 /// Dimmed foreground, for what should recede until looked at.
@@ -1127,15 +1153,17 @@ fn install_context(cc: &eframe::CreationContext<'_>, setup: impl FnOnce(&egui::C
     setup(&cc.egui_ctx);
 }
 
-/// Overrides for a scripted run; an ordinary session sets none.
+/// What the launcher knows and the shell cannot ask for; an ordinary session sets none of it.
 /// `frames` renders exactly that many and exits, which is what makes
 /// two profiles comparable; `scene` is the one to measure, already
 /// resolved to a whole key — the launcher matches the pattern while
 /// it can still report a miss and exit, rather than from inside the first frame.
+/// `hot` is the rebuild cycle the launcher's watcher reports into.
 #[derive(Default)]
 pub(crate) struct RunOptions {
     pub(crate) frames: Option<u32>,
     pub(crate) scene: Option<String>,
+    pub(crate) hot: Option<HotStatus>,
 }
 
 pub(crate) fn run_with<S: SceneSource + 'static>(
@@ -1176,6 +1204,7 @@ pub(crate) fn run_with<S: SceneSource + 'static>(
                 Gallery::new(source, settings, cc.get_proc_address.clone(), cc.gl.clone());
             gallery.frames_left = options.frames;
             gallery.scene_request = options.scene;
+            gallery.hot = options.hot;
             Ok(Box::new(gallery))
         }),
     )
@@ -1445,6 +1474,56 @@ mod tests {
         assert!(
             harness.query_by_label("saved to disk").is_some(),
             "the line the scene reported is on screen"
+        );
+    }
+
+    /// A shell over one scene, for the tests that only want a window to look at.
+    fn shell() -> Gallery<Fixed> {
+        Gallery::new(
+            Fixed(vec![scene("view", "m", true)], vec![group("m", "Group")]),
+            Settings::new(Renderer::Wgpu),
+            None,
+            None,
+        )
+    }
+
+    /// The whole point: a build that failed is on screen, not only in the terminal the gallery was
+    /// launched from — and the scene it broke is still there to look at behind it.
+    #[test]
+    fn a_failed_build_says_so_in_the_window_and_shows_what_cargo_said() {
+        let mut gallery = shell();
+        gallery.hot = Some(HotStatus::failing(2, "error[E0308]: mismatched types"));
+        // Open, as a click on the bar leaves it.
+        gallery.state.show_build = true;
+
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_cc| gallery);
+        harness.run_steps(2);
+
+        assert!(
+            harness.query_by_label("Build failed").is_some(),
+            "the chip over the canvas, painted but still named"
+        );
+        assert!(
+            harness.query_by_label("Build failed — 2 errors").is_some(),
+            "the bar over the canvas, counting the errors"
+        );
+        assert!(
+            harness
+                .query_by_label("error[E0308]: mismatched types")
+                .is_some(),
+            "and the report itself, without going back to the terminal"
+        );
+    }
+
+    /// Nothing is rebuilding the scenes without `--hot`, so there is no cycle to report on.
+    #[test]
+    fn a_run_with_no_watcher_behind_it_says_nothing_about_one() {
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_cc| shell());
+        harness.run_steps(2);
+
+        assert!(
+            harness.query_by_label("Watching").is_none(),
+            "no chip where nothing is watching"
         );
     }
 

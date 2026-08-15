@@ -64,6 +64,21 @@ impl Log {
         }
     }
 
+    /// A log of `lines` as `scene` reported them, a second apart — for the shell scene, which has
+    /// no scene running to report anything and would otherwise stamp them all at zero.
+    #[cfg(feature = "shell-scenes")]
+    pub(crate) fn posed(scene: &str, lines: &[&str]) -> Self {
+        Self {
+            lines: lines
+                .iter()
+                .enumerate()
+                .map(|(nth, line)| (nth as f64, (*line).to_owned()))
+                .collect(),
+            since: Some(Instant::now()),
+            scene: Some(scene.to_owned()),
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.lines.clear();
         self.since = None;
