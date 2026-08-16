@@ -7,6 +7,15 @@ so a minor release may carry a breaking change.
 
 - **`just tag` cuts an annotated tag, carrying the release notes.** `git push --follow-tags` pushes annotated tags and
   leaves lightweight ones behind without a word — v0.1.0 reached the remote only because it was pushed by name.
+- **A file type no formatter claims now fails the gate.** `on-unmatched` was reporting at a level that logs and exits 0,
+  so "did we miss a file type?" was an audit question nobody was answering; at `fatal` it is an invariant, and what is
+  genuinely not ours to format — binaries, lockfiles, cargo's manifests, verbatim licence text — is named in `excludes`
+  rather than left to go unnoticed. That surfaced `svgo.config.js`, formatted and linted by nothing until now: biome
+  covers it and the JSON beside it, so `biome.json` formats itself. `repochk` also holds that config to the biome
+  nixpkgs ships, which caught the pin being a version behind on its first run.
+- **The nix files are linted** — statix for anti-patterns, deadnix for dead bindings, per file like every other checker.
+  Three findings on adoption: two `lib = pkgs.lib` assignments better written as `inherit`, and `inputs.*.follows` keys
+  repeated where one attribute set says it once.
 
 ## [0.1.0] - 2026-08-15
 

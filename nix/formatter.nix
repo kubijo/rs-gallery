@@ -5,7 +5,7 @@
 # the `includes` globs it owns.
 pkgs:
 let
-  lib = pkgs.lib;
+  inherit (pkgs) lib;
 
   # rustfmt from the repo toolchain (rust-toolchain.toml via rust-overlay), so the formatter
   # and the build agree on edition.
@@ -123,7 +123,27 @@ let
   };
 
   treefmtConfig = pkgs.treefmt.buildConfig {
-    on-unmatched = "debug";
+    # A file no formatter claims fails the run, so a file type nobody wired up cannot sit
+    # unformatted without anyone noticing. What is not ours to format is named below instead.
+    # `fatal` rather than `error`: on treefmt 2.5, `error` logs `no formatter for path` and still
+    # exits 0 — with or without `--fail-on-change` — so the gate goes on reading as green.
+    on-unmatched = "fatal";
+    excludes = [
+      # Binary.
+      "*.png"
+      "*.ttf"
+      # Written by the resolver that owns it.
+      "*.lock"
+      # Cargo owns its manifests — `cargo add` writes its own shape,
+      # and taplo restructuring a dependency entry only starts a fight neither side wins.
+      "Cargo.toml"
+      "**/Cargo.toml"
+      # Kept as received: the licence this repo is under, and the font's own.
+      "UNLICENSE"
+      "fonts/noto/OFL.txt"
+      # One pattern to a line already, and no formatter to say otherwise.
+      ".gitignore"
+    ];
     formatter = {
       nix = {
         command = lib.getExe pkgs.nixpkgs-fmt;
@@ -201,13 +221,18 @@ let
         includes = [ "*.svg" ];
       };
 
-      # Not `Cargo.toml`: cargo owns its manifests — `cargo add` writes its own shape,
-      # and taplo restructuring a dependency entry only starts a fight neither side wins.
       toml = {
         command = lib.getExe pkgs.taplo;
         options = [ "format" ];
         includes = [ "*.toml" ];
-        excludes = [ "Cargo.toml" "**/Cargo.toml" ];
+      };
+
+      # `biome.json` configures this, and JSON is in its globs so the config formats itself
+      # rather than becoming the one file nothing claims.
+      biome = {
+        command = lib.getExe pkgs.biome;
+        options = [ "format" "--write" ];
+        includes = [ "*.js" "*.json" ];
       };
 
       yaml = {

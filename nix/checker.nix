@@ -9,7 +9,7 @@
 # (a `command` that exits non-zero on failure, plus the `includes` globs it owns).
 pkgs:
 let
-  lib = pkgs.lib;
+  inherit (pkgs) lib;
 
   checkers = [
     {
@@ -24,6 +24,45 @@ let
       includes = [ "*.py" ];
       command = pkgs.writeShellScript "python-check" ''
         exec ${lib.getExe pkgs.ruff} check "$1"
+      '';
+    }
+    {
+      name = "nix-antipatterns";
+      includes = [ "*.nix" ];
+      command = pkgs.writeShellScript "statix-check" ''
+        exec ${lib.getExe pkgs.statix} check "$1"
+      '';
+    }
+    {
+      name = "nix-dead-code";
+      includes = [ "*.nix" ];
+      # `--fail` turns a report into an exit code; without it deadnix prints and exits 0.
+      command = pkgs.writeShellScript "deadnix-check" ''
+        exec ${lib.getExe pkgs.deadnix} --fail "$1"
+      '';
+    }
+    {
+      name = "javascript";
+      includes = [ "*.js" ];
+      command = pkgs.writeShellScript "biome-check" ''
+        exec ${lib.getExe pkgs.biome} lint "$1"
+      '';
+    }
+    {
+      # Holds `biome.json` to the biome nixpkgs ships: a bump that renames a setting or moves the
+      # `$schema` pin fails here, with the diff and the `--write` that applies it.
+      name = "biome-config";
+      includes = [ "biome.json" ];
+      # `migrate` exits 0 on biome 2.5 whether or not a migration is owed, so the verdict has to
+      # come from its report. It takes no path either, reading the config from the working
+      # directory — hence the `cd`, which also keeps the `$schema` it compares against this file's.
+      command = pkgs.writeShellScript "biome-config-check" ''
+        report=$(cd "''${1%/*}" && ${lib.getExe pkgs.biome} migrate 2>&1)
+        case "$report" in
+            *"no migration needed"*) exit 0 ;;
+        esac
+        printf '%s\n' "$report"
+        exit 1
       '';
     }
     {
