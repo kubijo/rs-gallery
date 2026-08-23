@@ -27,3 +27,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+# Named rather than left to `src`, which ruff resolves against the directory holding this
+# file: repofmt and repochk pass it by store path, where that directory is /nix/store.
+[tool.ruff.lint.isort]
+known-first-party = ["gallery_perf", "gallery_release"]

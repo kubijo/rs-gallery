@@ -1,5 +1,24 @@
 {
   "nodes": {
+    "nix-tools": {
+      "inputs": {
+        "nixpkgs-pinned": "nixpkgs-pinned"
+      },
+      "locked": {
+        "lastModified": 1787509584,
+        "narHash": "sha256-3Ttj5YbnasnLy6TkPe81gBT4pFDLEfV/HVZJMjBy0aM=",
+        "owner": "kubijo",
+        "repo": "nix-tools",
+        "rev": "5b9a9d737d1d956ee4089ed8e4707101b2d00070",
+        "type": "github"
+      },
+      "original": {
+        "owner": "kubijo",
+        "ref": "v0.1.1",
+        "repo": "nix-tools",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1786599213,
@@ -12,6 +31,22 @@
       "original": {
         "owner": "NixOS",
         "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-pinned": {
+      "locked": {
+        "lastModified": 1787364730,
+        "narHash": "sha256-NcYt9QJfpJiF1lAyN8BDPB4EeScbPU+EwQqPiBElrpU=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "a831408e6378bc02ebf8cc09b52c96ca86f6bab4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
         "repo": "nixpkgs",
         "type": "github"
       }
@@ -64,6 +99,7 @@
     },
     "root": {
       "inputs": {
+        "nix-tools": "nix-tools",
         "nixpkgs": "nixpkgs",
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",

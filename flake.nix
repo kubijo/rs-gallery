@@ -3,12 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Not `follows`-ed: the point is the tool set it pins, identical across every repo using it.
+    nix-tools.url = "github:kubijo/nix-tools/v0.1.1";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # `tools/` has real dependencies now, so nix builds its environment from the same `uv.lock`
-    # uv resolves — one lockfile rather than a nix-side restatement of it.
+    # `tools/` builds from the same `uv.lock` uv resolves, not a nix-side restatement of it.
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -31,105 +32,169 @@
   };
 
   outputs =
-    { self, nixpkgs, rust-overlay, pyproject-nix, uv2nix, pyproject-build-systems }:
+    {
+      self,
+      nixpkgs,
+      nix-tools,
+      rust-overlay,
+      pyproject-nix,
+      uv2nix,
+      pyproject-build-systems,
+    }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      forAllSystems = f: nixpkgs.lib.genAttrs systems (
-        system: f (import nixpkgs {
-          inherit system;
-          overlays = [ rust-overlay.overlays.default ];
-        })
-      );
-      formatterFor = pkgs: import ./nix/formatter.nix pkgs;
-      checkerFor = pkgs: import ./nix/checker.nix pkgs;
-      testFor = pkgs: import ./nix/test.nix { inherit pkgs; };
+      inherit (nixpkgs) lib;
 
-      # `tools/`, built from its own `uv.lock`: the interpreter is pinned here, the dependency set
-      # comes from the file uv resolves, and the console scripts (`gallery-perf`, `gallery-release`)
-      # land on PATH. `deps.all` takes the dev group with it, which is what runs the tests.
+      # x86_64-darwin is absent because nixpkgs 26.11 dropped it.
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+
       pythonToolsFor =
         pkgs:
         let
           workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./tools; };
           pythonSet =
             (pkgs.callPackage pyproject-nix.build.packages { python = pkgs.python314; }).overrideScope
-              (nixpkgs.lib.composeManyExtensions [
-                pyproject-build-systems.overlays.default
-                (workspace.mkPyprojectOverlay { sourcePreference = "wheel"; })
-              ]);
+              (
+                lib.composeManyExtensions [
+                  pyproject-build-systems.overlays.default
+                  (workspace.mkPyprojectOverlay { sourcePreference = "wheel"; })
+                ]
+              );
         in
+        # `deps.all` takes the dev group with it, which is what runs the tests.
         pythonSet.mkVirtualEnv "gallery-tools-env" workspace.deps.all;
 
-      validateFor = pkgs: import ./nix/validate.nix {
-        inherit pkgs;
-        formatter = formatterFor pkgs;
-        checker = checkerFor pkgs;
-        test = testFor pkgs;
-        pythonTools = pythonToolsFor pkgs;
-      };
+      each = lib.genAttrs systems (
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          pythonTools = pythonToolsFor pkgs;
+          test = import ./nix/test.nix { inherit pkgs; };
+
+          project = nix-tools.lib.configure {
+            inherit system;
+            src = self;
+            # The svg formatter runs on it; nothing else here does.
+            nodejs = pkgs.nodejs_24;
+
+            format = {
+              # `onUnmatched = "fatal"`, so whatever no formatter claims has to be named here.
+              exclude = [
+                # `png` stays off besides: tests/snapshots/ holds byte-compared references.
+                "*.png"
+                "*.ttf"
+                # Kept as received: this repo's licence, and the font's own.
+                "UNLICENSE"
+                "fonts/noto/OFL.txt"
+              ];
+              # nixpkgs' rustfmt would drag in a second toolchain beside the pinned one.
+              rust = {
+                exe = lib.getExe' rustToolchain "rustfmt";
+                configFile = ./rustfmt.toml;
+              };
+              # Kept over the library's: it would reflow to 120 columns and single quotes,
+              # and drop the rule selection under `[tool.ruff.lint]`.
+              python.configFile = ./tools/pyproject.toml;
+              javascript = true;
+              svg.configFile = ./svgo.config.js;
+            };
+
+            lint = {
+              python.configFile = ./tools/pyproject.toml;
+              javascript = true;
+            };
+
+            validate = {
+              runtimeInputs = [
+                rustToolchain
+                pkgs.cargo-llvm-cov
+                pkgs.cargo-nextest
+                pkgs.ty
+                test
+                pythonTools
+              ];
+              steps = [
+                "cargo clippy --workspace --all-targets -- -D warnings"
+                # egui gates `Style::debug` on `debug_assertions`, so code touching it compiles
+                # in dev and fails in release.
+                "cargo clippy --workspace --release --all-targets -- -D warnings"
+                # The forwarded `egui_extras` gates are off by default, so nothing else builds them.
+                "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+                # tools/ is its own uv project and both resolve imports from its root —
+                # something repochk's file-by-file lint never sees.
+                "(cd tools && ty check --python ${pythonTools} . && pytest -q)"
+                {
+                  name = "tests under coverage";
+                  # One step: the gate keeps going after a failure, and a report built
+                  # on a failed test run is noise.
+                  run = lib.concatStringsSep " && " [
+                    # `--no-report` accumulates into the target dir by design: without the clean,
+                    # the reports merge every earlier run and count code that is gone.
+                    "cargo llvm-cov clean --workspace"
+                    # Through the wrapper, which carries the GL stack the capture tests render on.
+                    "gallery-test"
+                    "cargo llvm-cov report"
+                    # A report to read rather than build output, hence .tmp over the target dir.
+                    "cargo llvm-cov report --html --output-dir .tmp/coverage"
+                    "cargo llvm-cov report --lcov --output-path .tmp/coverage/lcov.info"
+                    "cargo llvm-cov report --cobertura --output-path .tmp/coverage/cobertura.xml"
+                  ];
+                }
+              ];
+            };
+          };
+        in
+        {
+          inherit (project) formatter checks apps;
+
+          devShell = pkgs.mkShell {
+            packages = project.packages ++ [
+              pkgs.just
+              rustToolchain
+              pkgs.cargo-nextest
+              pkgs.cargo-llvm-cov
+              test
+              pkgs.cargo-outdated
+              pkgs.cargo-deny
+              pkgs.cargo-generate
+              pythonTools
+              # Kept beside the built environment, to maintain the lockfile it is built from.
+              pkgs.uv
+              # The pinned one, so what a shell or an editor reports is what the gate enforces.
+              project.toolPkgs.ruff
+              pkgs.ty
+              pkgs.samply
+              pkgs.binutils
+              pkgs.pkg-config
+            ];
+            # egui/wgpu dlopen these at runtime (examples, or a consumer's binary).
+            LD_LIBRARY_PATH = lib.makeLibraryPath [
+              pkgs.libGL
+              pkgs.libxkbcommon
+              pkgs.wayland
+              pkgs.vulkan-loader
+              pkgs.libx11
+              pkgs.libxcursor
+              pkgs.libxi
+              pkgs.libxrandr
+            ];
+          };
+        }
+      );
+
+      pick = attr: lib.mapAttrs (_: perSystem: perSystem.${attr}) each;
     in
     {
-      # `nix fmt` (and `just format`) run this wrapper over the whole tree.
-      formatter = forAllSystems formatterFor;
-
-      # Forge-agnostic CI gate: `nix flake check` fails if anything is unformatted or fails the repo lint.
-      checks = forAllSystems (pkgs: {
-        formatting =
-          pkgs.runCommandLocal "check-formatting" { nativeBuildInputs = [ (formatterFor pkgs) ]; }
-            ''
-              cp -r ${self} work && chmod -R u+w work && cd work
-              export HOME="$TMPDIR"
-              repofmt --fail-on-change
-              touch "$out"
-            '';
-        checking =
-          pkgs.runCommandLocal "check-lint" { nativeBuildInputs = [ (checkerFor pkgs) pkgs.gitMinimal ]; }
-            ''
-              cp -r ${self} work && chmod -R u+w work && cd work
-              export HOME="$TMPDIR"
-              git init -q && git add -A
-              repochk
-              touch "$out"
-            '';
-      });
-
-      devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell {
-          packages = [
-            pkgs.just
-            (formatterFor pkgs)
-            (checkerFor pkgs)
-            (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
-            pkgs.cargo-nextest
-            pkgs.cargo-llvm-cov
-            (validateFor pkgs)
-            (testFor pkgs)
-            pkgs.cargo-outdated
-            pkgs.cargo-deny
-            pkgs.cargo-generate
-            # The tools' own environment: their interpreter, their dependencies, and the console
-            # scripts the `just` recipes call. `uv` stays for maintaining the lockfile it is built
-            # from.
-            (pythonToolsFor pkgs)
-            pkgs.uv
-            pkgs.ruff
-            pkgs.ty
-            pkgs.samply
-            pkgs.binutils
-            pkgs.pkg-config
-          ];
-          # egui/wgpu dlopen these at runtime (examples, or a consumer's binary).
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-            pkgs.libGL
-            pkgs.libxkbcommon
-            pkgs.wayland
-            pkgs.vulkan-loader
-            pkgs.libx11
-            pkgs.libxcursor
-            pkgs.libxi
-            pkgs.libxrandr
-          ];
-        };
-      });
+      formatter = pick "formatter";
+      checks = pick "checks";
+      apps = pick "apps";
+      devShells = lib.mapAttrs (_: perSystem: { default = perSystem.devShell; }) each;
     };
 }

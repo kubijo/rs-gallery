@@ -16,7 +16,10 @@ pkgs.writeShellApplication {
     __EGL_VENDOR_LIBRARY_FILENAMES = "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json";
 
     # Mesa's own libraries are opened at runtime, so they have to be findable.
-    LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.mesa pkgs.libGL ];
+    LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+      pkgs.mesa
+      pkgs.libGL
+    ];
 
     # A runner has no GPU to fall back on.
     LIBGL_ALWAYS_SOFTWARE = "1";

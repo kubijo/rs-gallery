@@ -154,8 +154,8 @@ A scene renders to a PNG with no window, so anyone without a screen — over SSH
 can look at a component instead of asking for a screenshot:
 
 ```bash
-just render Button /tmp/button.png            # the canvas at 1280x720
-just render Button /tmp/button.png 480x320    # ...or at a size you pick
+just render Button /tmp/button.png         # the canvas at 1280x720
+just render Button /tmp/button.png 480x320 # ...or at a size you pick
 ```
 
 The scene is a whole key (`module_path::name`) or a case-insensitive regex over the keys, and must match exactly one.
@@ -243,7 +243,7 @@ Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` 
 Write the notes under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) as the work lands, then, from a clean `main`:
 
 ```bash
-just tag minor        # or major, or patch
+just tag minor # or major, or patch
 ```
 
 It bumps `[workspace.package] version` — the one place a version is written, inherited by all three crates — dates the
