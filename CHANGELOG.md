@@ -3,7 +3,7 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-24
 
 - **`just tag` cuts an annotated tag, carrying the release notes.** `git push --follow-tags` pushes annotated tags and
   leaves lightweight ones behind without a word — v0.1.0 reached the remote only because it was pushed by name.
