@@ -5,27 +5,27 @@
         "nixpkgs-pinned": "nixpkgs-pinned"
       },
       "locked": {
-        "lastModified": 1787509584,
-        "narHash": "sha256-3Ttj5YbnasnLy6TkPe81gBT4pFDLEfV/HVZJMjBy0aM=",
+        "lastModified": 1787560879,
+        "narHash": "sha256-z0thloKb7D1pM/gBbkwhevxyGrU8YuGPp5wrwgHJ8kA=",
         "owner": "kubijo",
         "repo": "nix-tools",
-        "rev": "5b9a9d737d1d956ee4089ed8e4707101b2d00070",
+        "rev": "2d70a535c329076dc167af41af4b9f81441e148b",
         "type": "github"
       },
       "original": {
         "owner": "kubijo",
-        "ref": "v0.1.1",
+        "ref": "v0.2.0",
         "repo": "nix-tools",
         "type": "github"
       }
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1786599213,
-        "narHash": "sha256-yNJd40f11EzXBjSByCB7IPpeFFAdeoSKKM67dGkfFoU=",
+        "lastModified": 1787498568,
+        "narHash": "sha256-9i/VTdusq/+NM/tz+J1Re+ojkMB8MBf0QshnYfzHz30=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "0e251e24a4f24e036a084b6b4b2d2491af4167f4",
+        "rev": "56c02bc00adcf003215cc4bd996d6efaf4cff188",
         "type": "github"
       },
       "original": {
@@ -64,11 +64,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785730568,
-        "narHash": "sha256-NjSPsgjJ7MSpBtTkUcmNhRe6AFZ96+zsca2M8YuQi8Y=",
+        "lastModified": 1786936886,
+        "narHash": "sha256-8SFyOdmcG6Nsh/JzlH812lTI/v+ur06fpQhj/acNn8k=",
         "owner": "pyproject-nix",
         "repo": "build-system-pkgs",
-        "rev": "90fde00db3687922d39d95fc591475fd0bbbcd72",
+        "rev": "90ffdeee1a4929b231913df067448cd9803d3e07",
         "type": "github"
       },
       "original": {
@@ -114,11 +114,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1786849542,
-        "narHash": "sha256-MS8cOa/ii1+QA8R3JWVzqEIoXimu9n50GwQDiBVTFOM=",
+        "lastModified": 1787540965,
+        "narHash": "sha256-48/4bbmK3W3Av3YPnrFb/tVQXPvBwU6kyM3Pb13VVD8=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "b211eadeba8b180da9453ec3413a8a3535c85b3f",
+        "rev": "ab450d47a3f906d19de1b332915bfc6e5b29c853",
         "type": "github"
       },
       "original": {

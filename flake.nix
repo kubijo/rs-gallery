@@ -3,8 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # Not `follows`-ed: the point is the tool set it pins, identical across every repo using it.
-    nix-tools.url = "github:kubijo/nix-tools/v0.1.1";
+    nix-tools.url = "github:kubijo/nix-tools/v0.2.0";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -168,7 +167,7 @@
               # Kept beside the built environment, to maintain the lockfile it is built from.
               pkgs.uv
               # The pinned one, so what a shell or an editor reports is what the gate enforces.
-              project.toolPkgs.ruff
+              (nix-tools.lib.toolPkgsFor system).ruff
               pkgs.ty
               pkgs.samply
               pkgs.binutils
