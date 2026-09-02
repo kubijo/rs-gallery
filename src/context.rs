@@ -417,7 +417,7 @@ impl<'a> SceneCtx<'a> {
     }
 
     /// [`offscreen_input`](Self::offscreen_input) on a stage — see
-    /// [`offscreen_stage`](Self::offscreen_stage) for the chrome, and [`Pointer`] for the events.
+    /// [`offscreen_stage`](Self::offscreen_stage) for the chrome, and [`Pointer`](crate::Pointer) for the events.
     /// `None` while the stage is collapsed: nothing is drawn, so nothing can be pointed at.
     pub fn offscreen_input_stage(
         &mut self,
@@ -699,7 +699,7 @@ impl<'a> SceneCtx<'a> {
 
     /// Like [`offscreen`](Self::offscreen), and reports the pointer that landed on the image
     /// — press, move, release and wheel, in its own pixel space — for content that hit-tests itself.
-    /// [`Pointer`] has the coordinate and capture rules.
+    /// [`Pointer`](crate::Pointer) has the coordinate and capture rules.
     ///
     /// The image takes the drag and the wheel, so neither also moves the canvas behind it;
     /// a scene that would rather leave the canvas scrolling calls [`offscreen`](Self::offscreen).

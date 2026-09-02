@@ -1,5 +1,3 @@
-import re
-
 import pytest
 
 from gallery_release.repo import (
@@ -7,6 +5,7 @@ from gallery_release.repo import (
     VERSION_LINE,
     Level,
     ReleaseError,
+    date_unreleased,
     documented,
     next_version,
     rewrite,
@@ -80,6 +79,14 @@ def test_a_rewrite_that_did_not_match_exactly_once_is_a_fault(tmp_path, manifest
         rewrite(path, VERSION_LINE, 'version = "0.2.0"')
 
 
-def test_the_unreleased_heading_pattern_is_the_one_the_cli_rewrites():
-    # The CLI builds this pattern to date the heading; a changed constant must not outrun it.
-    assert re.search(rf"^{re.escape(UNRELEASED)}$", CHANGELOG, re.MULTILINE) is not None
+def test_dating_unreleased_keeps_a_fresh_section_for_the_next_release(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(CHANGELOG)
+
+    date_unreleased(changelog, "0.2.0", "2026-09-02")
+
+    released = changelog.read_text()
+    assert f"{UNRELEASED}\n\n## [0.2.0] - 2026-09-02" in released
+    assert unreleased_notes(released) == []
+    assert documented(released, "0.2.0")
+    assert "- a fix nobody has released yet" in released

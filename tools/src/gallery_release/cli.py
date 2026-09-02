@@ -7,7 +7,6 @@ One long line per paragraph, too — rich wraps help text to the terminal, and h
 here survive into the middle of its lines.
 """
 
-import re
 from typing import Annotated
 
 import typer
@@ -24,6 +23,7 @@ from .repo import (
     ReleaseError,
     already_tagged,
     check_inheritance,
+    date_unreleased,
     declared_version,
     documented,
     next_version,
@@ -109,11 +109,7 @@ def _cut(level: Level) -> None:
         raise ReleaseError("nothing done")
 
     rewrite(here / "Cargo.toml", VERSION_LINE, f'version = "{version}"')
-    rewrite(
-        changelog,
-        re.compile(rf"^{re.escape(UNRELEASED)}$", re.MULTILINE),
-        f"## [{version}] - {date}",
-    )
+    date_unreleased(changelog, version, date)
     run("cargo", "update", "--workspace", "--quiet", cwd=here)
 
     # Read back what the edits came to, then put the release through the gate it has to pass.
@@ -142,7 +138,7 @@ def _plan(current: str, version: str, date: str) -> Table:
     plan.add_column(style="bold")
     plan.add_column()
     plan.add_row("Cargo.toml", f"workspace version {current} [bold]→[/] {version}")
-    plan.add_row("CHANGELOG.md", escape(f"{UNRELEASED} → ## [{version}] - {date}"))
+    plan.add_row("CHANGELOG.md", escape(f"pending notes → ## [{version}] - {date}"))
     plan.add_row("Cargo.lock", "refreshed")
     plan.add_row("commit", f"release: v{version}")
     plan.add_row("tag", f"v{version}")

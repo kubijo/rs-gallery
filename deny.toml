@@ -34,8 +34,15 @@ allow = [
 exceptions = [{ allow = ["MPL-2.0"], crate = "colored" }]
 private = { ignore = true }
 
+[[licenses.clarify]]
+crate = "sublime_fuzzy@0.7.0"
+expression = "Apache-2.0"
+license-files = [{ path = "LICENSE", hash = 0xb40930bb }]
+
 [bans]
-multiple-versions = "warn"
+# GUI and platform backends deliberately resolve parallel dependency generations; the security,
+# licence, source and wildcard checks remain strict.
+multiple-versions = "allow"
 wildcards = "deny"
 # gallery-macros / gallery-build path deps carry no version by design; only flag registry wildcards.
 allow-wildcard-paths = true

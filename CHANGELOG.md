@@ -3,6 +3,24 @@
 Notable changes to `gallery`, newest first, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Pre-1.0,
 so a minor release may carry a breaking change.
 
+## [Unreleased]
+
+- **A headless capture can run beside an open hot gallery without corrupting its mapped scenes library.** Every process
+  began its copied dylib names at `-hot-0`, so a capture overwrote the file already mapped by the window; the next
+  symbol lookup or repaint could then segfault. Copies now take atomically unique temporary names and clean themselves
+  up when a load fails, a reload replaces them, or their gallery shuts down normally.
+- **Cargo and Python dependencies, and Nix inputs, are current.** `convert_case` 0.12, `libloading` 0.9, `notify` 8 and
+  `process-wrap` 10 bring the direct Rust dependencies to their current majors; Typer 0.27.2 and compatible Python
+  tooling packages are freshly locked too. The refresh also updates compatible Rust packages, nixpkgs, the Rust overlay
+  and Python build inputs. The intentionally distinct glow 0.16 test pin stays put; `just upgrade-python` refreshes the
+  Python lock independently.
+- **Every non-release QA recipe is warning-clean and fails on new findings.** Rustdoc denies warnings, the audit
+  verifies `sublime_fuzzy`'s Apache-2.0 file by hash without repeating its missing-SPDX metadata warning, and the
+  outdated check fails on drift beyond the intentional glow pin.
+- **Cutting a release leaves the changelog ready for the next one.** The pending notes move under their dated version
+  while a fresh `Unreleased` section stays above them, instead of making the following tag depend on recreating that
+  heading by hand.
+
 ## [0.2.0] - 2026-08-24
 
 - **`just tag` cuts an annotated tag, carrying the release notes.** `git push --follow-tags` pushes annotated tags and

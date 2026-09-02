@@ -107,6 +107,15 @@ def documented(changelog: str, version: str) -> bool:
     return re.search(heading, changelog, re.MULTILINE) is not None
 
 
+def date_unreleased(path: Path, version: str, date: str) -> None:
+    """Move the pending notes into a dated release, leaving a fresh section above them."""
+    rewrite(
+        path,
+        re.compile(rf"^{re.escape(UNRELEASED)}$", re.MULTILINE),
+        f"{UNRELEASED}\n\n## [{version}] - {date}",
+    )
+
+
 def already_tagged(root: Path, version: str) -> bool:
     return (
         subprocess.run(

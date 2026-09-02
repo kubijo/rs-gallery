@@ -53,12 +53,16 @@ release-check TAG:
 
 # Report direct dependencies with a newer version available.
 outdated:
-    @just in-shell cargo outdated --root-deps-only
+    @just in-shell cargo outdated --root-deps-only --ignore glow --exit-code 1
+
+# Upgrade every Python tool dependency allowed by tools/pyproject.toml.
+upgrade-python *args:
+    @just in-shell uv lock --project tools --upgrade {{ args }}
 
 # Dependency audit — cargo-deny: advisories (RustSec) + license/ban/source policy (deny.toml).
 audit:
-    @just in-shell cargo deny check
+    @just in-shell cargo deny check -D warnings -A no-license-field
 
 # Build the API docs.
 docs *args:
-    @just in-shell cargo doc --no-deps {{ args }}
+    @RUSTDOCFLAGS="-D warnings" just in-shell cargo doc --no-deps {{ args }}

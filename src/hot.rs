@@ -4,13 +4,14 @@
 //! closed. See [`HotDylib`].
 
 use std::{
-    fs,
+    fs, io,
     mem::ManuallyDrop,
     time::{Duration, Instant, SystemTime},
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
 use libloading::Library;
+use tempfile::{Builder, NamedTempFile};
 
 use crate::{Manifest, SceneSource, watch::HotStatus};
 
@@ -54,10 +55,8 @@ pub struct HotDylib {
     loaded: ManuallyDrop<Vec<Library>>,
     /// Where cargo writes the dylib: the file a rebuild is noticed by.
     dylib: Utf8PathBuf,
-    /// The copy the current library was opened from, kept for a backtrace to name.
-    copy: Option<Utf8PathBuf>,
-    /// How many have been opened, which is what keeps each copy off a mapped path.
-    opens: usize,
+    /// The guarded copy backing the current mapping, kept for backtraces.
+    copy: Option<NamedTempFile>,
     /// What the dylib looked like when it was opened.
     from: Option<Written>,
     /// A writing noticed but not yet opened.
@@ -101,7 +100,6 @@ impl HotDylib {
             loaded: ManuallyDrop::new(Vec::new()),
             dylib: dir.join(format!("{PREFIX}{lib_name}.{EXTENSION}")),
             copy: None,
-            opens: 0,
             from: None,
             seen: None,
             hot: watching.then(HotStatus::new),
@@ -117,24 +115,18 @@ impl HotDylib {
     /// Copy the dylib aside and open it, keeping open whatever it replaces. The copy is what gets
     /// opened, so the next rebuild writes the original rather than a file this process has mapped.
     fn open(&mut self, written: Written) -> Result<(), String> {
-        let stem = self.dylib.file_stem().unwrap_or("scenes");
-        let copy = self
-            .dylib
-            .with_file_name(format!("{stem}-hot-{}.{EXTENSION}", self.opens));
-        fs::copy(&self.dylib, &copy).map_err(|e| format!("copy `{}`: {e}", self.dylib))?;
-        codesign(&copy);
+        let copy = copy_dylib(&self.dylib)?;
+        let copy_path = Utf8Path::from_path(copy.path()).ok_or("dylib copy path is not UTF-8")?;
+        codesign(copy_path);
 
         // SAFETY: the file is the scenes dylib gallery built, and opening one runs its initialisers
         // — the `inventory` registrations behind `__gallery_manifest`.
-        let library = unsafe { Library::new(copy.as_std_path()) }
-            .map_err(|e| format!("open `{copy}`: {e}"))?;
+        let library =
+            unsafe { Library::new(copy.path()) }.map_err(|e| format!("open `{copy_path}`: {e}"))?;
 
         self.loaded.push(library);
-        self.opens += 1;
         self.from = Some(written);
-        if let Some(replaced) = self.copy.replace(copy) {
-            discard(&replaced);
-        }
+        self.copy = Some(copy);
         Ok(())
     }
 
@@ -167,6 +159,25 @@ impl HotDylib {
     }
 }
 
+/// Copy the dylib to an atomically unique, guarded path beside it.
+fn copy_dylib(dylib: &Utf8Path) -> Result<NamedTempFile, String> {
+    let dir = dylib
+        .parent()
+        .ok_or_else(|| format!("dylib `{dylib}` has no parent directory"))?;
+    let stem = dylib.file_stem().unwrap_or("scenes");
+    let prefix = format!("{stem}-hot-");
+    let suffix = format!(".{EXTENSION}");
+    let mut copy = Builder::new()
+        .prefix(&prefix)
+        .suffix(&suffix)
+        .tempfile_in(dir)
+        .map_err(|e| format!("create a copy beside `{dylib}`: {e}"))?;
+    let mut source =
+        fs::File::open(dylib).map_err(|e| format!("open `{dylib}` to copy it: {e}"))?;
+    io::copy(&mut source, copy.as_file_mut()).map_err(|e| format!("copy `{dylib}`: {e}"))?;
+    Ok(copy)
+}
+
 /// Whether a dylib that has changed since it was opened has stood still long enough to open.
 fn settled(seen: Option<Seen>, written: Written) -> bool {
     seen.is_some_and(|seen| seen.written == written && seen.at.elapsed() >= SETTLE)
@@ -179,16 +190,6 @@ fn written(path: &Utf8Path) -> Option<Written> {
         at: file.modified().ok()?,
         len: file.len(),
     })
-}
-
-/// Drop a copy that has been replaced. A unix mapping outlives its file, so only the predecessor
-/// goes and the one in use stays for a backtrace to name.
-/// Windows holds a loaded file open, where they stay.
-fn discard(copy: &Utf8Path) {
-    #[cfg(unix)]
-    let _ = fs::remove_file(copy);
-    #[cfg(not(unix))]
-    let _ = copy;
 }
 
 /// Sign the copy ad-hoc, which is what lets macOS open a library that has moved
@@ -279,19 +280,63 @@ mod tests {
         );
     }
 
-    /// The name is the platform's, and each copy its own file
-    /// — opening one over a mapping is what the copies exist to avoid.
+    /// Two loaders sharing a cargo target must never share a copy path.
     #[test]
     fn each_open_copies_the_dylib_to_a_name_of_its_own() {
-        let dylib = Utf8PathBuf::from(format!("/t/{PREFIX}app_gallery.{EXTENSION}"));
-        let stem = dylib.file_stem().expect("a stem");
+        let dir = tempfile::tempdir().expect("a temporary target directory");
+        let dylib =
+            Utf8PathBuf::from_path_buf(dir.path().join(format!("{PREFIX}app_gallery.{EXTENSION}")))
+                .expect("a UTF-8 temporary path");
+        let contents = b"a dylib standing in for the test";
+        fs::write(&dylib, contents).expect("write the source");
 
-        let copies: Vec<Utf8PathBuf> = (0..2)
-            .map(|open| dylib.with_file_name(format!("{stem}-hot-{open}.{EXTENSION}")))
+        let first = copy_dylib(&dylib).expect("the first loader's copy");
+        let second = copy_dylib(&dylib).expect("the second loader's copy");
+        let first_path = first.path().to_owned();
+        let second_path = second.path().to_owned();
+
+        assert_ne!(first_path, second_path);
+        assert_ne!(first_path, dylib.as_std_path());
+        assert_ne!(second_path, dylib.as_std_path());
+        assert!(
+            first_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(&format!("{PREFIX}app_gallery-hot-"))
+                        && name.ends_with(&format!(".{EXTENSION}"))
+                }),
+            "{first_path:?}"
+        );
+        assert_eq!(fs::read(&first_path).expect("read the copy"), contents);
+
+        drop(first);
+        drop(second);
+        assert!(!first_path.exists(), "the first copy was cleaned up");
+        assert!(!second_path.exists(), "the second copy was cleaned up");
+    }
+
+    #[test]
+    fn a_copy_that_does_not_open_is_cleaned_up() {
+        let dir = tempfile::tempdir().expect("a temporary target directory");
+        let dylib =
+            Utf8PathBuf::from_path_buf(dir.path().join(format!("{PREFIX}not_a_dylib.{EXTENSION}")))
+                .expect("a UTF-8 temporary path");
+        fs::write(&dylib, b"not a dynamic library").expect("write the source");
+        let mut source = HotDylib {
+            loaded: ManuallyDrop::new(Vec::new()),
+            dylib,
+            copy: None,
+            from: None,
+            seen: None,
+            hot: None,
+        };
+
+        assert!(source.open(written_at(21)).is_err());
+        let paths: Vec<_> = fs::read_dir(dir.path())
+            .expect("read the target directory")
+            .map(|entry| entry.expect("read a target entry").path())
             .collect();
-
-        assert_ne!(copies[0], copies[1]);
-        assert!(copies.iter().all(|copy| copy != &dylib), "{copies:?}");
-        assert!(copies[0].as_str().ends_with(EXTENSION), "{:?}", copies[0]);
+        assert_eq!(paths, [source.dylib.as_std_path()]);
     }
 }

@@ -46,7 +46,7 @@ macro_rules! launch {
 /// Read the config, build the scenes dylib from its globs, load it,
 /// and open the window — or, headlessly, render scenes to PNGs instead.
 ///
-/// Prefer the [`launch!`] macro, which fills `package`/`manifest_dir` from the calling crate.
+/// Prefer the [`launch!`](macro@crate::launch) macro, which fills `package`/`manifest_dir` from the calling crate.
 /// `--help` lists the arguments.
 ///
 /// # Panics
