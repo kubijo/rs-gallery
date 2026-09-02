@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-02
+
 - **A headless capture can run beside an open hot gallery without corrupting its mapped scenes library.** Every process
   began its copied dylib names at `-hot-0`, so a capture overwrote the file already mapped by the window; the next
   symbol lookup or repaint could then segfault. Copies now take atomically unique temporary names and clean themselves
