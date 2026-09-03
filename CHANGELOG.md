@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-03
+
 - **Scenes can invalidate host-owned caches after hot reload.** `SceneCtx::scene_revision()` stays stable across frames
   and scene switches, and advances whenever the host successfully swaps in rebuilt scene code.
 - **The running gallery identifies its version.** Startup prints the linked `gallery` version to the terminal, and the
