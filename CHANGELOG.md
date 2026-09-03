@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-03
+
 - **Hot reload follows local Rust dependencies and explicit non-Cargo inputs.** Cargo metadata supplies every transitive
   local path dependency of the gallery crate, while `hot_watch_paths` enrolls additional files or directories relative
   to `gallery.toml`. Registry and Git dependencies, Cargo output, VCS metadata and editor debris remain outside the
