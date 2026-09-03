@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-03
+
 - **An idle hot gallery no longer rebuilds continuously on Linux.** The inotify backend reports file opens as access
   events; Cargo opens the manifest and lockfile on every build, so accepting every event made each no-op build request
   its successor. The watcher now rebuilds only for filesystem mutations.
