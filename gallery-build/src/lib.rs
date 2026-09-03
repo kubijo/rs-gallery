@@ -20,12 +20,16 @@ pub struct Config {
     pub title: String,
     /// Every `scene_globs` entry as an absolute pattern.
     pub globs: Vec<String>,
+    /// Extra hot-reload paths.
+    pub hot_watch_paths: Vec<Utf8PathBuf>,
 }
 
 /// The file's own shape, before the paths in it mean anything.
 #[derive(serde::Deserialize)]
 struct Declared {
     scene_globs: Vec<String>,
+    #[serde(default)]
+    hot_watch_paths: Vec<Utf8PathBuf>,
     #[serde(default = "default_title")]
     title: String,
 }
@@ -50,10 +54,23 @@ impl Config {
             .iter()
             .map(|glob| resolve_glob(dir, glob))
             .collect();
+        let mut hot_watch_paths = declared
+            .hot_watch_paths
+            .iter()
+            .map(|watch| {
+                let watch = dir.join(watch);
+                watch
+                    .canonicalize_utf8()
+                    .map_err(|e| format!("hot watch path `{watch}`: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        hot_watch_paths.sort();
+        hot_watch_paths.dedup();
         Ok(Self {
             path,
             title: declared.title,
             globs,
+            hot_watch_paths,
         })
     }
 }
@@ -391,6 +408,36 @@ mod tests {
             config.globs.iter().all(|glob| !glob.contains("..")),
             "resolved absolute, so `glob` never walks `..` literally: {:?}",
             config.globs
+        );
+        assert!(
+            config.hot_watch_paths.is_empty(),
+            "the escape hatch is optional"
+        );
+    }
+
+    #[test]
+    fn configured_hot_watch_paths_are_config_relative_canonical_and_deduped() {
+        let root = tree(
+            "hot-watch-paths",
+            &["crate/scene.rs", "shared/assets/palette.json"],
+        );
+        fs::write(
+            root.join("crate/gallery.toml"),
+            "scene_globs = [\"scene.rs\"]\n\
+             hot_watch_paths = [\"../shared/assets\", \"../shared/./assets\", \
+             \"../shared/assets/palette.json\"]\n",
+        )
+        .expect("write the config");
+
+        let config = Config::read(&root.join("crate/gallery.toml")).expect("a readable config");
+
+        assert_eq!(
+            config.hot_watch_paths,
+            [
+                root.join("shared/assets"),
+                root.join("shared/assets/palette.json")
+            ],
+            "both directories and files are retained, with duplicate spellings collapsed"
         );
     }
 

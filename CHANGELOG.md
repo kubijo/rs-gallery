@@ -5,6 +5,11 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Hot reload follows local Rust dependencies and explicit non-Cargo inputs.** Cargo metadata supplies every transitive
+  local path dependency of the gallery crate, while `hot_watch_paths` enrolls additional files or directories relative
+  to `gallery.toml`. Registry and Git dependencies, Cargo output, VCS metadata and editor debris remain outside the
+  watcher; `scene_globs` still controls only scene discovery.
+
 ## [0.4.0] - 2026-09-03
 
 - **An idle hot gallery no longer rebuilds continuously on Linux.** The inotify backend reports file opens as access

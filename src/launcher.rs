@@ -2,6 +2,7 @@
 //! it, and open the window — plus the cargo plumbing that does the building and the watching.
 
 use std::{
+    collections::{HashMap, HashSet},
     io::{IsTerminal as _, Write as _},
     process::Command,
 };
@@ -306,12 +307,12 @@ fn watch_scenes(
     config: &gallery_build::Config,
     hot: &HotStatus,
 ) -> SceneWatcher {
-    let dirs = watch_dirs(manifest_dir, &config.globs);
+    let paths = watch_paths(manifest_dir, &config.hot_watch_paths);
     // Owned by the closure: it outlives this call, being what every later rebuild is made from.
     let manifest_dir = manifest_dir.to_owned();
     let config = config.path.clone();
     let watcher = watch::spawn(
-        dirs,
+        paths,
         Box::new(move || build_command(&manifest_dir, &config)),
         hot,
     );
@@ -378,23 +379,81 @@ fn default_config(manifest_dir: &str) -> Utf8PathBuf {
     path.canonicalize_utf8().unwrap_or(path)
 }
 
-/// Dirs for cargo-watch to monitor: the crate plus each glob's base dir — scene files usually live
-/// outside the crate, so cargo-watch won't see edits to them without an explicit `-w`.
-fn watch_dirs(manifest_dir: &str, globs: &[String]) -> Vec<String> {
-    let mut dirs = vec![manifest_dir.to_owned()];
-    for glob in globs {
-        let end = glob.find(['*', '?', '[']).unwrap_or(glob.len());
-        if let Some(slash) = glob[..end].rfind('/') {
-            dirs.push(glob[..slash].to_owned());
+fn watch_paths(manifest_dir: &str, configured: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
+    let mut paths = match local_package_roots(manifest_dir) {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!("gallery: file watcher: {e}");
+            vec![canonical(Utf8Path::new(manifest_dir))]
+        }
+    };
+    paths.extend(configured.iter().cloned());
+    paths.sort();
+    paths.dedup();
+    paths.into_iter().fold(Vec::new(), |mut roots, path| {
+        if !roots
+            .iter()
+            .any(|root: &Utf8PathBuf| root.is_dir() && path.starts_with(root))
+        {
+            roots.push(path);
+        }
+        roots
+    })
+}
+
+fn local_package_roots(manifest_dir: &str) -> Result<Vec<Utf8PathBuf>, String> {
+    let manifest_dir = canonical(Utf8Path::new(manifest_dir));
+    let manifest = manifest_dir.join("Cargo.toml");
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .current_dir(&manifest_dir)
+        .manifest_path(&manifest)
+        .exec()
+        .map_err(|e| format!("cannot read Cargo metadata for `{manifest}`: {e}"))?;
+    let package = metadata
+        .packages
+        .iter()
+        .find(|package| package.manifest_path.parent() == Some(manifest_dir.as_path()))
+        .ok_or_else(|| format!("Cargo metadata has no package at `{manifest_dir}`"))?;
+    let resolve = metadata
+        .resolve
+        .as_ref()
+        .ok_or_else(|| format!("Cargo metadata did not resolve `{manifest}`"))?;
+    let nodes: HashMap<_, _> = resolve.nodes.iter().map(|node| (&node.id, node)).collect();
+    let packages: HashMap<_, _> = metadata
+        .packages
+        .iter()
+        .map(|package| (&package.id, package))
+        .collect();
+    let mut pending = vec![package.id.clone()];
+    let mut reached = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !reached.insert(id.clone()) {
+            continue;
+        }
+        if let Some(node) = nodes.get(&id) {
+            pending.extend(node.dependencies.iter().cloned());
         }
     }
-    dirs.sort();
-    dirs.dedup();
-    dirs
+
+    let mut roots: Vec<Utf8PathBuf> = reached
+        .iter()
+        .filter_map(|id| packages.get(id))
+        .filter(|package| package.source.is_none())
+        .filter_map(|package| package.manifest_path.parent().map(canonical))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+fn canonical(path: &Utf8Path) -> Utf8PathBuf {
+    path.canonicalize_utf8().unwrap_or_else(|_| path.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     /// Through clap rather than a hand-built `Cli`, so the flags themselves are part of what is tested.
@@ -460,20 +519,68 @@ mod tests {
         );
     }
 
+    fn local_package(path: &Utf8Path, name: &str, dependencies: &str, source: &str) {
+        fs::create_dir_all(path.join("src")).expect("package source directory");
+        fs::write(
+            path.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [dependencies]\n{dependencies}"
+            ),
+        )
+        .expect("package manifest");
+        fs::write(path.join("src/lib.rs"), source).expect("package source");
+    }
+
     #[test]
-    fn watch_dirs_are_the_crate_and_each_globs_base_deduped() {
-        let globs = [
-            "/work/app/*.scene.rs".to_owned(),
-            "/work/parts/src/**/*.scene.rs".to_owned(),
-            // Same base as the one above, reached without a wildcard.
-            "/work/parts/src/one.scene.rs".to_owned(),
-            // Relative, so there is no directory in it to watch.
-            "*.scene.rs".to_owned(),
-        ];
+    fn hot_watch_reaches_every_transitive_local_path_dependency_and_explicit_path() {
+        let root = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-local-dependencies");
+        let _ = fs::remove_dir_all(&root);
+        let app = root.join("gallery");
+        let feature = root.join("feature");
+        let ui = root.join("ui");
+        let unrelated = root.join("unrelated");
+        local_package(
+            &app,
+            "app-gallery",
+            "feature = { path = \"../feature\" }\n",
+            "include!(\"example.scene.rs\");\n",
+        );
+        fs::write(
+            app.join("src/example.scene.rs"),
+            "pub fn scene() { feature::draw(); }\n",
+        )
+        .expect("scene calling the sibling component crate");
+        fs::create_dir(app.join(".cargo")).expect("fixture Cargo config directory");
+        fs::write(app.join(".cargo/config.toml"), "[net]\noffline = true\n")
+            .expect("fixture Cargo config");
+        local_package(
+            &feature,
+            "feature",
+            "ui = { path = \"../ui\" }\n",
+            "pub fn draw() { ui::draw(); }\n",
+        );
+        local_package(&ui, "ui", "serde = \"1\"\n", "pub fn draw() {}\n");
+        local_package(&unrelated, "unrelated", "", "pub fn draw() {}\n");
+        let asset = root.join("shared/palette.json");
+        fs::create_dir_all(asset.parent().expect("asset directory")).expect("asset directory");
+        fs::write(&asset, "{}").expect("asset");
+
+        let watched = watch_paths(app.as_str(), std::slice::from_ref(&asset));
+
+        for path in [&app, &feature, &ui, &asset] {
+            assert!(watched.contains(path), "`{path}` is watched: {watched:?}");
+        }
+        assert!(
+            !watched.contains(&unrelated),
+            "a local package outside the resolved graph is not watched: {watched:?}"
+        );
         assert_eq!(
-            watch_dirs("/work/app", &globs),
-            ["/work/app", "/work/parts/src"],
-            "the crate dir and each glob's base, sorted and deduped"
+            watched.len(),
+            4,
+            "registry dependencies have a source and stay out: {watched:?}"
         );
     }
 

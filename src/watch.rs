@@ -194,8 +194,12 @@ pub(crate) struct SceneWatcher {
     stopped: Arc<AtomicBool>,
 }
 
-/// Watch `dirs` for edits and rebuild the dylib as they land, reporting the cycle into `hot`.
-pub(crate) fn spawn(dirs: Vec<String>, rebuild: RebuildCommand, hot: &HotStatus) -> SceneWatcher {
+/// Watch `paths` for edits and rebuild the dylib as they land, reporting the cycle into `hot`.
+pub(crate) fn spawn(
+    paths: Vec<Utf8PathBuf>,
+    rebuild: RebuildCommand,
+    hot: &HotStatus,
+) -> SceneWatcher {
     let watcher = SceneWatcher {
         building: BuildInFlight::default(),
         stopped: Arc::new(AtomicBool::new(false)),
@@ -203,7 +207,7 @@ pub(crate) fn spawn(dirs: Vec<String>, rebuild: RebuildCommand, hot: &HotStatus)
     let running = watcher.clone();
     let reporting = hot.clone();
     thread::spawn(move || {
-        if let Err(why) = watch(&dirs, &rebuild, &reporting, &running) {
+        if let Err(why) = watch(&paths, &rebuild, &reporting, &running) {
             reporting.set(HotPhase::Stopped { why });
         }
     });
@@ -227,7 +231,7 @@ impl SceneWatcher {
 
 /// Set the watches up, then run the loop over what they report.
 fn watch(
-    dirs: &[String],
+    paths: &[Utf8PathBuf],
     rebuild: &RebuildCommand,
     hot: &HotStatus,
     watcher: &SceneWatcher,
@@ -235,7 +239,7 @@ fn watch(
     let (tx, rx) = mpsc::channel();
     let mut notify =
         notify::recommended_watcher(tx).map_err(|e| format!("no file watcher: {e}"))?;
-    let roots = watch_roots(dirs);
+    let roots = watch_roots(paths);
     for root in &roots {
         notify
             .watch(root.dir.as_std_path(), root.mode)
@@ -336,6 +340,7 @@ fn edit_landed(
         // Everything gallery builds from is named in UTF-8, so one
         // that cannot be spelled is not one to rebuild for.
         .filter_map(|path| Utf8Path::from_path(path))
+        .filter(|path| roots.iter().any(|root| root.includes(path)))
         .filter(|path| rebuilds_for(path))
         .collect();
     if matches!(
@@ -345,7 +350,7 @@ fn edit_landed(
         for edit in &edits {
             let under_a_root = roots
                 .iter()
-                .any(|root| Some(root.dir.as_path()) == edit.parent());
+                .any(|root| root.only.is_none() && Some(root.dir.as_path()) == edit.parent());
             if under_a_root && edit.is_dir() {
                 let _ = notify.watch(edit.as_std_path(), RecursiveMode::Recursive);
             }
@@ -358,18 +363,43 @@ fn edit_landed(
 struct WatchRoot {
     dir: Utf8PathBuf,
     mode: RecursiveMode,
+    only: Option<Utf8PathBuf>,
 }
 
-/// The directories to watch for `dirs`, with cargo's and git's left out.
-///
+impl WatchRoot {
+    fn includes(&self, path: &Utf8Path) -> bool {
+        if let Some(only) = &self.only {
+            return path == only;
+        }
+        path == self.dir
+            || match self.mode {
+                RecursiveMode::Recursive => path.starts_with(&self.dir),
+                RecursiveMode::NonRecursive => path.parent() == Some(self.dir.as_path()),
+            }
+    }
+}
+
 /// Watching a crate root recursively takes its `target/` with it — a watch descriptor per
 /// directory and an event per file a build writes. So a root is watched by itself, its children
 /// recursively, minus any holding a build or a repository. One further down still costs churn,
 /// its events dropped by [`rebuilds_for`] rather than never arriving.
-fn watch_roots(dirs: &[String]) -> Vec<WatchRoot> {
+///
+/// Files are watched through their parent so atomic replacements remain observable.
+fn watch_roots(paths: &[Utf8PathBuf]) -> Vec<WatchRoot> {
     let mut roots = Vec::new();
-    for dir in dirs {
-        let dir = Utf8PathBuf::from(dir);
+    for path in paths {
+        if path.is_file() {
+            let Some(parent) = path.parent() else {
+                continue;
+            };
+            roots.push(WatchRoot {
+                dir: parent.to_owned(),
+                mode: RecursiveMode::NonRecursive,
+                only: Some(path.clone()),
+            });
+            continue;
+        }
+        let dir = path.clone();
         let Ok(entries) = dir.read_dir_utf8() else {
             // Unreadable, or not there at all — a glob can name a directory that does not exist yet.
             continue;
@@ -380,12 +410,14 @@ fn watch_roots(dirs: &[String]) -> Vec<WatchRoot> {
                 roots.push(WatchRoot {
                     dir: child,
                     mode: RecursiveMode::Recursive,
+                    only: None,
                 });
             }
         }
         roots.push(WatchRoot {
             dir,
             mode: RecursiveMode::NonRecursive,
+            only: None,
         });
     }
     roots
@@ -909,7 +941,7 @@ mod tests {
                 ".git/HEAD",
             ],
         );
-        let watched = watch_roots(&[root.to_string()]);
+        let watched = watch_roots(std::slice::from_ref(&root));
         let at = |dir: &Utf8Path| {
             watched
                 .iter()
@@ -930,6 +962,16 @@ mod tests {
         for skipped in ["target", ".git"] {
             assert_eq!(at(&root.join(skipped)), None, "`{skipped}` is not watched");
         }
+
+        let file = root.join("gallery.toml");
+        let watched = watch_roots(std::slice::from_ref(&file));
+        assert_eq!(watched.len(), 1);
+        assert_eq!(
+            watched[0].dir, root,
+            "an explicitly enrolled file watches its parent so replacing the file keeps working"
+        );
+        assert_eq!(watched[0].mode, RecursiveMode::NonRecursive);
+        assert_eq!(watched[0].only.as_ref(), Some(&file));
     }
 
     /// A watcher that records what it was asked to watch,
@@ -983,6 +1025,31 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_file_rebuilds_without_enrolling_its_siblings() {
+        let root = tree("explicit-file", &["palette.json", "notes.txt"]);
+        let palette = root.join("palette.json");
+        let roots = watch_roots(std::slice::from_ref(&palette));
+        let mut notify = Recording::default();
+
+        assert!(edit_landed(edited(&palette), &roots, &mut notify));
+        assert!(!edit_landed(
+            edited(&root.join("notes.txt")),
+            &roots,
+            &mut notify
+        ));
+
+        let replacement = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::Both,
+        )))
+        .add_path(root.join("palette.json.tmp").into_std_path_buf())
+        .add_path(palette.into_std_path_buf());
+        assert!(
+            edit_landed(Ok(replacement), &roots, &mut notify),
+            "atomically replacing the enrolled file rebuilds while its parent remains watched"
+        );
+    }
+
+    #[test]
     fn only_filesystem_mutations_are_edits() {
         let root = tree(
             "landed",
@@ -993,7 +1060,7 @@ mod tests {
                 "target/debug/libapp.so",
             ],
         );
-        let roots = watch_roots(&[root.to_string()]);
+        let roots = watch_roots(std::slice::from_ref(&root));
         let mut notify = Recording::default();
         let source = root.join("src/button.rs");
 
@@ -1056,7 +1123,7 @@ mod tests {
     #[test]
     fn a_directory_appearing_beside_the_sources_starts_being_watched() {
         let root = tree("appeared", &["src/button.rs"]);
-        let roots = watch_roots(&[root.to_string()]);
+        let roots = watch_roots(std::slice::from_ref(&root));
         let added = root.join("parts");
         fs::create_dir(&added).expect("a directory appearing while the gallery runs");
         let mut notify = Recording::default();
@@ -1094,7 +1161,7 @@ mod tests {
     #[test]
     fn edits_arriving_together_come_to_one_build() {
         let root = tree("coalesce", &["src/button.rs"]);
-        let roots = watch_roots(&[root.to_string()]);
+        let roots = watch_roots(std::slice::from_ref(&root));
         let (tx, rx) = mpsc::channel();
         for _ in 0..3 {
             tx.send(edited(&root.join("src/button.rs")))
@@ -1118,9 +1185,28 @@ mod tests {
     }
 
     #[test]
+    fn changing_a_watched_local_dependency_triggers_one_rebuild() {
+        let dependency = tree("local-dependency", &["src/widget.rs"]);
+        let roots = watch_roots(std::slice::from_ref(&dependency));
+        let (tx, rx) = mpsc::channel();
+        tx.send(edited(&dependency.join("src/widget.rs")))
+            .expect("the loop has not started reading yet");
+
+        let watcher = idle();
+        let stopping = watcher.clone();
+        let mut builds = 0;
+        drive(&rx, &roots, &watcher, &mut || {
+            builds += 1;
+            stopping.stop();
+        });
+
+        assert_eq!(builds, 1, "one dependency edit is one rebuild");
+    }
+
+    #[test]
     fn an_edit_landing_during_a_build_is_built_after_it_rather_than_restarting_it() {
         let root = tree("queued", &["src/button.rs"]);
-        let roots = watch_roots(&[root.to_string()]);
+        let roots = watch_roots(std::slice::from_ref(&root));
         let file = root.join("src/button.rs");
         let (tx, rx) = mpsc::channel();
         tx.send(edited(&file))

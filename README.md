@@ -31,6 +31,11 @@ A `--hot` run says where it has got to in the window: a chip in the scenes panel
 changed, building with its elapsed, reloaded — and a failed build puts a bar over the canvas that opens what cargo said.
 The terminal still gets cargo's output as it always did.
 
+Hot reload watches the gallery crate and every transitive local Cargo path dependency, so changing component code in a
+sibling crate rebuilds without another setting. Non-Cargo inputs can opt in with config-relative paths in
+`gallery.toml`, for example `hot_watch_paths = ["../shared/assets", "../theme.json"]`. These paths do not discover
+scenes; `scene_globs` remains the sole source of scene discovery.
+
 > The instance package must not be named `gallery` — its scenes dylib would clash with the framework crate at link time
 > (the binary and directory still can). The scaffold names it `app-gallery`; that field is a plain literal rather than a
 > placeholder, so rename it by hand.

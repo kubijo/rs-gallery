@@ -13,6 +13,7 @@ categories = ["gui", "development-tools"]
 
 [dependencies]
 camino = { version = "1", features = ["serde1"] }
+cargo_metadata = "0.23"
 egui = "0.36"
 eframe = {
    version = "0.36",
