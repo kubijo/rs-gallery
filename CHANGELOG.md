@@ -5,6 +5,10 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **An idle hot gallery no longer rebuilds continuously on Linux.** The inotify backend reports file opens as access
+  events; Cargo opens the manifest and lockfile on every build, so accepting every event made each no-op build request
+  its successor. The watcher now rebuilds only for filesystem mutations.
+
 ## [0.3.0] - 2026-09-02
 
 - **A headless capture can run beside an open hot gallery without corrupting its mapped scenes library.** Every process

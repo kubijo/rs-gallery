@@ -320,11 +320,21 @@ fn edit_landed(
             return false;
         }
     };
+
+    // Access events describe opens, reads and closes, not filesystem mutations.
+    // Cargo opens the manifest and lockfile during every rebuild, so treating
+    // those reads as edits makes each build trigger another one.
+    if !matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    ) {
+        return false;
+    }
     let edits: Vec<&Utf8Path> = event
         .paths
         .iter()
-        // Everything gallery builds from is named in UTF-8, so one that cannot be spelled is not
-        // one to rebuild for.
+        // Everything gallery builds from is named in UTF-8, so one
+        // that cannot be spelled is not one to rebuild for.
         .filter_map(|path| Utf8Path::from_path(path))
         .filter(|path| rebuilds_for(path))
         .collect();
@@ -955,36 +965,75 @@ mod tests {
         }
     }
 
+    fn event(kind: EventKind, path: &Utf8Path) -> notify::Result<notify::Event> {
+        Ok(notify::Event::new(kind).add_path(path.as_std_path().to_owned()))
+    }
+
     fn edited(path: &Utf8Path) -> notify::Result<notify::Event> {
-        Ok(
-            notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
-                .add_path(path.as_std_path().to_owned()),
+        event(
+            EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+            path,
         )
     }
 
     fn created(path: &Utf8Path) -> notify::Result<notify::Event> {
-        Ok(notify::Event::new(EventKind::Create(CreateKind::Folder))
-            .add_path(path.as_std_path().to_owned()))
+        event(EventKind::Create(CreateKind::Folder), path)
     }
 
     #[test]
-    fn an_event_is_an_edit_by_what_it_names() {
+    fn only_filesystem_mutations_are_edits() {
         let root = tree(
             "landed",
             &[
                 "src/button.rs",
+                "src/switch.rs",
                 "target/CACHEDIR.TAG",
                 "target/debug/libapp.so",
             ],
         );
         let roots = watch_roots(&[root.to_string()]);
         let mut notify = Recording::default();
+        let source = root.join("src/button.rs");
 
-        assert!(edit_landed(
-            edited(&root.join("src/button.rs")),
-            &roots,
-            &mut notify
-        ));
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+            EventKind::Remove(notify::event::RemoveKind::File),
+        ] {
+            assert!(
+                edit_landed(event(kind, &source), &roots, &mut notify),
+                "{kind:?} changes a source"
+            );
+        }
+
+        let renamed = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::Both,
+        )))
+        .add_path(source.as_std_path().to_owned())
+        .add_path(root.join("src/switch.rs").into_std_path_buf());
+        assert!(
+            edit_landed(Ok(renamed), &roots, &mut notify),
+            "renaming a source changes the source tree"
+        );
+
+        for kind in [
+            EventKind::Access(notify::event::AccessKind::Open(
+                notify::event::AccessMode::Any,
+            )),
+            EventKind::Access(notify::event::AccessKind::Read),
+            EventKind::Any,
+            EventKind::Other,
+        ] {
+            assert!(
+                !edit_landed(event(kind, &source), &roots, &mut notify),
+                "{kind:?} does not describe a filesystem mutation"
+            );
+        }
+
         assert!(
             !edit_landed(
                 edited(&root.join("target/debug/libapp.so")),
