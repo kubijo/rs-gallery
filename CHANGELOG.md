@@ -5,6 +5,11 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Scenes can invalidate host-owned caches after hot reload.** `SceneCtx::scene_revision()` stays stable across frames
+  and scene switches, and advances whenever the host successfully swaps in rebuilt scene code.
+- **The running gallery identifies its version.** Startup prints the linked `gallery` version to the terminal, and the
+  same version appears in the native window title.
+
 ## [0.5.0] - 2026-09-03
 
 - **Hot reload follows local Rust dependencies and explicit non-Cargo inputs.** Cargo metadata supplies every transitive

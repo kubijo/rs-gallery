@@ -104,6 +104,9 @@ tweaking it re-renders the scene — [`knobs.scene.rs`](template/knobs.scene.rs)
 `ctx.set_slider(...)` family writes a value back by label, so content that does its own hit-testing — a slider drawn
 inside the preview, a rendered button — drives the panel too.
 
+`ctx.scene_revision()` changes after a successful hot reload. A scene can store it beside host-owned cached GPU output
+and replace that output when the revision differs; it remains stable across ordinary frames and scene switches.
+
 `gallery::action(...)` reports something worth seeing into the **Actions** panel — a free function, not a method, so a
 scene can call it from inside a callback it hands a component: `picker(ui, |row| action(format!("picked {row}")))`. The
 component keeps its own event type; the scene's closure decides what's worth a line.

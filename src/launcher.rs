@@ -19,6 +19,8 @@ use crate::{
     watch::{self, HotStatus, SceneWatcher},
 };
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// The consumer's entire `main`. Both arguments are required
 /// — a `setup` closure and [`Settings`], which names
 /// the [`Renderer`](crate::Renderer):
@@ -60,6 +62,7 @@ pub fn launch(
     setup: impl Fn(&egui::Context) + 'static,
 ) -> eframe::Result {
     let cli = Cli::parse();
+    anstream::eprintln!("{}", version_banner());
     // Before the config is read, so a stale or broken `gallery.toml`
     // can't stop you finding out that the pinned version is the reason.
     if cli.check_updates {
@@ -103,12 +106,21 @@ pub fn launch(
         scene: scene.map(crate::tree::scene_key),
         hot: cli.hot.then_some(hot),
     };
-    let result = run_with(&config.title, source, settings, setup, options);
+    let title = window_title(&config.title);
+    let result = run_with(&title, source, settings, setup, options);
     // Window closed normally: stop the watcher (the Ctrl-C/SIGTERM path is handled in watch_scenes).
     if let Some(watcher) = &watcher {
         watcher.stop();
     }
     result
+}
+
+fn version_banner() -> String {
+    format!("gallery {VERSION}")
+}
+
+fn window_title(title: &str) -> String {
+    format!("{title} · {}", version_banner())
 }
 
 /// Report a headless failure the way clap reports a bad argument — on stderr, then a non-zero exit —
@@ -455,6 +467,15 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn the_running_version_is_visible_in_the_terminal_and_window_title() {
+        assert_eq!(version_banner(), format!("gallery {VERSION}"));
+        assert_eq!(
+            window_title("components"),
+            format!("components · gallery {VERSION}")
+        );
+    }
 
     /// Through clap rather than a hand-built `Cli`, so the flags themselves are part of what is tested.
     fn cli(args: &[&str]) -> Cli {

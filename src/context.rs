@@ -13,6 +13,18 @@ use crate::knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
 use crate::offscreen::{GlDeps, ImageInput, Offscreen, StageTexture};
 use crate::pass::{ScenePass, WgpuDeps};
 
+/// Identifies the scene code currently loaded by the host.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SceneRevision(u64);
+
+impl SceneRevision {
+    pub(crate) const INITIAL: Self = Self(0);
+
+    pub(crate) fn next(self) -> Self {
+        Self(self.0.checked_add(1).expect("scene revision overflow"))
+    }
+}
+
 /// What a scene receives each frame alongside its [`Ui`](egui::Ui): the knob accessors,
 /// and the methods that draw. Those take the `Ui` to draw into rather than holding one,
 /// so a scene can stage into any layout egui offers.
@@ -26,6 +38,7 @@ use crate::pass::{ScenePass, WgpuDeps};
 /// ```
 pub struct SceneCtx<'a> {
     knobs: &'a mut Vec<Knob>,
+    revision: SceneRevision,
     cursor: usize,
     stages: usize,
     /// Counts this frame's `offscreen` calls, so each keeps its own render target.
@@ -172,19 +185,36 @@ pub const PADDING: i8 = 16;
 const PASS_NEEDS_WGPU: &str = "render_pass() needs the wgpu renderer";
 
 impl<'a> SceneCtx<'a> {
+    #[cfg(test)]
     pub(crate) fn new(
         knobs: &'a mut Vec<Knob>,
         gl: Option<GlDeps<'a>>,
         wgpu: Option<WgpuDeps<'a>>,
     ) -> Self {
+        Self::with_revision(knobs, gl, wgpu, SceneRevision::INITIAL)
+    }
+
+    pub(crate) fn with_revision(
+        knobs: &'a mut Vec<Knob>,
+        gl: Option<GlDeps<'a>>,
+        wgpu: Option<WgpuDeps<'a>>,
+        revision: SceneRevision,
+    ) -> Self {
         Self {
             knobs,
+            revision,
             cursor: 0,
             stages: 0,
             offscreens: 0,
             gl,
             wgpu,
         }
+    }
+
+    /// The host-issued revision of the loaded scene code.
+    #[must_use]
+    pub fn scene_revision(&self) -> SceneRevision {
+        self.revision
     }
 
     /// Put a component on the checkerboard, captioned with its size and collapsible.
@@ -1075,6 +1105,18 @@ impl<'a> SceneCtx<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_revision_is_a_stable_opaque_value() {
+        fn has_traits<T: Copy + Eq + std::hash::Hash + std::fmt::Debug>() {}
+        has_traits::<SceneRevision>();
+
+        let revision = SceneRevision::INITIAL.next();
+        let mut knobs = Vec::new();
+        let ctx = SceneCtx::with_revision(&mut knobs, None, None, revision);
+        assert_eq!(ctx.scene_revision(), revision);
+        assert_eq!(ctx.scene_revision(), revision);
+    }
 
     #[test]
     fn slider_declares_at_its_default_then_returns_the_stored_value() {

@@ -13,7 +13,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use libloading::Library;
 use tempfile::{Builder, NamedTempFile};
 
-use crate::{Manifest, SceneSource, watch::HotStatus};
+use crate::{Manifest, SceneRevision, SceneSource, watch::HotStatus};
 
 /// What the platform calls a dynamic library.
 #[cfg(target_os = "windows")]
@@ -61,6 +61,7 @@ pub struct HotDylib {
     from: Option<Written>,
     /// A writing noticed but not yet opened.
     seen: Option<Seen>,
+    revision: SceneRevision,
     /// The cycle a swap is reported into, `Some` exactly when something is rebuilding this dylib.
     /// The launcher puts the one its watcher and window share here, over the one made below — what
     /// a host driving [`run`](crate::run) itself is left with.
@@ -102,6 +103,7 @@ impl HotDylib {
             copy: None,
             from: None,
             seen: None,
+            revision: SceneRevision::INITIAL,
             hot: watching.then(HotStatus::new),
         };
         // What the launcher just built. Nothing there is not a failure: a run waiting on its first
@@ -155,6 +157,7 @@ impl HotDylib {
             self.from = Some(written);
             return false;
         }
+        self.revision = self.revision.next();
         true
     }
 }
@@ -238,6 +241,10 @@ impl SceneSource for HotDylib {
             Ok(manifest) => manifest(),
             Err(_) => nothing(),
         }
+    }
+
+    fn scene_revision(&self) -> SceneRevision {
+        self.revision
     }
 }
 
@@ -329,6 +336,7 @@ mod tests {
             copy: None,
             from: None,
             seen: None,
+            revision: SceneRevision::INITIAL,
             hot: None,
         };
 

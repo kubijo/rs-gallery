@@ -76,7 +76,7 @@ mod update;
 mod watch;
 pub use actions::action;
 use actions::{Log, collecting, render_actions};
-pub use context::{PADDING, SceneCtx, Stage, StageSpec};
+pub use context::{PADDING, SceneCtx, SceneRevision, Stage, StageSpec};
 pub use hot::HotDylib;
 pub use knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
 use knobs::{KnobStore, render_knobs};
@@ -98,8 +98,8 @@ pub mod prelude {
 
     pub use crate::{
         ImageInput, MSAA_SAMPLES, Offscreen, PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx,
-        SceneEntry, ScenePass, Stage, StageSpec, StageTexture, action, egui, scene, scene_meta,
-        stage,
+        SceneEntry, ScenePass, SceneRevision, Stage, StageSpec, StageTexture, action, egui, scene,
+        scene_meta, stage,
     };
 }
 
@@ -195,6 +195,11 @@ pub trait SceneSource {
 
     /// Per-frame hook before the shell draws (default: nothing).
     fn before_frame(&mut self, _ctx: &egui::Context) {}
+
+    /// The loaded scene code's revision.
+    fn scene_revision(&self) -> SceneRevision {
+        SceneRevision::INITIAL
+    }
 }
 
 /// Scenes compiled into this binary, read from the `inventory`
@@ -435,6 +440,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
         let gl_loader = self.gl_loader.clone();
         let gl = self.gl.clone();
         self.source.before_frame(ui.ctx());
+        let revision = self.source.scene_revision();
         // egui declares `Style::debug` under `#[cfg(debug_assertions)]`,
         // so the overlay this drives does not exist in a release build
         // — mirror its gate rather than fail to compile there.
@@ -703,8 +709,9 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         }),
                         _ => None,
                     };
-                    let reported =
-                        collecting(|| _ = render_canvas(ui, scene, store, gl_deps, wgpu));
+                    let reported = collecting(|| {
+                        _ = render_canvas_at(ui, scene, store, gl_deps, wgpu, revision);
+                    });
                     self.state.actions.extend(key, reported);
                 }
             });
@@ -747,6 +754,17 @@ pub(crate) fn render_canvas(
     gl_deps: Option<GlDeps<'_>>,
     wgpu: Option<WgpuDeps<'_>>,
 ) -> egui::Vec2 {
+    render_canvas_at(ui, scene, store, gl_deps, wgpu, SceneRevision::INITIAL)
+}
+
+fn render_canvas_at(
+    ui: &mut egui::Ui,
+    scene: &SceneEntry,
+    store: &mut Vec<Knob>,
+    gl_deps: Option<GlDeps<'_>>,
+    wgpu: Option<WgpuDeps<'_>>,
+    revision: SceneRevision,
+) -> egui::Vec2 {
     ui.push_id(scene_key(scene), |ui| {
         egui::ScrollArea::both()
             .auto_shrink(false)
@@ -754,7 +772,7 @@ pub(crate) fn render_canvas(
                 let declared = egui::Frame::new()
                     .inner_margin(egui::Margin::same(16))
                     .show(ui, |ui| {
-                        let mut ctx = SceneCtx::new(store, gl_deps, wgpu);
+                        let mut ctx = SceneCtx::with_revision(store, gl_deps, wgpu, revision);
                         (scene.render)(&mut ctx, ui);
                         ctx.declared()
                     })
@@ -1345,6 +1363,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_successful_source_reload_advances_the_revision_seen_by_scenes() {
+        thread_local! {
+            static REVISIONS: std::cell::RefCell<Vec<SceneRevision>> = const {
+                std::cell::RefCell::new(Vec::new())
+            };
+        }
+
+        fn record(ctx: &mut SceneCtx<'_>, _: &mut egui::Ui) {
+            REVISIONS.with_borrow_mut(|seen| seen.push(ctx.scene_revision()));
+        }
+
+        struct Reloading {
+            scene: SceneEntry,
+            frames: usize,
+            revision: SceneRevision,
+        }
+
+        impl SceneSource for Reloading {
+            fn before_frame(&mut self, _: &egui::Context) {
+                self.frames += 1;
+                if self.frames == 3 {
+                    self.revision = self.revision.next();
+                }
+            }
+
+            fn manifest(&mut self) -> Manifest {
+                Manifest {
+                    scenes: vec![self.scene],
+                    groups: Vec::new(),
+                }
+            }
+
+            fn scene_revision(&self) -> SceneRevision {
+                self.revision
+            }
+        }
+
+        REVISIONS.take();
+        let mut scene = scene("revision", "revision", true);
+        scene.render = record;
+        let gallery = Gallery::new(
+            Reloading {
+                scene,
+                frames: 0,
+                revision: SceneRevision::INITIAL,
+            },
+            Settings::new(Renderer::Wgpu),
+            None,
+            None,
+        );
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_| gallery);
+        harness.run_steps(4);
+
+        let initial = SceneRevision::INITIAL;
+        let revisions = REVISIONS.take();
+        assert_eq!(&revisions[..2], [initial, initial]);
+        assert!(
+            revisions[2..]
+                .iter()
+                .all(|revision| *revision == initial.next())
+        );
+    }
+
     /// `--scene` is resolved by the launcher and reaches the shell as a whole key;
     /// this is the rest of that trip — the key becoming the selection, on the first frame.
     ///
@@ -1383,19 +1465,21 @@ mod tests {
     #[test]
     fn two_scenes_of_one_shape_derive_ids_of_their_own() {
         thread_local! {
-            static SEEN: std::cell::RefCell<Vec<(&'static str, egui::Id)>> =
+            static SEEN: std::cell::RefCell<Vec<(&'static str, egui::Id, SceneRevision)>> =
                 const { std::cell::RefCell::new(Vec::new()) };
         }
-        fn records(tag: &'static str, ui: &egui::Ui) {
-            SEEN.with_borrow_mut(|seen| seen.push((tag, ui.next_auto_id())));
+        fn records(tag: &'static str, ctx: &SceneCtx<'_>, ui: &egui::Ui) {
+            SEEN.with_borrow_mut(|seen| {
+                seen.push((tag, ui.next_auto_id(), ctx.scene_revision()));
+            });
         }
         // Two bodies rather than one: the tag is what tells their ids apart afterwards.
-        fn one(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
-            records("one", ui);
+        fn one(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+            records("one", ctx, ui);
             ui.label("a widget");
         }
-        fn two(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
-            records("two", ui);
+        fn two(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+            records("two", ctx, ui);
             ui.label("a widget");
         }
 
@@ -1421,8 +1505,8 @@ mod tests {
         let seen = SEEN.take();
         let ids = |tag| {
             seen.iter()
-                .filter(|(at, _)| *at == tag)
-                .map(|(_, id)| *id)
+                .filter(|(at, _, _)| *at == tag)
+                .map(|(_, id, _)| *id)
                 .collect::<Vec<egui::Id>>()
         };
         let (one, two) = (ids("one"), ids("two"));
@@ -1438,6 +1522,11 @@ mod tests {
         assert_ne!(
             one[0], two[0],
             "and the other scene's is not the same id: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .all(|(_, _, revision)| *revision == SceneRevision::INITIAL),
+            "the linked/headless revision is stable across frames and scene switches"
         );
     }
 
