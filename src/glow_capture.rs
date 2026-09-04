@@ -26,6 +26,7 @@ use crate::diagnostic::Diagnostic;
 /// texture must be registered with the very painter that later draws it.
 pub(crate) struct GlowCapture {
     gl: Arc<glow::Context>,
+    max_texture_dimension_2d: u32,
     loader: crate::GlLoader,
     painter: Rc<RefCell<egui_glow::Painter>>,
     target: Option<Framebuffer>,
@@ -105,6 +106,14 @@ impl GlowCapture {
         // SAFETY: the context is current on this thread, and `loader` resolves against its display.
         let gl =
             Arc::new(unsafe { glow::Context::from_loader_function_cstr(|symbol| loader(symbol)) });
+        // SAFETY: the context is current on this thread.
+        // This is the ceiling both uploaded panel textures
+        // and the sheet framebuffer have to stay under.
+        let max_texture_dimension_2d = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) };
+        let max_texture_dimension_2d = u32::try_from(max_texture_dimension_2d)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .ok_or_else(|| "GL_MAX_TEXTURE_SIZE did not report a positive limit".to_owned())?;
         // Before the painter, which compiles shaders a rejected device would only throw away.
         if let Some(wanted) = wanted {
             // SAFETY: the context is current on this thread.
@@ -118,6 +127,7 @@ impl GlowCapture {
 
         Ok(Self {
             gl,
+            max_texture_dimension_2d,
             loader,
             painter: Rc::new(RefCell::new(painter)),
             target: None,
@@ -220,6 +230,11 @@ impl SharedCapture {
 
     pub(crate) fn painter(&self) -> Rc<RefCell<egui_glow::Painter>> {
         self.0.borrow().painter()
+    }
+
+    /// The current context's `GL_MAX_TEXTURE_SIZE`.
+    pub(crate) fn max_texture_dimension_2d(&self) -> u32 {
+        self.0.borrow().max_texture_dimension_2d
     }
 }
 
@@ -448,6 +463,13 @@ mod tests {
     #[test]
     fn a_headless_context_comes_off_an_egl_device_and_draws() {
         let capture = GlowCapture::new().expect("an EGL device offers a headless GL context");
+        assert_eq!(
+            capture.max_texture_dimension_2d,
+            // SAFETY: `new` left its context current on this thread.
+            u32::try_from(unsafe { capture.gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) })
+                .expect("a positive GL texture limit"),
+            "the capture carries this context's GL_MAX_TEXTURE_SIZE"
+        );
         // SAFETY: `new` left its context current on this thread.
         assert!(
             is_the_cleared_colour(unsafe { draws(&capture.gl) }),

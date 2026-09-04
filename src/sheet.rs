@@ -35,6 +35,7 @@ pub(crate) struct Cell {
 }
 
 /// A sheet with a place on it for every panel it was packed from.
+#[derive(Debug)]
 pub(crate) struct Packed {
     width: u32,
     height: u32,
@@ -42,13 +43,36 @@ pub(crate) struct Packed {
     cells: Vec<Cell>,
 }
 
+/// A valid sheet and the one uniform scale applied to its panel copies.
+#[derive(Debug)]
+struct Layout {
+    packed: Packed,
+    panel_sizes: Vec<Size>,
+    scale: f64,
+}
+
 /// The room a panel takes: the caption band above it, and the gutter off its right and bottom
 /// that keeps two captures from reading as one picture.
-fn cell_size(panel: &Panel) -> Size {
-    Size {
-        width: panel.image.width() + GUTTER,
-        height: panel.image.height() + CAPTION + GUTTER,
-    }
+fn panel_sizes(panels: &[Panel]) -> Vec<Size> {
+    panels
+        .iter()
+        .map(|panel| Size {
+            width: panel.image.width(),
+            height: panel.image.height(),
+        })
+        .collect()
+}
+
+fn cell_sizes(panels: &[Size]) -> Option<Vec<Size>> {
+    panels
+        .iter()
+        .map(|panel| {
+            Some(Size {
+                width: panel.width.checked_add(GUTTER)?,
+                height: panel.height.checked_add(CAPTION)?.checked_add(GUTTER)?,
+            })
+        })
+        .collect()
 }
 
 /// The smallest sheet the packer will take these panels on.
@@ -58,14 +82,85 @@ fn cell_size(panel: &Panel) -> Size {
 /// rather than searched because a narrower sheet is not a smaller one —
 /// a column fits the narrowest sheet of all, and covers the least of it.
 ///
-/// `None` if there are no panels, or if the packer takes none of the widths offered.
-pub(crate) fn pack(panels: &[Panel]) -> Option<Packed> {
-    let cells: Vec<Size> = panels.iter().map(cell_size).collect();
-    let widths = widths(&cells);
+/// If the unscaled panels do not fit, only their copies on the sheet are uniformly reduced. The
+/// individual captures are already written by then and remain at their requested dimensions.
+///
+/// # Errors
+/// If even one-pixel panel copies and their unscaled captions/gutters cannot fit within `limit`.
+fn layout(panels: &[Size], limit: u32) -> Result<Layout, Diagnostic> {
+    if panels.is_empty() {
+        return Err(Diagnostic::new("there are no captures to pack"));
+    }
+    if let Some(packed) = pack_sizes(panels, limit) {
+        return Ok(Layout {
+            packed,
+            panel_sizes: panels.to_vec(),
+            scale: 1.0,
+        });
+    }
+
+    // Find any fit first, then keep the largest known fit. Dimensions are rounded at every probe,
+    // so what is proved to fit here is exactly what will be resized and uploaded later.
+    let mut upper = 1.0;
+    let mut scale = 0.5;
+    let (mut lower, mut scaled, mut packed) = loop {
+        let scaled = scale_sizes(panels, scale);
+        if let Some(packed) = pack_sizes(&scaled, limit) {
+            break (scale, scaled, packed);
+        }
+        if scaled
+            .iter()
+            .all(|size| size.width == 1 && size.height == 1)
+        {
+            return Err(Diagnostic::new(format!(
+                "{} captures cannot fit on a {limit}×{limit} sheet even after scaling",
+                panels.len()
+            ))
+            .hint("write the captures without `sheet`, or gather fewer shots per recipe"));
+        }
+        upper = scale;
+        scale /= 2.0;
+    };
+
+    for _ in 0..20 {
+        let probe = (lower + upper) / 2.0;
+        let probe_sizes = scale_sizes(panels, probe);
+        if let Some(probe_packed) = pack_sizes(&probe_sizes, limit) {
+            lower = probe;
+            scaled = probe_sizes;
+            packed = probe_packed;
+        } else {
+            upper = probe;
+        }
+    }
+    Ok(Layout {
+        packed,
+        panel_sizes: scaled,
+        scale: lower,
+    })
+}
+
+fn scale_sizes(panels: &[Size], scale: f64) -> Vec<Size> {
+    panels
+        .iter()
+        .map(|panel| Size {
+            width: (f64::from(panel.width) * scale).round().max(1.0) as u32,
+            height: (f64::from(panel.height) * scale).round().max(1.0) as u32,
+        })
+        .collect()
+}
+
+/// Search only bins whose cropped result can fit on `limit` along both axes.
+fn pack_sizes(panels: &[Size], limit: u32) -> Option<Packed> {
+    // `crop` adds the leading/top gutter after the bin has been packed.
+    let bin_limit = limit.checked_sub(GUTTER)?;
+    let cells = cell_sizes(panels)?;
+    let widths = widths(&cells, bin_limit);
     RULES
         .iter()
         .flat_map(|rule| widths.iter().map(move |width| (*rule, *width)))
-        .filter_map(|(rule, width)| shortest(&cells, width, rule))
+        .filter_map(|(rule, width)| shortest(&cells, width, bin_limit, rule))
+        .filter(|packed| packed.width <= limit && packed.height <= limit)
         .min_by(|one, two| cost(one).total_cmp(&cost(two)))
 }
 
@@ -119,10 +214,17 @@ fn covered(packed: &Packed) -> f64 {
 /// The height has to be squeezed rather than left generous: given room for a column the packer will
 /// lay one out and never reach across the width, and cropping that back would make every width come
 /// out the same sheet.
-fn shortest(cells: &[Size], width: u32, rule: Heuristic) -> Option<Packed> {
+fn shortest(cells: &[Size], width: u32, max_height: u32, rule: Heuristic) -> Option<Packed> {
     let mut short = cells.iter().map(|cell| cell.height).max()?;
+    if short > max_height {
+        return None;
+    }
     // A column always fits, so this is a height the search can close in on rather than test.
-    let mut tall = cells.iter().map(|cell| cell.height).sum();
+    let mut tall = cells
+        .iter()
+        .map(|cell| u64::from(cell.height))
+        .sum::<u64>()
+        .min(u64::from(max_height)) as u32;
     // The packer is greedy, so a height it packs is no promise that every taller one does too.
     // Keeping the last that placed stops the search from dropping a width that demonstrably works.
     let mut fits = None;
@@ -148,20 +250,21 @@ fn shortest(cells: &[Size], width: u32, rule: Heuristic) -> Option<Packed> {
 /// And the width a flawless pack would have at the shape we want, which usually falls between runs.
 ///
 /// All quadratic in the number of shots, so the whole search stays cheap.
-fn widths(cells: &[Size]) -> Vec<u32> {
+fn widths(cells: &[Size], max_width: u32) -> Vec<u32> {
     let across: Vec<u32> = cells.iter().map(|cell| cell.width).collect();
     let widest = across.iter().copied().max().unwrap_or_default();
 
-    let pairs = across
-        .iter()
-        .enumerate()
-        .flat_map(|(at, w)| across[at..].iter().map(move |other| w + other));
+    let pairs = across.iter().enumerate().flat_map(|(at, w)| {
+        across[at..]
+            .iter()
+            .filter_map(move |other| w.checked_add(*other))
+    });
 
     let mut widest_first = across.clone();
     widest_first.sort_unstable_by(|a, b| b.cmp(a));
-    let runs = widest_first.iter().scan(0u32, |run, w| {
-        *run += w;
-        Some(*run)
+    let runs = widest_first.iter().scan(0u64, |run, w| {
+        *run += u64::from(*w);
+        u32::try_from(*run).ok()
     });
 
     let area: u64 = cells
@@ -176,8 +279,11 @@ fn widths(cells: &[Size]) -> Vec<u32> {
         .chain(pairs)
         .chain(runs)
         .chain(std::iter::once(ideal))
+        // Trying the backend ceiling itself keeps an otherwise-valid layout from being missed
+        // merely because no panel-width sum happened to land near it.
+        .chain(std::iter::once(max_width))
         // Under the widest panel nothing can be laid out at all.
-        .filter(|width| *width >= widest)
+        .filter(|width| *width >= widest && *width <= max_width)
         .collect();
     widths.sort_unstable();
     widths.dedup();
@@ -189,8 +295,16 @@ fn widths(cells: &[Size]) -> Vec<u32> {
 /// would sit flush against the edge.
 fn crop(cells: Vec<Cell>) -> Option<Packed> {
     Some(Packed {
-        width: cells.iter().map(|c| c.x + c.width).max()? + GUTTER,
-        height: cells.iter().map(|c| c.y + c.height).max()? + GUTTER,
+        width: cells
+            .iter()
+            .filter_map(|c| c.x.checked_add(c.width))
+            .max()?
+            .checked_add(GUTTER)?,
+        height: cells
+            .iter()
+            .filter_map(|c| c.y.checked_add(c.height))
+            .max()?
+            .checked_add(GUTTER)?,
         cells,
     })
 }
@@ -237,43 +351,113 @@ fn place(cells: &[Size], width: u32, height: u32, rule: Heuristic) -> Option<Vec
 /// # Errors
 /// If the panels can't be packed, or the sheet can't be drawn on this renderer.
 pub(crate) fn compose(
-    panels: Vec<Panel>,
+    mut panels: Vec<Panel>,
     session: &crate::render::Session,
     setup: &impl Fn(&egui::Context),
 ) -> Result<image::RgbaImage, Diagnostic> {
-    let packed = pack(&panels).ok_or_else(|| Diagnostic::new("these captures will not pack"))?;
+    let limit = session.max_texture_dimension_2d();
+    let Layout {
+        packed,
+        panel_sizes,
+        scale,
+    } = layout(&panel_sizes(&panels), limit)?;
+    if scale < 1.0 {
+        for (panel, size) in panels.iter_mut().zip(panel_sizes) {
+            panel.image = image::imageops::resize(
+                &panel.image,
+                size.width,
+                size.height,
+                image::imageops::FilterType::Lanczos3,
+            );
+        }
+    }
+    let packed_size = Size {
+        width: packed.width,
+        height: packed.height,
+    };
     let size = egui::vec2(packed.width as f32, packed.height as f32);
     // One for one: the packer measured the panels in pixels, so the sheet lays out
     // in as many points and each capture lands on it at the size it was taken.
     let mut harness = open(size, 1.0, session, setup, |cc, _| {
-        Sheet::new(&cc.egui_ctx, panels, packed)
+        Sheet::new(cc, panels, packed)
     })?;
-    harness.run_steps(1);
-    harness
-        .render()
-        .map_err(|reason| Diagnostic::from(format!("draw the sheet: {reason}")))
+    let wgpu = harness.state().wgpu.clone();
+    render_with_backend_errors(wgpu.as_ref(), packed_size, limit, || {
+        harness.run_steps(1);
+        harness
+            .render()
+            .map_err(|reason| Diagnostic::from(format!("draw the sheet: {reason}")))
+    })
+}
+
+/// Turn renderer failures into the capture command's structured error path. Wgpu error scopes keep
+/// its uncaptured-error handler from panicking first; the unwind guard covers renderer-side panics.
+fn render_with_backend_errors<T>(
+    state: Option<&eframe::egui_wgpu::RenderState>,
+    size: Size,
+    limit: u32,
+    render: impl FnOnce() -> Result<T, Diagnostic>,
+) -> Result<T, Diagnostic> {
+    let scopes = state.map(|state| {
+        use eframe::egui_wgpu::wgpu::ErrorFilter;
+        // Error scopes are a stack and must be popped in reverse order.
+        [
+            state.device.push_error_scope(ErrorFilter::OutOfMemory),
+            state.device.push_error_scope(ErrorFilter::Internal),
+            state.device.push_error_scope(ErrorFilter::Validation),
+        ]
+    });
+    let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(render))
+        .map_err(|panic| {
+            Diagnostic::new(format!(
+                "the sheet renderer panicked: {}",
+                crate::render::panic_message(&panic)
+            ))
+        })
+        .and_then(std::convert::identity);
+    let mut error = None;
+    if let Some(scopes) = scopes {
+        for scope in scopes.into_iter().rev() {
+            if let Some(found) = pollster::block_on(scope.pop()) {
+                error.get_or_insert(found);
+            }
+        }
+    }
+    if let Some(error) = error {
+        return Err(Diagnostic::new(format!(
+            "wgpu rejected the {}×{} sheet within its {limit}×{limit} limit: {error}",
+            size.width, size.height
+        )));
+    }
+    rendered
 }
 
 /// The sheet as the entire app: every panel where the packer put it, and nothing else.
 struct Sheet {
     panels: Vec<(String, egui::TextureHandle, Cell)>,
+    wgpu: Option<eframe::egui_wgpu::RenderState>,
 }
 
 impl Sheet {
-    fn new(ctx: &egui::Context, panels: Vec<Panel>, packed: Packed) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, panels: Vec<Panel>, packed: Packed) -> Self {
         let panels = panels
             .into_iter()
             .zip(packed.cells)
             .map(|(panel, cell)| {
                 let size = [panel.image.width() as usize, panel.image.height() as usize];
                 let pixels = egui::ColorImage::from_rgba_unmultiplied(size, panel.image.as_raw());
-                // Nearest, because a panel is drawn at the size it was captured: any filtering here
-                // would soften pixels that a reference comparison expects back unchanged.
-                let texture = ctx.load_texture(&panel.name, pixels, egui::TextureOptions::NEAREST);
+                // Scaling, when needed, happened once in image-space above. Drawing the resulting
+                // copy one-for-one keeps the renderer from applying another filter.
+                let texture =
+                    cc.egui_ctx
+                        .load_texture(&panel.name, pixels, egui::TextureOptions::NEAREST);
                 (panel.name, texture, cell)
             })
             .collect();
-        Self { panels }
+        Self {
+            panels,
+            wgpu: cc.wgpu_render_state.clone(),
+        }
     }
 }
 
@@ -326,6 +510,24 @@ mod tests {
                 image: image::RgbaImage::new(*w, *h),
             })
             .collect()
+    }
+
+    /// The old unconstrained packing assertions use a ceiling large enough for a row or column of
+    /// everything they pass. Limit-specific behavior is covered separately below.
+    fn pack(panels: &[Panel]) -> Option<Packed> {
+        let sizes = panel_sizes(panels);
+        let row = sizes
+            .iter()
+            .map(|size| u64::from(size.width) + u64::from(GUTTER))
+            .sum::<u64>()
+            + u64::from(GUTTER);
+        let column = sizes
+            .iter()
+            .map(|size| u64::from(size.height) + u64::from(CAPTION + GUTTER))
+            .sum::<u64>()
+            + u64::from(GUTTER);
+        let limit = u32::try_from(row.max(column)).ok()?;
+        layout(&sizes, limit).ok().map(|layout| layout.packed)
     }
 
     #[test]
@@ -442,7 +644,149 @@ mod tests {
 
     #[test]
     fn nothing_to_pack_is_no_sheet() {
-        assert!(pack(&[]).is_none());
+        assert!(layout(&[], 1024).is_err());
+    }
+
+    #[test]
+    fn every_returned_layout_stays_within_its_supplied_limit() {
+        let sizes = [
+            Size {
+                width: 1200,
+                height: 700,
+            },
+            Size {
+                width: 900,
+                height: 1400,
+            },
+            Size {
+                width: 1700,
+                height: 500,
+            },
+            Size {
+                width: 600,
+                height: 600,
+            },
+        ];
+        for limit in [4096, 2048, 1024, 512] {
+            let packed = layout(&sizes, limit)
+                .expect("the sheet can scale to the limit")
+                .packed;
+            assert!(
+                packed.width <= limit && packed.height <= limit,
+                "{}×{} exceeds {limit}×{limit}",
+                packed.width,
+                packed.height
+            );
+        }
+    }
+
+    #[test]
+    fn twenty_seven_full_hd_panels_pack_unscaled_below_an_8192_limit() {
+        let sizes = vec![
+            Size {
+                width: 1920,
+                height: 1080,
+            };
+            27
+        ];
+        let layout = layout(&sizes, 8192).expect("27 full-HD panels fit unscaled");
+        assert_eq!(layout.scale, 1.0, "the sheet should not need scaling");
+        assert!(layout.packed.width <= 8192 && layout.packed.height <= 8192);
+        assert!(
+            layout.packed.width >= 4 * (1920 + GUTTER),
+            "{}px is approximately four full-HD panels across",
+            layout.packed.width
+        );
+    }
+
+    #[test]
+    fn an_unscaled_set_that_cannot_fit_uses_uniform_sheet_only_scaling() {
+        let sizes = vec![
+            Size {
+                width: 3000,
+                height: 2000,
+            };
+            4
+        ];
+        let layout = layout(&sizes, 2048).expect("scaled panel copies fit");
+        assert!(layout.scale < 1.0);
+        assert!(layout.packed.width <= 2048 && layout.packed.height <= 2048);
+        for (source, scaled) in sizes.iter().zip(&layout.panel_sizes) {
+            let width_scale = f64::from(scaled.width) / f64::from(source.width);
+            let height_scale = f64::from(scaled.height) / f64::from(source.height);
+            assert!(
+                (width_scale - height_scale).abs() < 0.001,
+                "rounding keeps the uniform scale: {scaled:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decorations_that_cannot_fit_even_one_pixel_copies_are_a_diagnostic() {
+        let failure = layout(
+            &[
+                Size {
+                    width: 100,
+                    height: 100,
+                },
+                Size {
+                    width: 100,
+                    height: 100,
+                },
+            ],
+            GUTTER,
+        )
+        .expect_err("the outer gutter alone consumes the limit");
+        assert!(failure.plain().contains("cannot fit"), "{failure:?}");
+    }
+
+    #[test]
+    fn a_sheet_renderer_panic_becomes_a_capture_diagnostic() {
+        let failure = render_with_backend_errors(
+            None,
+            Size {
+                width: 100,
+                height: 100,
+            },
+            1024,
+            || -> Result<(), Diagnostic> { panic!("synthetic renderer failure") },
+        )
+        .expect_err("the capture command must receive an error");
+        let message = failure.plain();
+        assert!(message.contains("sheet renderer panicked"), "{message}");
+        assert!(message.contains("synthetic renderer failure"), "{message}");
+    }
+
+    #[test]
+    fn a_real_headless_wgpu_sheet_uses_its_limit_and_oversize_is_a_diagnostic() {
+        struct Empty;
+        impl eframe::App for Empty {
+            fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+        }
+
+        let session = crate::render::Session::open(crate::Renderer::Wgpu)
+            .expect("a real headless wgpu session");
+        let limit = session.max_texture_dimension_2d();
+        let oversized = crate::render::open(
+            egui::vec2(limit as f32 + 1.0, 1.0),
+            1.0,
+            &session,
+            &|_: &egui::Context| {},
+            |_, _| Empty,
+        );
+        let failure = match oversized {
+            Ok(_) => panic!("an oversized target reached the renderer"),
+            Err(failure) => failure,
+        };
+        assert!(failure.plain().contains("exceeds"), "{failure:?}");
+
+        let image = compose(
+            panels(&[(96, 54), (96, 54), (64, 96)]),
+            &session,
+            &|_: &egui::Context| {},
+        )
+        .expect("the sheet renders through wgpu");
+        assert!(image.width() <= limit && image.height() <= limit);
     }
 
     #[test]

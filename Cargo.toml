@@ -53,6 +53,7 @@ supports-hyperlinks = "3"
 percent-encoding = "2"
 binpack2d = "1"
 indoc = "2"
+pollster = "1"
 
 [features]
 # Forwarded egui_extras loader gates, so an instance enables one without declaring egui_extras.

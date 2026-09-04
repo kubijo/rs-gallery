@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nix-tools.url = "github:kubijo/nix-tools/v0.2.0";
+    nix-tools.url = "github:kubijo/nix-tools/v0.3.0";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";

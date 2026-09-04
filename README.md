@@ -28,8 +28,9 @@ The scaffolded dependency tracks the default branch. Add `tag = "v0.1.0"` beside
 PNGs — see [Rendering scenes to images](#rendering-scenes-to-images).
 
 The host can override `gallery.toml`'s window title and optionally supply an icon in its launch settings. A missing or
-blank title displays as `Gallery`; the icon is used by the native window and drawn beside the custom title bar, with no
-placeholder when it is omitted.
+blank title displays as `Gallery`; the icon appears natively and beside the custom title bar only when supplied. Custom
+chrome uses grab and pointer cursors, stays stable across compositor focus changes, and outlines overlapping windows.
+Generated instances demonstrate the setting with `assets/window-icon.png`; replace it with the application's icon.
 
 A `--hot` run says where it has got to in the window: a chip in the scenes panel's corner follows the cycle — watching,
 changed, building with its elapsed, reloaded — and a failed build puts a bar over the canvas that opens what cargo said.
@@ -233,7 +234,9 @@ of scraping the text meant for a person.
 than a directory to click through. The shots still write their own PNGs, and each panel is captioned with the shot that
 made it. Packing is tight but not at any cost — a tall column and a long strip cover much the same area, and scaled to a
 screen either leaves every panel unreadable — so a sheet is scored on its area *and* on how near it lands to a screen's
-proportions. One capture writes no sheet and says so, a sheet of one image being the image.
+proportions. Both axes include captions, gutters and padding and stay within the active backend's texture limit. If
+needed, gallery scales only the sheet copies; every individual PNG retains its requested resolution. One capture writes
+no sheet and says so, a sheet of one image being the image.
 
 Capture follows the renderer the instance configures. Under `Renderer::Glow` it paints through an OpenGL context taken
 off an EGL device — no window, no display server — so a scene drawing with `ctx.offscreen(...)` captures its real

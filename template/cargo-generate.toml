@@ -7,7 +7,7 @@ description = "A gallery component-catalog instance"
 # is cargo-generate's syntax too, and an unknown name there expands
 # to nothing — so templating this would silently empty every recipe
 # argument. It carries no placeholders of its own.
-exclude = ["justfile"]
+exclude = ["justfile", "assets/window-icon.png"]
 
 [placeholders]
 gallery_git = { type = "string", prompt = "gallery framework git URL", default = "https://example.com/gallery.git" }

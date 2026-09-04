@@ -41,6 +41,22 @@ pub(crate) fn title_bar(
         egui::vec2(ui.max_rect().width(), TITLE_BAR_H),
     );
     ui.advance_cursor_after_rect(rect);
+
+    let controls = controls_rect(rect);
+    let drag_rect = egui::Rect::from_min_max(rect.min, egui::pos2(controls.left(), rect.bottom()));
+    let drag = ui
+        .interact(
+            drag_rect,
+            ui.make_persistent_id("gallery-window-drag"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_and_drag_cursor(egui::CursorIcon::Grab);
+    drag.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Window title bar")
+    });
+
+    // Compositors may withdraw native focus while moving decorationless windows.
+    outer_border(ui.ctx());
     ui.painter().rect_filled(rect, 0.0, PANEL_BG);
     ui.painter().hline(
         rect.x_range(),
@@ -48,7 +64,6 @@ pub(crate) fn title_bar(
         egui::Stroke::new(1.0, HAIRLINE),
     );
 
-    let controls = controls_rect(rect);
     let minimize_rect =
         egui::Rect::from_min_size(controls.min, egui::vec2(ACTION_W, rect.height()));
     let maximize_rect = minimize_rect.translate(egui::vec2(ACTION_W, 0.0));
@@ -87,15 +102,6 @@ pub(crate) fn title_bar(
         true,
     );
 
-    let drag_rect = egui::Rect::from_min_max(rect.min, egui::pos2(controls.left(), rect.bottom()));
-    let drag = ui.interact(
-        drag_rect,
-        ui.make_persistent_id("gallery-window-drag"),
-        egui::Sense::click_and_drag(),
-    );
-    drag.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Window title bar")
-    });
     let mut title_left = drag_rect.left() + 8.0;
     if let Some(icon) = title_icon {
         let icon_rect = egui::Rect::from_min_size(
@@ -135,8 +141,23 @@ pub(crate) fn title_bar(
     }
 }
 
-/// Track title clicks ourselves: native dragging can prevent a backend from feeding egui the first
-/// click of its built-in multi-click sequence, which was the original maximize-toggle failure.
+/// Paint an inside stroke above every panel to separate overlapping windows.
+fn outer_border(ctx: &egui::Context) {
+    let layer = egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new((ctx.viewport_id(), "gallery-window-border")),
+    );
+    ctx.layer_painter(layer).rect_stroke(
+        ctx.viewport_rect(),
+        0.0,
+        egui::Stroke::new(1.0, HAIRLINE),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// Track title clicks ourselves: native dragging can prevent a backend
+/// from feeding egui the first click of its built-in multi-click sequence,
+/// which was the original maximize-toggle failure.
 fn title_double_clicked(ui: &egui::Ui, response: &egui::Response) -> bool {
     let (primary_clicked, pointer) = ui.input(|input| {
         (
@@ -206,7 +227,9 @@ fn control(
             MUTED
         },
     );
-    response.on_hover_text(label)
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
 }
 
 /// Translate one chrome action into the native viewport operation it represents.
@@ -419,6 +442,30 @@ mod tests {
     }
 
     #[test]
+    fn title_and_controls_advertise_their_distinct_pointer_actions() {
+        let icons = Icons::load();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            title_bar(ui, "gallery", false, None, &icons);
+        });
+
+        let title = harness.get_by_label("Window title bar").rect().center();
+        harness.hover_at(title);
+        harness.step();
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            egui::CursorIcon::Grab
+        );
+
+        let close = harness.get_by_label("Close window").rect().center();
+        harness.hover_at(close);
+        harness.step();
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+    }
+
+    #[test]
     fn maximized_window_exposes_restore_instead_of_maximize() {
         let icons = Icons::load();
         let harness = egui_kittest::Harness::new_ui(move |ui| {
@@ -427,6 +474,45 @@ mod tests {
 
         harness.get_by_label("Restore window");
         assert!(harness.query_by_label("Maximize window").is_none());
+    }
+
+    #[test]
+    fn native_focus_does_not_change_custom_chrome() {
+        fn paints(harness: &egui_kittest::Harness<'_>, color: egui::Color32) -> bool {
+            harness
+                .output()
+                .shapes
+                .iter()
+                .any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == color))
+        }
+
+        let icons = Icons::load();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            title_bar(ui, "gallery", false, None, &icons);
+        });
+        harness.input_mut().focused = false;
+        harness
+            .input_mut()
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .focused = Some(false);
+        harness.step();
+
+        assert!(paints(&harness, PANEL_BG));
+        assert!(paints_border(&harness, HAIRLINE));
+    }
+
+    fn paints_border(harness: &egui_kittest::Harness<'_>, color: egui::Color32) -> bool {
+        harness.output().shapes.iter().any(|shape| {
+            matches!(
+                &shape.shape,
+                egui::Shape::Rect(rect)
+                    if rect.stroke.color == color
+                        && rect.stroke.width == 1.0
+                        && rect.rect == harness.ctx.viewport_rect()
+            )
+        })
     }
 
     #[test]

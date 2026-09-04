@@ -5,6 +5,13 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Custom chrome is stable and legible.** Title bars and buttons use appropriate cursors, ignore inconsistent
+  compositor focus changes during moves, and outline each decorationless window.
+- **Generated demos set a window icon.** The bundled asset is ready to replace with the consumer application's icon.
+- **Contact sheets obey the active renderer's texture limit.** Capture reads the wgpu or Glow capability and constrains
+  both axes, including captions, gutters and padding. Individual shots retain their resolution; sheet copies scale only
+  when required, and renderer failures return diagnostics instead of panicking.
+
 ## [0.7.0] - 2026-09-04
 
 - **Scenes can declare momentary button knobs.** `ctx.button("Label", callback)` renders the supplied label and invokes

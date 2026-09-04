@@ -1317,17 +1317,18 @@ fn caret(ui: &mut egui::Ui, dir: Caret) -> egui::Response {
     };
     ui.painter()
         .add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
-    resp
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Apply the gallery's style tweaks onto `style`, in place:
-/// square (un-rounded) widgets and roomier button padding.
+/// square (un-rounded) widgets, roomier button padding, and a pointer cursor over buttons.
 /// It never touches colours, so each theme keeps its own palette.
 ///
 /// Applied to every theme before the host's `setup` runs; [`run`]
 /// documents the extend / replace / drop levels that ordering buys.
 pub fn apply_default_style(style: &mut egui::Style) {
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     for widget in [
         &mut style.visuals.widgets.noninteractive,
         &mut style.visuals.widgets.inactive,
@@ -1526,6 +1527,23 @@ mod tests {
     }
 
     #[test]
+    fn initialised_demo_showcases_a_valid_verbatim_window_icon() {
+        let host = include_str!("../template/main.rs");
+        assert!(host.contains(".window_icon(window_icon)"));
+
+        let icon =
+            eframe::icon_data::from_png_bytes(include_bytes!("../template/assets/window-icon.png"))
+                .expect("the scaffold's embedded icon is a valid PNG");
+        assert_eq!((icon.width, icon.height), (64, 64));
+
+        let generator = include_str!("../template/cargo-generate.toml");
+        assert!(
+            generator.contains("assets/window-icon.png"),
+            "cargo-generate must copy binary assets without templating them"
+        );
+    }
+
+    #[test]
     fn shutdown_request_closes_the_viewport_on_the_event_loop() {
         let shutdown = Shutdown::default();
         let context = egui::Context::default();
@@ -1591,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_default_style_squares_widgets_and_pads_buttons_past_egui_defaults() {
+    fn apply_default_style_squares_pads_and_points_at_buttons() {
         let mut style = egui::Style::default();
         let egui_default = style.spacing.button_padding;
         apply_default_style(&mut style);
@@ -1607,6 +1625,10 @@ mod tests {
         assert!(
             ours.x > egui_default.x && ours.y > egui_default.y,
             "button padding {ours:?} should exceed egui's default {egui_default:?}"
+        );
+        assert_eq!(
+            style.visuals.interact_cursor,
+            Some(egui::CursorIcon::PointingHand)
         );
     }
 

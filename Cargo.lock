@@ -1465,6 +1465,7 @@ dependencies = [
  "lyon",
  "notify",
  "percent-encoding",
+ "pollster",
  "process-wrap",
  "regex",
  "semver",

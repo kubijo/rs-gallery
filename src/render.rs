@@ -11,7 +11,7 @@
 //! Overrides re-apply before every frame, so a recipe outranks whatever
 //! a scene writes to its own knobs — capture and store both end on the recipe.
 
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::{cell::RefCell, collections::BTreeMap, fmt::Write as _, panic::AssertUnwindSafe};
 
 use anstyle::{AnsiColor, Style};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -459,15 +459,13 @@ pub(crate) fn open<A: eframe::App + 'static>(
     setup: &impl Fn(&egui::Context),
     app: impl FnOnce(&eframe::CreationContext<'_>, Option<GlPainter>) -> A,
 ) -> Result<egui_kittest::Harness<'static, A>, Diagnostic> {
+    session.validate_target(size, scale)?;
     let builder = egui_kittest::Harness::builder()
         .with_size(size)
         .with_pixels_per_point(scale)
         // The predictable options a snapshot wants — software texture filtering, no dithering —
         // with the sample count spelled from the one place the window reads it too.
-        .with_render_options(eframe::egui_wgpu::RendererOptions {
-            msaa_samples: crate::MSAA_SAMPLES,
-            ..eframe::egui_wgpu::RendererOptions::PREDICTABLE
-        });
+        .with_render_options(wgpu_render_options());
     let (painter, builder) = match session {
         #[cfg(not(target_vendor = "apple"))]
         Session::Glow(capture) => (Some(capture.painter()), builder.renderer(capture.clone())),
@@ -475,7 +473,7 @@ pub(crate) fn open<A: eframe::App + 'static>(
         // `render()` — by which time the app has been drawing for frames. Built up front,
         // the state reaches the `CreationContext`, so `SceneCtx::render_state` is `Some`
         // here exactly as it is in a window. Same render options either way.
-        Session::Wgpu => (None, builder.wgpu()),
+        Session::Wgpu(capture) => (None, builder.renderer(capture.renderer()?)),
     };
     Ok(builder.build_eframe(|cc| {
         install_context(cc, setup);
@@ -490,7 +488,70 @@ pub(crate) fn open<A: eframe::App + 'static>(
 pub(crate) enum Session {
     #[cfg(not(target_vendor = "apple"))]
     Glow(SharedCapture),
-    Wgpu,
+    Wgpu(Box<WgpuCapture>),
+}
+
+/// One actual headless wgpu device for a run. Each harness needs a fresh egui renderer, but all of
+/// them are built over this same device so the capability used by sheet packing is authoritative.
+pub(crate) struct WgpuCapture {
+    setup: eframe::egui_wgpu::WgpuSetup,
+    first: RefCell<Option<eframe::egui_wgpu::RenderState>>,
+    max_texture_dimension_2d: u32,
+}
+
+fn wgpu_render_options() -> eframe::egui_wgpu::RendererOptions {
+    eframe::egui_wgpu::RendererOptions {
+        msaa_samples: crate::MSAA_SAMPLES,
+        ..eframe::egui_wgpu::RendererOptions::PREDICTABLE
+    }
+}
+
+impl WgpuCapture {
+    fn new() -> Result<Self, Diagnostic> {
+        let initial_setup = egui_kittest::wgpu::default_wgpu_setup();
+        let state = make_wgpu_state(initial_setup, "open the headless wgpu renderer")?;
+        let max_texture_dimension_2d = state.device.limits().max_texture_dimension_2d;
+        let setup = eframe::egui_wgpu::WgpuSetup::Existing(eframe::egui_wgpu::WgpuSetupExisting {
+            instance: state.instance.clone(),
+            adapter: state.adapter.clone(),
+            device: state.device.clone(),
+            queue: state.queue.clone(),
+        });
+        Ok(Self {
+            setup,
+            first: RefCell::new(Some(state)),
+            max_texture_dimension_2d,
+        })
+    }
+
+    fn renderer(&self) -> Result<egui_kittest::wgpu::WgpuTestRenderer, Diagnostic> {
+        let state = match self.first.borrow_mut().take() {
+            Some(state) => state,
+            None => make_wgpu_state(self.setup.clone(), "open a headless wgpu capture")?,
+        };
+        Ok(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(
+            state,
+        ))
+    }
+}
+
+fn make_wgpu_state(
+    setup: eframe::egui_wgpu::WgpuSetup,
+    action: &str,
+) -> Result<eframe::egui_wgpu::RenderState, Diagnostic> {
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        egui_kittest::wgpu::create_render_state(setup, wgpu_render_options())
+    }))
+    .map_err(|panic| Diagnostic::new(format!("{action}: {}", panic_message(&panic))))
+}
+
+pub(crate) fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("the renderer panicked")
+        .to_owned()
 }
 
 impl Session {
@@ -505,8 +566,36 @@ impl Session {
                 Diagnostic::new("this platform has no headless glow capture")
                     .hint("configure `Renderer::Wgpu`, whose capture needs no GL context"),
             ),
-            Renderer::Wgpu => Ok(Self::Wgpu),
+            Renderer::Wgpu => Ok(Self::Wgpu(Box::new(WgpuCapture::new()?))),
         }
+    }
+
+    /// The largest 2D texture/render-target side enabled on this run's actual backend.
+    pub(crate) fn max_texture_dimension_2d(&self) -> u32 {
+        match self {
+            #[cfg(not(target_vendor = "apple"))]
+            Self::Glow(capture) => capture.max_texture_dimension_2d(),
+            Self::Wgpu(capture) => capture.max_texture_dimension_2d,
+        }
+    }
+
+    fn validate_target(&self, size: egui::Vec2, scale: f32) -> Result<(), Diagnostic> {
+        let pixels = size * scale;
+        let width = pixels.x.round();
+        let height = pixels.y.round();
+        let limit = self.max_texture_dimension_2d();
+        if width.is_finite()
+            && height.is_finite()
+            && width >= 1.0
+            && height >= 1.0
+            && width <= limit as f32
+            && height <= limit as f32
+        {
+            return Ok(());
+        }
+        Err(Diagnostic::new(format!(
+            "a {width:.0}×{height:.0} capture target exceeds this renderer's {limit}×{limit} limit"
+        )))
     }
 }
 
@@ -525,7 +614,7 @@ fn draw(
     shot: &Shot,
     size: egui::Vec2,
 ) -> Result<SceneFrame, Diagnostic> {
-    let wgpu_session = matches!(session, Session::Wgpu);
+    let wgpu_session = matches!(session, Session::Wgpu(_));
     let mut harness = open(size, shot.scale, session, setup, |cc, painter| {
         let wgpu = cc.wgpu_render_state.clone();
         // Loudly, because the quiet alternative is worse: a capture without the render state
@@ -643,6 +732,7 @@ fn shoot(
         shot.size.y.max(wanted.y.ceil()),
     );
     if fitting != shot.size {
+        session.validate_target(fitting, shot.scale)?;
         // Resized rather than drawn again on a fresh harness, which would take the GL context with it.
         // A scene that cached anything against that context — a femtovg canvas, a compiled shader —
         // would then be drawing into nothing, and the shot would come back with the egui parts alone.
@@ -1205,7 +1295,7 @@ fn capture_template(scene: &SceneEntry, knobs: &[Knob], size: egui::Vec2, scale:
         # Renders what `--render` alone would — change a value and it renders something else.
         out = "renders"
         size = "{width}x{height}"
-        {magnified}# Uncomment once there is a second shot: gathers them onto one captioned image.
+        {magnified}# Uncomment once there is a second shot: gathers limit-safe copies onto one captioned image.
         # sheet = "sheet.png"
 
         [[shot]]
@@ -2223,10 +2313,11 @@ mod tests {
             template: false,
         };
 
+        let session = Session::open(Renderer::Wgpu).expect("headless wgpu session");
         DREW.set(0);
         let settling = draw(
             scene,
-            &Session::Wgpu,
+            &session,
             &|_: &egui::Context| {},
             &shot(true),
             shot(true).size,
@@ -2247,7 +2338,7 @@ mod tests {
         DREW.set(0);
         draw(
             scene,
-            &Session::Wgpu,
+            &session,
             &|_: &egui::Context| {},
             &shot(false),
             shot(false).size,
@@ -2902,7 +2993,7 @@ mod tests {
                 # Renders what `--render` alone would — change a value and it renders something else.
                 out = "renders"
                 size = "480x480"
-                # Uncomment once there is a second shot: gathers them onto one captioned image.
+                # Uncomment once there is a second shot: gathers limit-safe copies onto one captioned image.
                 # sheet = "sheet.png"
 
                 [[shot]]

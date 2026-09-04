@@ -13,7 +13,8 @@ size = "640x360"
 # shows; anything a scene sizes in device pixels stays put while the rest of the picture grows.
 # scale = 2
 # Each PNG is cropped to what its scene drew; `trim = false` here or on a shot keeps the whole canvas.
-# Gather every shot onto one captioned image too. Drop the line to write only the shots themselves.
+# Gather every shot onto one captioned image within the renderer's texture limit. Only sheet copies scale when needed;
+# individual PNGs keep their requested size. Drop the line to write only the shots.
 sheet = "sheet.png"
 # What the run came to, as JSON: a record per shot with its name, path, size, `settled` and the
 # frames it drew. For a loop that renders a set and looks at the results without anyone watching.
