@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-04
+
 - **Scenes can declare momentary button knobs.** `ctx.button("Label", callback)` renders the supplied label and invokes
   the callback once per click without faking persistent state through a toggle.
 - **Gallery windows now use consistent app-owned decorations.** Their title bars can drag, minimize, maximize, restore,
