@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-04
+
 - **The repository vendors cleanly.** Its unexpanded demo manifest no longer looks like a Cargo package, and the shared
   cargo-deny policy accepts entries unused by an individual lockfile.
 
