@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-04
+
 - **Custom chrome is stable and legible.** Title bars and buttons use appropriate cursors, ignore inconsistent
   compositor focus changes during moves, and outline each decorationless window.
 - **Generated demos set a window icon.** The bundled asset is ready to replace with the consumer application's icon.
