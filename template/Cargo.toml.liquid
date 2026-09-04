@@ -1,0 +1,27 @@
+[package]
+# Keep this package name distinct from the `gallery` dependency
+# to avoid a crate-name collision in the scene dylib.
+# The binary and project directory may still be named `gallery`.
+name = "app-gallery"
+version = "0.1.0"
+publish = false
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+crate-type = ["dylib"]
+
+[[bin]]
+name = "gallery"
+path = "main.rs"
+
+[dependencies]
+gallery = { git = "{{gallery_git}}" }
+# Add the crate(s) whose components you want to stage, e.g.
+# my-components = { path = "../my-components" }
+
+[build-dependencies]
+gallery-build = { git = "{{gallery_git}}", package = "gallery-build" }
+
+# Keep the generated app outside any enclosing Cargo workspace.
+[workspace]

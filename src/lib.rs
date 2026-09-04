@@ -1544,6 +1544,17 @@ mod tests {
     }
 
     #[test]
+    fn template_manifest_is_inert_until_generation() {
+        let source = include_str!("../template/Cargo.toml.liquid");
+        assert!(source.contains("{{gallery_git}}"));
+        assert!(
+            !std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/template/Cargo.toml"))
+                .exists(),
+            "Nix vendors recursively parse every Cargo.toml in a Git dependency"
+        );
+    }
+
+    #[test]
     fn shutdown_request_closes_the_viewport_on_the_event_loop() {
         let shutdown = Shutdown::default();
         let context = egui::Context::default();

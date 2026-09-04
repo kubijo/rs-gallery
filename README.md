@@ -17,8 +17,9 @@ cargo generate --git kubijo/rs-gallery template --name my-gallery --no-workspace
 
 `--name` picks the directory; `--no-workspace` stops cargo-generate splicing the instance into an enclosing workspace,
 so it is safe to run inside one — the instance carries its own `[workspace]`. It prompts for the gallery git URL, scene
-glob and title, or copy [`template/`](template) and fill the `{{ … }}` markers by hand. It ships a runnable
-`example.scene.rs` and a standalone `justfile`, so the first `just run` already shows something.
+glob and title, or copy [`template/`](template), rename `Cargo.toml.liquid` to `Cargo.toml`, and fill the `{{ … }}`
+markers by hand. It ships a runnable `example.scene.rs` and a standalone `justfile`, so the first `just run` already
+shows something.
 
 The scaffolded dependency tracks the default branch. Add `tag = "v0.1.0"` beside the `git` key — in both `gallery` and
 `gallery-build` — to hold a release instead; `just update` then reports what has landed since it.

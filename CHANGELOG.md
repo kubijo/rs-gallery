@@ -5,6 +5,9 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **The repository vendors cleanly.** Its unexpanded demo manifest no longer looks like a Cargo package, and the shared
+  cargo-deny policy accepts entries unused by an individual lockfile.
+
 ## [0.8.0] - 2026-09-04
 
 - **Custom chrome is stable and legible.** Title bars and buttons use appropriate cursors, ignore inconsistent

@@ -1,5 +1,5 @@
-# `cargo generate --git <gallery-repo> template` scaffolds a new instance from these files, filling the
-# placeholders below. The same files also work as a plain copy — replace the `{{ … }}` markers by hand.
+# `cargo generate --git <gallery-repo> template` fills these placeholders and removes Cargo.toml's `.liquid` suffix.
+# For a plain copy, rename that file and replace the markers by hand.
 [template]
 description = "A gallery component-catalog instance"
 

@@ -89,6 +89,9 @@
                 # `png` stays off besides: tests/snapshots/ holds byte-compared references.
                 "*.png"
                 "*.ttf"
+                # Cargo-generate removes `.liquid`;
+                # keeping the source inert stops vendors parsing it.
+                "template/Cargo.toml.liquid"
                 # Kept as received: this repo's licence, and the font's own.
                 "UNLICENSE"
                 "fonts/noto/OFL.txt"
