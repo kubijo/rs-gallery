@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 repository.workspace = true
-# Code is Unlicense; the bundled Noto fallback fonts (fonts/noto/) are SIL OFL 1.1.
-license = "Unlicense AND OFL-1.1"
+# Code is Unlicense; bundled Noto fonts are SIL OFL 1.1; Phosphor-derived icons are MIT.
+license = "Unlicense AND OFL-1.1 AND MIT"
 description = "egui-shelled component catalog: a fixed egui shell + Storybook-style scene discovery (config globs, `#[scene]` + inventory)."
 readme = "README.md"
 keywords = ["egui", "components", "gui", "catalog", "preview"]

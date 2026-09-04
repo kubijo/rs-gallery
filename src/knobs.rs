@@ -9,6 +9,12 @@ use std::collections::HashMap;
 /// One control in the knobs panel.
 #[derive(Clone)]
 pub enum Knob {
+    /// A momentary action. `clicked` is set by the panel and consumed by the scene on its next
+    /// [`SceneCtx::button`](crate::SceneCtx::button) call.
+    Button {
+        label: String,
+        clicked: bool,
+    },
     Text {
         label: String,
         value: String,
@@ -134,6 +140,17 @@ fn step_decimals(step: f32) -> usize {
 
 fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
     match knob {
+        Knob::Button { label, clicked } => {
+            // The label belongs on the button itself; the empty first cell keeps it aligned with
+            // the widgets of value-carrying knobs without repeating the label beside it.
+            ui.label("");
+            if ui.button(label.as_str()).clicked() {
+                *clicked = true;
+                true
+            } else {
+                false
+            }
+        }
         Knob::Group { label } => {
             ui.strong(label.as_str());
             ui.separator();
@@ -385,6 +402,10 @@ mod tests {
 
         let options = |a: &str, b: &str| vec![a.to_owned(), b.to_owned()];
         let mut knobs = vec![
+            Knob::Button {
+                label: "rebuild".to_owned(),
+                clicked: false,
+            },
             Knob::Group {
                 label: "section".to_owned(),
             },
@@ -443,7 +464,8 @@ mod tests {
         harness.run();
 
         for label in [
-            "section", "note", "size", "enabled", "tint", "dropdown", "radio", "buttons", "aim",
+            "rebuild", "section", "note", "size", "enabled", "tint", "dropdown", "radio",
+            "buttons", "aim",
         ] {
             assert!(
                 harness.query_by_label(label).is_some(),
@@ -458,6 +480,31 @@ mod tests {
                 "option `{option}` should render"
             );
         }
+    }
+
+    #[test]
+    fn clicking_an_action_button_sets_its_one_shot_event() {
+        use std::{cell::RefCell, rc::Rc};
+
+        use egui_kittest::kittest::Queryable;
+
+        let clicked = Rc::new(RefCell::new(false));
+        let observed = clicked.clone();
+        let mut knob = Knob::Button {
+            label: "Rebuild shaders".to_owned(),
+            clicked: false,
+        };
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            render_knob(ui, &mut knob);
+            if let Knob::Button { clicked, .. } = &knob {
+                *observed.borrow_mut() = *clicked;
+            }
+        });
+
+        harness.get_by_label("Rebuild shaders").click();
+        harness.step();
+
+        assert!(*clicked.borrow());
     }
 
     #[test]

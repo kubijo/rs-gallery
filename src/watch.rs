@@ -85,6 +85,9 @@ const SWAP_WAIT: Duration = Duration::from_millis(1_500);
 /// The quiet before a build: an editor writes a file in several steps, and a save-all touches many.
 const QUIET: Duration = Duration::from_millis(500);
 
+/// Bounds how long the watcher can remain asleep after the UI begins an orderly shutdown.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
 /// Lines of cargo's own output kept back, for a failure that renders no diagnostics.
 const TAIL_LINES: usize = 20;
 
@@ -192,6 +195,7 @@ type BuildInFlight = Arc<Mutex<Option<Box<dyn ChildWrapper>>>>;
 pub(crate) struct SceneWatcher {
     building: BuildInFlight,
     stopped: Arc<AtomicBool>,
+    thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 /// Watch `paths` for edits and rebuild the dylib as they land, reporting the cycle into `hot`.
@@ -203,24 +207,34 @@ pub(crate) fn spawn(
     let watcher = SceneWatcher {
         building: BuildInFlight::default(),
         stopped: Arc::new(AtomicBool::new(false)),
+        thread: Arc::new(Mutex::new(None)),
     };
     let running = watcher.clone();
     let reporting = hot.clone();
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         if let Err(why) = watch(&paths, &rebuild, &reporting, &running) {
             reporting.set(HotPhase::Stopped { why });
         }
     });
+    *watcher.thread.lock().expect("the watcher thread") = Some(handle);
     watcher
 }
 
 impl SceneWatcher {
-    /// Stop watching and take down any build in flight. The thread is left to the process exit
-    /// that follows: it is blocked on the channel or inside the build this just killed.
+    /// Stop watching and take down any build in flight without waiting for its thread.
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         if let Some(building) = self.building.lock().expect("the build in flight").as_mut() {
             let _ = building.kill();
+        }
+    }
+
+    /// Stop all watcher work and wait until neither it nor a cargo child can touch the hot dylib.
+    pub(crate) fn stop_and_join(&self) {
+        self.stop();
+        let handle = self.thread.lock().expect("the watcher thread").take();
+        if let Some(handle) = handle {
+            let _ = handle.join();
         }
     }
 
@@ -278,8 +292,12 @@ impl<W: notify::Watcher> WatchLoop<'_, W> {
     fn run(&mut self) {
         while self.watcher.going() {
             // A watcher whose sender is gone has nothing left to say.
-            let Ok(event) = self.events.recv() else {
-                return;
+            let event = loop {
+                match self.events.recv_timeout(STOP_POLL) {
+                    Ok(event) => break event,
+                    Err(RecvTimeoutError::Timeout) if self.watcher.going() => {}
+                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return,
+                }
             };
             let mut edited = edit_landed(event, self.roots, self.notify);
 
@@ -288,14 +306,16 @@ impl<W: notify::Watcher> WatchLoop<'_, W> {
                 if edited {
                     self.hot.set(HotPhase::Changed);
                 }
-                match self.events.recv_timeout(wait) {
+                match self.events.recv_timeout(wait.min(STOP_POLL)) {
                     Ok(event) => {
                         if edit_landed(event, self.roots, self.notify) {
                             edited = true;
                             quiet = Instant::now() + self.quiet;
                         }
                     }
-                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Timeout) if !self.watcher.going() => return,
+                    Err(RecvTimeoutError::Timeout) if Instant::now() >= quiet => break,
+                    Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => return,
                 }
             }
@@ -1004,6 +1024,7 @@ mod tests {
         SceneWatcher {
             building: BuildInFlight::default(),
             stopped: Arc::new(AtomicBool::new(false)),
+            thread: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1360,6 +1381,16 @@ mod tests {
             "stopping returns while the build is still running, or closing a window would \
                      wait out whatever cargo had left to do",
         );
+    }
+
+    #[test]
+    fn orderly_shutdown_joins_an_idle_watcher() {
+        let watcher = spawn(Vec::new(), stand_in("exit 0"), &HotStatus::new());
+
+        watcher.stop_and_join();
+
+        assert!(!watcher.going());
+        assert!(watcher.thread.lock().expect("the watcher thread").is_none());
     }
 
     /// One of cargo's records, as it writes them.

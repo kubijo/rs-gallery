@@ -5,6 +5,15 @@ use gallery::prelude::*;
 
 scene_meta! { title: "Example / Knobs" }
 
+/// `button` — a momentary action whose callback runs once per click.
+#[scene("button")]
+fn button(ctx: &mut SceneCtx, ui: &mut Ui) {
+    ctx.button("Log greeting", || action("Hello from the button knob"));
+    stage!(ctx, ui, |ui| {
+        ui.label("Click the control, then open the Actions panel.");
+    });
+}
+
 /// `text` — a single-line string field.
 #[scene("text")]
 fn text(ctx: &mut SceneCtx, ui: &mut Ui) {

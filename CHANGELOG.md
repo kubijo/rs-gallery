@@ -5,6 +5,15 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Scenes can declare momentary button knobs.** `ctx.button("Label", callback)` renders the supplied label and invokes
+  the callback once per click without faking persistent state through a toggle.
+- **Gallery windows now use consistent app-owned decorations.** Their title bars can drag, minimize, maximize, restore,
+  and close; double-clicking either title bar toggles its maximized state.
+- **Consumers can set the window title and icon in `Settings`.** The icon appears in native app surfaces and the custom
+  title bar only when supplied; a missing or blank title defaults to `Gallery`, followed by the version number.
+- **Window and signal shutdown now converge on one orderly path.** `SIGINT`, `SIGTERM`, `SIGHUP`, and GUI close first
+  stop and join hot-reload work, then let eframe release its wgpu/GL resources without a concurrent forced process exit.
+
 ## [0.6.0] - 2026-09-03
 
 - **Scenes can invalidate host-owned caches after hot reload.** `SceneCtx::scene_revision()` stays stable across frames

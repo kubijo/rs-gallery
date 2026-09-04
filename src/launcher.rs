@@ -20,6 +20,7 @@ use crate::{
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const DEFAULT_WINDOW_TITLE: &str = "Gallery";
 
 /// The consumer's entire `main`. Both arguments are required
 /// — a `setup` closure and [`Settings`], which names
@@ -105,12 +106,13 @@ pub fn launch(
         frames: cli.frames,
         scene: scene.map(crate::tree::scene_key),
         hot: cli.hot.then_some(hot),
+        watcher: watcher.clone(),
     };
-    let title = window_title(&config.title);
+    let title = window_title(settings.title.as_deref().unwrap_or(&config.title));
     let result = run_with(&title, source, settings, setup, options);
-    // Window closed normally: stop the watcher (the Ctrl-C/SIGTERM path is handled in watch_scenes).
+    // Also covers a native-startup failure before the app could take ownership of the watcher.
     if let Some(watcher) = &watcher {
-        watcher.stop();
+        watcher.stop_and_join();
     }
     result
 }
@@ -119,8 +121,13 @@ fn version_banner() -> String {
     format!("gallery {VERSION}")
 }
 
-fn window_title(title: &str) -> String {
-    format!("{title} · {}", version_banner())
+pub(crate) fn window_title(title: &str) -> String {
+    let title = if title.trim().is_empty() {
+        DEFAULT_WINDOW_TITLE
+    } else {
+        title
+    };
+    format!("{title} · {VERSION}")
 }
 
 /// Report a headless failure the way clap reports a bad argument — on stderr, then a non-zero exit —
@@ -312,8 +319,8 @@ fn host_profile() -> Option<String> {
 /// Rebuild the scenes dylib on every scene change; each fresh `.so` is what [`HotDylib`] reloads,
 /// and the cycle between the two is what `hot` carries to the shell.
 ///
-/// A build runs as a process group (unix) / job object (windows), so killing it takes down its whole
-/// tree — on window close (via the returned handle) and on Ctrl-C/SIGTERM (via the handler).
+/// A build runs as a process group (unix) / job object (windows), so orderly shutdown
+/// takes down its whole tree before eframe tears down the graphics backends.
 fn watch_scenes(
     manifest_dir: &str,
     config: &gallery_build::Config,
@@ -323,21 +330,11 @@ fn watch_scenes(
     // Owned by the closure: it outlives this call, being what every later rebuild is made from.
     let manifest_dir = manifest_dir.to_owned();
     let config = config.path.clone();
-    let watcher = watch::spawn(
+    watch::spawn(
         paths,
         Box::new(move || build_command(&manifest_dir, &config)),
         hot,
-    );
-
-    let on_signal = watcher.clone();
-    if let Err(e) = ctrlc::set_handler(move || {
-        on_signal.stop();
-        std::process::exit(130);
-    }) {
-        eprintln!("gallery: no signal handler — a build may outlive the window: {e}");
-    }
-
-    watcher
+    )
 }
 
 /// A cargo command in the crate dir, naming the config only where `build.rs` would not find it.
@@ -473,7 +470,15 @@ mod tests {
         assert_eq!(version_banner(), format!("gallery {VERSION}"));
         assert_eq!(
             window_title("components"),
-            format!("components · gallery {VERSION}")
+            format!("components · {VERSION}")
+        );
+        assert_eq!(
+            window_title(""),
+            format!("{DEFAULT_WINDOW_TITLE} · {VERSION}")
+        );
+        assert_eq!(
+            window_title("  \t"),
+            format!("{DEFAULT_WINDOW_TITLE} · {VERSION}")
         );
     }
 

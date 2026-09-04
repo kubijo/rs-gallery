@@ -21,6 +21,10 @@ fn sizes(ctx: &mut SceneCtx, ui: &mut Ui) {
             ("folder", &icons.folder),
             ("app", &icons.app),
             ("search", &icons.search),
+            ("window-minimize", &icons.window_minimize),
+            ("window-maximize", &icons.window_maximize),
+            ("window-restore", &icons.window_restore),
+            ("window-close", &icons.window_close),
         ] {
             ui.label(name);
             ctx.stage(ui, egui::vec2(220.0, 44.0), |ui| {

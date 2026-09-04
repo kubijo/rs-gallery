@@ -4,8 +4,9 @@
 //! Its knob accessors are **declarative by use**:
 //! calling `ctx.slider(...)` both registers the control and returns its current value — the first frame
 //! creates it at its default, later frames return the value set in the controls panel. Values persist in
-//! the host per scene, so they survive hot-reloads. Under the glow renderer it also exposes offscreen GL
-//! rendering (see [`SceneCtx::offscreen`]).
+//! the host per scene, so they survive hot-reloads. A [`button`](SceneCtx::button) is the momentary
+//! exception: it runs a callback once instead of carrying a value. Under the glow renderer the context
+//! also exposes offscreen GL rendering (see [`SceneCtx::offscreen`]).
 
 use eframe::{egui_wgpu, glow};
 
@@ -803,6 +804,30 @@ impl<'a> SceneCtx<'a> {
         &mut self.knobs[i]
     }
 
+    /// Draw a momentary button in the Controls panel
+    /// and run `on_click` once when it is clicked.
+    ///
+    /// The callback runs during the scene's ordinary render call,
+    /// never from the panel or across a hot-reload boundary.
+    ///
+    /// Returns `true` when the callback ran this frame.
+    pub fn button(&mut self, label: &str, on_click: impl FnOnce()) -> bool {
+        let clicked = match self.slot(
+            || Knob::Button {
+                label: label.to_owned(),
+                clicked: false,
+            },
+            |k| matches!(k, Knob::Button { label: l, .. } if l == label),
+        ) {
+            Knob::Button { clicked, .. } => std::mem::take(clicked),
+            _ => false,
+        };
+        if clicked {
+            on_click();
+        }
+        clicked
+    }
+
     pub fn text(&mut self, label: &str, default: &str) -> String {
         match self.slot(
             || Knob::Text {
@@ -1134,6 +1159,20 @@ mod tests {
             0.8
         );
         assert_eq!(knobs.len(), 1);
+    }
+
+    #[test]
+    fn button_invokes_its_callback_once_for_each_panel_click() {
+        let mut knobs = vec![Knob::Button {
+            label: "Reset".to_owned(),
+            clicked: true,
+        }];
+        let mut calls = 0;
+
+        assert!(SceneCtx::new(&mut knobs, None, None).button("Reset", || calls += 1));
+        assert_eq!(calls, 1);
+        assert!(!SceneCtx::new(&mut knobs, None, None).button("Reset", || calls += 1));
+        assert_eq!(calls, 1, "the click is consumed rather than becoming state");
     }
 
     #[test]

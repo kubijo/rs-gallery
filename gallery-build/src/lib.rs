@@ -35,7 +35,7 @@ struct Declared {
 }
 
 fn default_title() -> String {
-    "gallery".to_owned()
+    "Gallery".to_owned()
 }
 
 impl Config {
@@ -401,6 +401,10 @@ mod tests {
         .expect("write the config");
 
         let config = Config::read(&root.join("crate/gallery.toml")).expect("a readable config");
+        assert_eq!(
+            config.title, "Gallery",
+            "an omitted title has a useful default"
+        );
         let modules = scan(&config.globs, None).modules;
         assert!(modules.contains("mod dial;"), "under a subdir: {modules}");
         assert!(modules.contains("mod loose;"), "beside it: {modules}");

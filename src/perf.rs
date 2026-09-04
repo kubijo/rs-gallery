@@ -9,7 +9,7 @@ use crate::{HAIRLINE, MUTED, header_bar, header_title};
 
 const TABLE_ROW_H: f32 = 18.0;
 const TABLE_LABEL_W: f32 = 96.0;
-pub(crate) const PERF_WINDOW_SIZE: [f32; 2] = [380.0, 240.0];
+pub(crate) const PERF_WINDOW_SIZE: [f32; 2] = [380.0, 240.0 + crate::window::TITLE_BAR_H];
 
 /// Translucent threshold gridlines, then their even fainter ms labels.
 const PERF_GRID: egui::Color32 = egui::Color32::from_rgba_premultiplied(0x50, 0x50, 0x50, 0x80);

@@ -94,6 +94,10 @@ fn source_view(ctx: &mut SceneCtx, ui: &mut Ui) {
 /// One of each, at values that show what the widget does with them.
 fn every_kind() -> Vec<Knob> {
     vec![
+        Knob::Button {
+            label: "Run action".to_owned(),
+            clicked: false,
+        },
         Knob::Text {
             label: "name".to_owned(),
             value: "world".to_owned(),

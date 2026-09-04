@@ -16,7 +16,7 @@
 
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -74,6 +74,7 @@ mod svg;
 mod tree;
 mod update;
 mod watch;
+mod window;
 pub use actions::action;
 use actions::{Log, collecting, render_actions};
 pub use context::{PADDING, SceneCtx, SceneRevision, Stage, StageSpec};
@@ -88,7 +89,7 @@ use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
 use svg::Icons;
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
-use watch::{HotStatus, render_build_bar, render_hot_chip};
+use watch::{HotStatus, SceneWatcher, render_build_bar, render_hot_chip};
 
 /// Common imports for scene files: `use gallery::prelude::*;`
 /// then bare `scene_meta!` / `#[scene]`.
@@ -255,6 +256,76 @@ pub enum Renderer {
     Glow,
 }
 
+/// One process-wide signal handler points at the currently running window.
+/// The indirection lets a test or embedding process open more than one gallery
+/// sequentially without registering twice.
+static SIGNAL_TARGET: OnceLock<Arc<Mutex<Option<Shutdown>>>> = OnceLock::new();
+
+#[derive(Clone, Default)]
+struct Shutdown {
+    requested: Arc<AtomicBool>,
+    context: Arc<Mutex<Option<egui::Context>>>,
+}
+
+impl Shutdown {
+    fn install() -> Self {
+        let shutdown = Self::default();
+        let target = SIGNAL_TARGET.get_or_init(|| {
+            let target = Arc::new(Mutex::new(None::<Shutdown>));
+            let on_signal = target.clone();
+            if let Err(error) = ctrlc::set_handler(move || {
+                let shutdown = on_signal
+                    .lock()
+                    .ok()
+                    .and_then(|active| active.as_ref().cloned());
+                if let Some(shutdown) = shutdown {
+                    shutdown.request();
+                }
+            }) {
+                eprintln!("gallery: could not install the SIGINT/SIGTERM/SIGHUP handler: {error}");
+            }
+            target
+        });
+        if let Ok(mut active) = target.lock() {
+            *active = Some(shutdown.clone());
+        }
+        shutdown
+    }
+
+    fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        let context = self
+            .context
+            .lock()
+            .ok()
+            .and_then(|context| context.as_ref().cloned());
+        if let Some(context) = context {
+            context.send_viewport_cmd(egui::ViewportCommand::Close);
+            context.request_repaint();
+        }
+    }
+
+    /// Register the live event loop with the signal handler and say whether this frame should stop.
+    fn begin_frame(&self, context: &egui::Context) -> bool {
+        if let Ok(mut active) = self.context.lock()
+            && active.is_none()
+        {
+            *active = Some(context.clone());
+        }
+        let requested = self.requested.load(Ordering::Acquire);
+        if requested {
+            context.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        requested
+    }
+
+    fn detach(&self) {
+        if let Ok(mut context) = self.context.lock() {
+            *context = None;
+        }
+    }
+}
+
 /// How many samples egui's own render pass is configured for, on the window and on the
 /// headless capture alike — the count a pipeline drawing into that pass through an
 /// [`egui_wgpu::Callback`] has to match.
@@ -275,12 +346,18 @@ pub const MSAA_SAMPLES: u32 = 1;
 /// see [`SceneCtx::gl_loader`].
 pub type GlLoader = Arc<dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void + Send + Sync>;
 
-/// Launch settings the host supplies. `renderer`is required
+/// Launch settings the host supplies. `renderer` is required
 /// (no default); the rest default via [`Settings::new`].
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// Which eframe backend to run on.
     pub renderer: Renderer,
+    /// Window title before gallery's version suffix;
+    /// the `gallery.toml` or [`run`] title when `None`, and `Gallery` when that is blank.
+    pub title: Option<String>,
+    /// Native application icon, also drawn beside
+    /// the custom title when supplied.
+    pub window_icon: Option<Arc<egui::IconData>>,
     /// Initial Controls-panel width; egui's default when `None`.
     /// A hand resize persists over it.
     pub controls_default_width: Option<f32>,
@@ -294,9 +371,28 @@ impl Settings {
     pub fn new(renderer: Renderer) -> Self {
         Self {
             renderer,
+            title: None,
+            window_icon: None,
             controls_default_width: None,
             collapsed: Collapsed::default(),
         }
+    }
+
+    /// Override the window title. Gallery's version is appended when the window is opened.
+    #[must_use]
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the native application icon and draw it in gallery's custom title bar.
+    ///
+    /// [`eframe::icon_data::from_png_bytes`] can decode
+    /// an embedded PNG into the expected [`egui::IconData`].
+    #[must_use]
+    pub fn window_icon(mut self, icon: impl Into<Arc<egui::IconData>>) -> Self {
+        self.window_icon = Some(icon.into());
+        self
     }
 
     /// Seed the Controls panel's initial width (a hand resize still persists over it).
@@ -383,7 +479,9 @@ pub struct Gallery<S: SceneSource> {
     source: S,
     state: ShellState,
     settings: Settings,
-    icons: Icons,
+    icons: Arc<Icons>,
+    window_icon: Option<Arc<egui::IconData>>,
+    window_icon_texture: Option<egui::TextureHandle>,
     perf: Arc<Mutex<PerfStats>>,
     /// Set by the perf window when its close button is hit;
     /// the shell clears `show_perf` next frame.
@@ -397,6 +495,10 @@ pub struct Gallery<S: SceneSource> {
     scene_request: Option<String>,
     /// The rebuild cycle to show, `Some` under `--hot`: a run with no watcher says nothing.
     hot: Option<HotStatus>,
+    /// The hot watcher is stopped before eframe starts tearing its renderers down.
+    watcher: Option<SceneWatcher>,
+    /// Set by SIGINT, SIGTERM, or SIGHUP; observed on the event-loop thread.
+    shutdown: Option<Shutdown>,
     /// The GL proc-address loader, `Some` under [`Renderer::Glow`]
     /// — handed to scenes as [`SceneCtx::gl_loader`].
     gl_loader: Option<GlLoader>,
@@ -413,6 +515,7 @@ impl<S: SceneSource> Gallery<S> {
         gl_loader: Option<GlLoader>,
         gl: Option<Arc<eframe::glow::Context>>,
     ) -> Self {
+        let window_icon = settings.window_icon.clone();
         Self {
             source,
             state: ShellState {
@@ -421,13 +524,17 @@ impl<S: SceneSource> Gallery<S> {
                 ..ShellState::default()
             },
             settings,
-            icons: Icons::load(),
+            icons: Arc::new(Icons::load()),
+            window_icon,
+            window_icon_texture: None,
             perf: Arc::new(Mutex::new(PerfStats::new())),
             perf_close: Arc::new(AtomicBool::new(false)),
             perf_pos: None,
             frames_left: None,
             scene_request: None,
             hot: None,
+            watcher: None,
+            shutdown: None,
             gl_loader,
             gl,
         }
@@ -436,6 +543,14 @@ impl<S: SceneSource> Gallery<S> {
 
 impl<S: SceneSource> eframe::App for Gallery<S> {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let signaled = self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.begin_frame(ui.ctx()));
+        let native_close = ui.ctx().input(|input| input.viewport().close_requested());
+        if signaled || native_close {
+            return;
+        }
         let frame_start = Instant::now();
         let gl_loader = self.gl_loader.clone();
         let gl = self.gl.clone();
@@ -447,6 +562,41 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
         #[cfg(debug_assertions)]
         ui.ctx()
             .all_styles_mut(|style| style.debug.show_interactive_widgets = self.state.debug);
+
+        if self.window_icon_texture.is_none()
+            && let Some(icon) = self.window_icon.as_deref()
+            && !icon.is_empty()
+        {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [icon.width as usize, icon.height as usize],
+                &icon.rgba,
+            );
+            self.window_icon_texture = Some(ui.ctx().load_texture(
+                "gallery-window-icon",
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+
+        let (window_title, maximized) = window::state(ui.ctx(), "gallery");
+        let title_action = egui::Panel::top("gallery-window-titlebar")
+            .exact_size(window::TITLE_BAR_H)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                window::title_bar(
+                    ui,
+                    &window_title,
+                    maximized,
+                    self.window_icon_texture.as_ref(),
+                    &self.icons,
+                )
+            })
+            .inner;
+        window::apply(ui.ctx(), title_action, maximized);
+        if title_action == Some(window::Action::Close) {
+            return;
+        }
+
         if self.perf_close.swap(false, Ordering::Relaxed) {
             self.state.show_perf = false;
         }
@@ -477,21 +627,48 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             }
             let mut builder = egui::ViewportBuilder::default()
                 .with_title("gallery · perf")
-                .with_inner_size(PERF_WINDOW_SIZE);
+                .with_inner_size(PERF_WINDOW_SIZE)
+                .with_decorations(false);
+            if let Some(icon) = &self.window_icon {
+                builder = builder.with_icon(icon.clone());
+            }
             if let Some(pos) = self.perf_pos {
                 builder = builder.with_position(pos);
             }
             let perf = self.perf.clone();
             let close = self.perf_close.clone();
+            let icons = self.icons.clone();
+            let window_icon = self.window_icon_texture.clone();
             ui.ctx().show_viewport_deferred(
                 egui::ViewportId::from_hash_of("gallery-perf"),
                 builder,
                 move |ctx, _class| {
+                    let (window_title, maximized) = window::state(ctx, "gallery · perf");
+                    let mut title_action = None;
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE.fill(PANEL_BG))
                         .show(ctx, |ui| {
+                            title_action = egui::Panel::top("gallery-perf-window-titlebar")
+                                .exact_size(window::TITLE_BAR_H)
+                                .frame(egui::Frame::NONE)
+                                .show(ui, |ui| {
+                                    window::title_bar(
+                                        ui,
+                                        &window_title,
+                                        maximized,
+                                        window_icon.as_ref(),
+                                        &icons,
+                                    )
+                                })
+                                .inner;
                             render_performance(ui, &perf.lock().expect("perf stats"));
                         });
+                    if title_action == Some(window::Action::Close) {
+                        close.store(true, Ordering::Relaxed);
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    }
+                    window::apply(ctx, title_action, maximized);
+                    window::resize(ctx);
                     if ctx.input(|i| i.viewport().close_requested()) {
                         close.store(true, Ordering::Relaxed);
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -505,7 +682,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             self.perf_pos = None;
         }
 
-        let icons = &self.icons;
+        let icons = self.icons.as_ref();
         if self.state.show_scenes {
             egui::Panel::left("gallery-scenes")
                 .frame(egui::Frame::NONE.fill(PANEL_BG))
@@ -716,6 +893,8 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 }
             });
 
+        window::resize(ui.ctx());
+
         // Timed here, not read from `frame.info().cpu_usage`: eframe reports
         // that per *viewport* redraw, so the perf window's own repaints overwrite it
         // and the meter ends up charging the shell for the instrument.
@@ -733,6 +912,27 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 ui.ctx().request_repaint();
             }
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.finish_shutdown();
+    }
+}
+
+impl<S: SceneSource> Gallery<S> {
+    fn finish_shutdown(&mut self) {
+        if let Some(watcher) = self.watcher.take() {
+            watcher.stop_and_join();
+        }
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.detach();
+        }
+    }
+}
+
+impl<S: SceneSource> Drop for Gallery<S> {
+    fn drop(&mut self) {
+        self.finish_shutdown();
     }
 }
 
@@ -1154,7 +1354,8 @@ pub fn run<S: SceneSource + 'static>(
     settings: Settings,
     setup: impl FnOnce(&egui::Context) + 'static,
 ) -> eframe::Result {
-    run_with(title, source, settings, setup, RunOptions::default())
+    let title = launcher::window_title(settings.title.as_deref().unwrap_or(title));
+    run_with(&title, source, settings, setup, RunOptions::default())
 }
 
 /// Everything a fresh egui context needs before a scene draws into it.
@@ -1176,12 +1377,15 @@ fn install_context(cc: &eframe::CreationContext<'_>, setup: impl FnOnce(&egui::C
 /// two profiles comparable; `scene` is the one to measure, already
 /// resolved to a whole key — the launcher matches the pattern while
 /// it can still report a miss and exit, rather than from inside the first frame.
-/// `hot` is the rebuild cycle the launcher's watcher reports into.
+/// `hot` is the rebuild cycle the launcher's watcher reports into;
+/// `watcher` is the work itself, owned by the app so it can
+/// be joined before graphics teardown.
 #[derive(Default)]
 pub(crate) struct RunOptions {
     pub(crate) frames: Option<u32>,
     pub(crate) scene: Option<String>,
     pub(crate) hot: Option<HotStatus>,
+    pub(crate) watcher: Option<SceneWatcher>,
 }
 
 pub(crate) fn run_with<S: SceneSource + 'static>(
@@ -1191,6 +1395,7 @@ pub(crate) fn run_with<S: SceneSource + 'static>(
     setup: impl FnOnce(&egui::Context) + 'static,
     options: RunOptions,
 ) -> eframe::Result {
+    let shutdown = Shutdown::install();
     let renderer = match settings.renderer {
         Renderer::Wgpu => eframe::Renderer::Wgpu,
         Renderer::Glow => eframe::Renderer::Glow,
@@ -1205,10 +1410,16 @@ pub(crate) fn run_with<S: SceneSource + 'static>(
         }
         Renderer::Glow => 0,
     };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 720.0 + window::TITLE_BAR_H])
+        .with_decorations(false);
+    if let Some(icon) = &settings.window_icon {
+        viewport = viewport.with_icon(icon.clone());
+    }
     eframe::run_native(
         title,
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),
+            viewport,
             renderer,
             multisampling,
             ..Default::default()
@@ -1223,6 +1434,8 @@ pub(crate) fn run_with<S: SceneSource + 'static>(
             gallery.frames_left = options.frames;
             gallery.scene_request = options.scene;
             gallery.hot = options.hot;
+            gallery.watcher = options.watcher;
+            gallery.shutdown = Some(shutdown);
             Ok(Box::new(gallery))
         }),
     )
@@ -1290,6 +1503,52 @@ mod tests {
 
     use super::*;
     use crate::test_support::{group, scene};
+
+    #[test]
+    fn window_identity_is_optional_and_set_by_the_builders() {
+        let defaults = Settings::new(Renderer::Wgpu);
+        assert!(defaults.title.is_none());
+        assert!(defaults.window_icon.is_none());
+
+        let icon = Arc::new(egui::IconData {
+            rgba: [0x12, 0x34, 0x56, 0xFF].repeat(16),
+            width: 4,
+            height: 4,
+        });
+        let settings = Settings::new(Renderer::Wgpu)
+            .title("components")
+            .window_icon(icon.clone());
+        assert_eq!(settings.title.as_deref(), Some("components"));
+        assert!(Arc::ptr_eq(
+            settings.window_icon.as_ref().expect("configured icon"),
+            &icon
+        ));
+    }
+
+    #[test]
+    fn shutdown_request_closes_the_viewport_on_the_event_loop() {
+        let shutdown = Shutdown::default();
+        let context = egui::Context::default();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!shutdown.begin_frame(ui.ctx()));
+            shutdown.request();
+            assert!(shutdown.begin_frame(ui.ctx()));
+        });
+
+        let commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport output")
+            .commands;
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Close))
+        );
+        output.textures_delta.clear();
+        shutdown.detach();
+        assert!(shutdown.context.lock().expect("shutdown context").is_none());
+    }
 
     /// Renderer independence lets a scene's GL library keep its own glow version;
     /// only the raw proc-address loader crosses to eframe's glow.
@@ -1361,6 +1620,58 @@ mod tests {
                 groups: self.1.clone(),
             }
         }
+    }
+
+    #[test]
+    fn close_requests_skip_the_last_scene_render() {
+        thread_local! {
+            static RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+
+        fn count(_: &mut SceneCtx<'_>, _: &mut egui::Ui) {
+            RENDERS.set(RENDERS.get() + 1);
+        }
+
+        let gallery = || {
+            let mut counted = scene("counted", "close", true);
+            counted.render = count;
+            Gallery::new(
+                Fixed(vec![counted], Vec::new()),
+                Settings::new(Renderer::Wgpu),
+                None,
+                None,
+            )
+        };
+
+        let renders_during = |label: &str| {
+            RENDERS.set(0);
+            let mut harness = egui_kittest::Harness::builder().build_eframe(|_| gallery());
+            let before = RENDERS.get();
+            harness.get_by_label(label).click();
+            harness.step();
+            RENDERS.get() - before
+        };
+        assert!(
+            renders_during("Close window") < renders_during("Maximize window"),
+            "Close should suppress the release frame that an ordinary title-bar action renders"
+        );
+
+        RENDERS.set(0);
+        let mut native = egui_kittest::Harness::builder().build_eframe(|_| gallery());
+        let before = RENDERS.get();
+        native
+            .input_mut()
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .push(egui::ViewportEvent::Close);
+        native.step();
+        assert_eq!(
+            RENDERS.get(),
+            before,
+            "a native close request should not draw one more scene frame"
+        );
     }
 
     #[test]

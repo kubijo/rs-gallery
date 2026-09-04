@@ -75,6 +75,10 @@ pub struct Icons {
     pub folder: Icon,
     pub app: Icon,
     pub search: Icon,
+    pub window_minimize: Icon,
+    pub window_maximize: Icon,
+    pub window_restore: Icon,
+    pub window_close: Icon,
 }
 
 impl Icons {
@@ -84,6 +88,10 @@ impl Icons {
             folder: Icon::from_svg(include_bytes!("../assets/icons/folder.svg")),
             app: Icon::from_svg(include_bytes!("../assets/icons/app.svg")),
             search: Icon::from_svg(include_bytes!("../assets/icons/search.svg")),
+            window_minimize: Icon::from_svg(include_bytes!("../assets/icons/window-minimize.svg")),
+            window_maximize: Icon::from_svg(include_bytes!("../assets/icons/window-maximize.svg")),
+            window_restore: Icon::from_svg(include_bytes!("../assets/icons/window-restore.svg")),
+            window_close: Icon::from_svg(include_bytes!("../assets/icons/window-close.svg")),
         }
     }
 }
@@ -158,6 +166,10 @@ mod tests {
             ("folder", &icons.folder),
             ("app", &icons.app),
             ("search", &icons.search),
+            ("window-minimize", &icons.window_minimize),
+            ("window-maximize", &icons.window_maximize),
+            ("window-restore", &icons.window_restore),
+            ("window-close", &icons.window_close),
         ] {
             assert!(!icon.indices.is_empty(), "{name} tessellated to nothing");
         }

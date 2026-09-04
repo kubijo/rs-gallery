@@ -27,6 +27,10 @@ The scaffolded dependency tracks the default branch. Add `tag = "v0.1.0"` beside
 `cargo run` / `cargo run -- --hot` work too.) Without a window at all, `just render` and `just capture` write scenes to
 PNGs — see [Rendering scenes to images](#rendering-scenes-to-images).
 
+The host can override `gallery.toml`'s window title and optionally supply an icon in its launch settings. A missing or
+blank title displays as `Gallery`; the icon is used by the native window and drawn beside the custom title bar, with no
+placeholder when it is omitted.
+
 A `--hot` run says where it has got to in the window: a chip in the scenes panel's corner follows the cycle — watching,
 changed, building with its elapsed, reloaded — and a failed build puts a bar over the canvas that opens what cargo said.
 The terminal still gets cargo's output as it always did.
@@ -100,7 +104,8 @@ host added to `SceneCtx` itself.
 
 On the context, `ctx.slider(...)`, `ctx.toggle(...)`, `ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare
 **controls** (knobs). Calling one registers the control in the right-hand panel *and* returns its current value, so
-tweaking it re-renders the scene — [`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. The
+tweaking it re-renders the scene — [`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. A momentary action
+uses `ctx.button("Reset", || reset())`; its callback runs once per click and carries no state into capture recipes. The
 `ctx.set_slider(...)` family writes a value back by label, so content that does its own hit-testing — a slider drawn
 inside the preview, a rendered button — drives the panel too.
 
