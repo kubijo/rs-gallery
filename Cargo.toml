@@ -20,6 +20,7 @@ eframe = {
    default-features = false,
    features = ["wgpu", "glow", "default_fonts", "wayland", "x11"]
 }
+winit = { version = "0.30", default-features = false }
 inventory = "0.3"
 gallery-macros = { path = "gallery-macros" }
 # The launcher and a scenes `build.rs` must resolve `gallery.toml`'s globs to the same strings,

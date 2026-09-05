@@ -14,9 +14,10 @@ const DOUBLE_CLICK_DELAY: f64 = 0.3;
 const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
 const CLOSE_HOVER: egui::Color32 = egui::Color32::from_rgb(0xC4, 0x2B, 0x1C);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Action {
     Drag,
+    ShowMenu(egui::Pos2),
     Minimize,
     ToggleMaximize,
     Close,
@@ -126,7 +127,25 @@ pub(crate) fn title_bar(
             egui::Color32::WHITE,
         );
 
-    if title_double_clicked(ui, &drag) {
+    // Wayland needs the button-press serial while the implicit pointer grab is live.
+    let menu_position = if drag.contains_pointer() {
+        ui.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    ..
+                } if drag.rect.contains(*pos) => Some(*pos),
+                _ => None,
+            })
+        })
+    } else {
+        None
+    };
+    if let Some(position) = menu_position {
+        Some(Action::ShowMenu(position))
+    } else if title_double_clicked(ui, &drag) {
         Some(Action::ToggleMaximize)
     } else if drag.drag_started_by(egui::PointerButton::Primary) {
         Some(Action::Drag)
@@ -233,12 +252,36 @@ fn control(
 }
 
 /// Translate one chrome action into the native viewport operation it represents.
-pub(crate) fn apply(ctx: &egui::Context, action: Option<Action>, maximized: bool) {
+pub(crate) fn apply(
+    ctx: &egui::Context,
+    action: Option<Action>,
+    maximized: bool,
+    show_menu: impl FnOnce(winit::dpi::PhysicalPosition<f64>),
+) {
     let Some(action) = action else {
         return;
     };
     let command = match action {
         Action::Drag => egui::ViewportCommand::StartDrag,
+        Action::ShowMenu(position) => {
+            // A discarded layout pass replays the same input; dispatch at most once.
+            let key = egui::Id::new((ctx.viewport_id(), "gallery-window-menu-pass"));
+            let frame = ctx.cumulative_frame_nr();
+            let already_sent = ctx.data_mut(|data| {
+                let previous = data.get_temp::<u64>(key);
+                data.insert_temp(key, frame);
+                previous == Some(frame)
+            });
+            if !already_sent {
+                // egui points include UI zoom as well as the native display scale.
+                let scale = f64::from(ctx.pixels_per_point());
+                show_menu(winit::dpi::PhysicalPosition::new(
+                    f64::from(position.x) * scale,
+                    f64::from(position.y) * scale,
+                ));
+            }
+            return;
+        }
         Action::Minimize => egui::ViewportCommand::Minimized(true),
         Action::ToggleMaximize => egui::ViewportCommand::Maximized(!maximized),
         Action::Close => egui::ViewportCommand::Close,
@@ -439,6 +482,79 @@ mod tests {
         harness.step();
 
         assert!(actions.borrow().contains(&Action::Drag));
+    }
+
+    fn secondary_button(harness: &mut egui_kittest::Harness<'_>, pos: egui::Pos2, pressed: bool) {
+        harness.input_mut().events.extend([
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        harness.step();
+    }
+
+    #[test]
+    fn title_menu_dispatches_on_press_once_at_display_and_zoom_scaled_position() {
+        let positions = Rc::new(RefCell::new(Vec::new()));
+        let observed = positions.clone();
+        let icons = Icons::load();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_pixels_per_point(1.5)
+            .build_ui(move |ui| {
+                let action = title_bar(ui, "gallery", false, None, &icons);
+                apply(ui.ctx(), action, false, |position| {
+                    observed.borrow_mut().push(position);
+                });
+            });
+        harness.ctx.set_zoom_factor(1.25);
+        harness.run();
+
+        let title = harness.get_by_label("Window title bar").rect().center();
+        let expected = winit::dpi::PhysicalPosition::new(
+            f64::from(title.x) * 1.5 * 1.25,
+            f64::from(title.y) * 1.5 * 1.25,
+        );
+        secondary_button(&mut harness, title, true);
+        assert_eq!(*positions.borrow(), vec![expected]);
+        harness.step();
+        secondary_button(&mut harness, title, false);
+        assert_eq!(*positions.borrow(), vec![expected]);
+
+        secondary_button(&mut harness, title, true);
+        assert_eq!(*positions.borrow(), vec![expected, expected]);
+        secondary_button(&mut harness, title, false);
+
+        for label in ["Minimize window", "Maximize window", "Close window"] {
+            let button = harness.get_by_label(label).rect().center();
+            secondary_button(&mut harness, button, true);
+            secondary_button(&mut harness, button, false);
+        }
+        secondary_button(&mut harness, title + egui::vec2(0.0, 60.0), true);
+        assert_eq!(*positions.borrow(), vec![expected, expected]);
+    }
+
+    #[test]
+    fn discarded_pass_does_not_open_the_window_menu_twice() {
+        let ctx = egui::Context::default();
+        let mut calls = 0;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            apply(
+                ui.ctx(),
+                Some(Action::ShowMenu(egui::pos2(10.0, 14.0))),
+                false,
+                |_| calls += 1,
+            );
+            if ui.ctx().current_pass_index() == 0 {
+                ui.ctx().request_discard("test menu replay");
+            }
+        });
+        assert_eq!(output.platform_output.num_completed_passes, 2);
+        assert_eq!(calls, 1);
+        output.textures_delta.clear();
     }
 
     #[test]

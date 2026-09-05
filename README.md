@@ -32,6 +32,8 @@ The host can override `gallery.toml`'s window title and optionally supply an ico
 blank title displays as `Gallery`; the icon appears natively and beside the custom title bar only when supplied. Custom
 chrome uses grab and pointer cursors, stays stable across compositor focus changes, and outlines overlapping windows.
 Generated instances demonstrate the setting with `assets/window-icon.png`; replace it with the application's icon.
+Right-click the main title bar for the native window menu on Wayland and Windows. This is unavailable on X11 and in the
+performance window; the desktop's window-menu shortcut remains available.
 
 A `--hot` run says where it has got to in the window: a chip in the scenes panel's corner follows the cycle — watching,
 changed, building with its elapsed, reloaded — and a failed build puts a bar over the canvas that opens what cargo said.
@@ -162,6 +164,19 @@ instead of a group with a lone child.
 
 Within a group, scenes sort by `(order, name)`. Pin one with `#[scene("name", order = N)]` (lower first); scenes with no
 `order` fall to the end, alphabetically. Folders stay in title order.
+
+### Keyboard ownership
+
+Focused widgets get Tab, Shift+Tab and Escape before gallery navigation, in normal and hot mode. Use egui's
+`set_focus_lock_filter` to retain focus, then consume handled events through `ui.input_mut(...)`: the filter alone does
+not claim them. Consume Escape before surrendering focus so it cannot also clear the gallery filter.
+
+Unconsumed Tab/Shift+Tab cycle filtered scenes; unconsumed Escape clears the filter. In `TextEdit`, Tab traverses
+widgets or indents code instead. Cmd/Ctrl+F, Cmd/Ctrl+B and Cmd/Ctrl+Shift+L/R remain gallery shortcuts.
+
+[`keyboard.scene.rs`](template/keyboard.scene.rs) demonstrates capture, focus release and text editing, with the last
+key shown in the panel and an Actions log. Run `just demo-wgpu --hot --scene keyboard`, then edit
+`.tmp/demo-wgpu/keyboard.scene.rs`, not the template. Rerunning the recipe regenerates the demo.
 
 ## Rendering scenes to images
 

@@ -5,6 +5,14 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- Right-clicking the main title bar opens the native window menu on Wayland and Windows. X11 and the deferred
+  performance window remain unsupported.
+- Focused scene widgets can consume Tab, Shift+Tab and Escape before gallery navigation, in normal and hot mode.
+  Unclaimed keys retain scene cycling and filter clearing; text fields retain focus traversal and code indentation.
+  Generated demos include a keyboard-ownership scene.
+- The hot watcher no longer locks egui from a background thread. This prevents missed wakeups across scene dylibs from
+  killing the watcher and leaving reload stuck at `Changed`.
+
 ## [0.8.1] - 2026-09-04
 
 - **The repository vendors cleanly.** Its unexpanded demo manifest no longer looks like a Cargo package, and the shared

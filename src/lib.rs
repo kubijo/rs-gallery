@@ -551,6 +551,24 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
         if signaled || native_close {
             return;
         }
+        // Keep the field's identity: Tab can move focus during layout, and reload can remove it.
+        let text_edit_focus = ui
+            .memory(|memory| memory.focused())
+            .filter(|_| ui.ctx().text_edit_focused());
+        if text_edit_focus.is_none()
+            && ui.input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(event, egui::Event::Key {
+                        key: egui::Key::Tab, pressed: true, modifiers, ..
+                    } if modifiers.is_none() || modifiers.shift_only())
+                })
+            })
+        {
+            // egui has queued focus traversal without consuming Tab.
+            // Leave the event for widgets, but do not also move focus
+            // when the gallery owns navigation.
+            ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+        }
         let frame_start = Instant::now();
         let gl_loader = self.gl_loader.clone();
         let gl = self.gl.clone();
@@ -592,7 +610,11 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 )
             })
             .inner;
-        window::apply(ui.ctx(), title_action, maximized);
+        window::apply(ui.ctx(), title_action, maximized, |position| {
+            if let Some(window) = frame.winit_window() {
+                window.show_window_menu(position);
+            }
+        });
         if title_action == Some(window::Action::Close) {
             return;
         }
@@ -616,7 +638,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             self.state.selected = manifest.scenes.first().map(scene_key);
         }
 
-        handle_keyboard(ui.ctx(), &mut self.state, &tree, &manifest.scenes);
+        handle_shortcuts(ui.ctx(), &mut self.state);
 
         // Its own viewport, on its own repaint clock: watching the numbers
         // never drives this loop, and the meter's own draw lands in its budget
@@ -667,7 +689,8 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         close.store(true, Ordering::Relaxed);
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
-                    window::apply(ctx, title_action, maximized);
+                    // eframe exposes no native window handle in deferred viewport callbacks.
+                    window::apply(ctx, title_action, maximized, |_| {});
                     window::resize(ctx);
                     if ctx.input(|i| i.viewport().close_requested()) {
                         close.store(true, Ordering::Relaxed);
@@ -893,6 +916,13 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 }
             });
 
+        handle_navigation(
+            ui.ctx(),
+            &mut self.state,
+            &tree,
+            &manifest.scenes,
+            text_edit_focus,
+        );
         window::resize(ui.ctx());
 
         // Timed here, not read from `frame.info().cpu_usage`: eframe reports
@@ -1068,19 +1098,8 @@ fn filter_id() -> egui::Id {
     egui::Id::new("gallery-filter")
 }
 
-/// Keyboard: Tab / Shift+Tab cycle scenes (filtered order),
-/// Escape clears the filter, Cmd+F focuses it.
-/// Cmd+B, Cmd+Shift+L, and Cmd+Shift+R collapse/expand
-/// the performance footer, the scenes sidebar, and the controls panel.
-fn handle_keyboard(
-    ctx: &egui::Context,
-    state: &mut ShellState,
-    tree: &TreeNode,
-    scenes: &[SceneEntry],
-) {
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-        state.filter.clear();
-    }
+/// Global commands run before layout so panel toggles and filter focus apply immediately.
+fn handle_shortcuts(ctx: &egui::Context, state: &mut ShellState) {
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
         ctx.memory_mut(|m| m.request_focus(filter_id()));
     }
@@ -1094,11 +1113,55 @@ fn handle_keyboard(
     if ctx.input_mut(|i| i.consume_key(cmd_shift, egui::Key::R)) {
         state.show_controls = !state.show_controls;
     }
-    let next = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
-    let prev = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
-    if !(next || prev) {
-        return;
+}
+
+/// Widgets consume handled events first;
+/// only the remaining presses reach gallery navigation.
+fn handle_navigation(
+    ctx: &egui::Context,
+    state: &mut ShellState,
+    tree: &TreeNode,
+    scenes: &[SceneEntry],
+    text_edit_focus: Option<egui::Id>,
+) {
+    let text_edit_owns_tab = text_edit_focus
+        .is_some_and(|id| ctx.viewport(|viewport| viewport.this_pass.used_ids.contains_key(&id)));
+    let mut presses = Vec::new();
+    ctx.input_mut(|input| {
+        input.events.retain(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                return true;
+            };
+            let navigation = match key {
+                egui::Key::Escape => modifiers.matches_logically(egui::Modifiers::NONE),
+                egui::Key::Tab => {
+                    !text_edit_owns_tab && (modifiers.is_none() || modifiers.shift_only())
+                }
+                _ => false,
+            };
+            if navigation {
+                presses.push((*key, modifiers.shift));
+            }
+            !navigation
+        });
+    });
+    for (key, backwards) in presses {
+        if key == egui::Key::Escape {
+            state.filter.clear();
+        } else {
+            cycle_scene(state, tree, scenes, backwards);
+        }
+        ctx.request_repaint();
     }
+}
+
+fn cycle_scene(state: &mut ShellState, tree: &TreeNode, scenes: &[SceneEntry], backwards: bool) {
     let mut order = Vec::new();
     visible_scenes(tree, scenes, &state.filter, false, &mut order);
     let keys: Vec<String> = order.iter().map(|&i| scene_key(&scenes[i])).collect();
@@ -1110,7 +1173,7 @@ fn handle_keyboard(
         .as_deref()
         .and_then(|key| keys.iter().position(|k| k == key));
     let idx = match current {
-        Some(pos) if next => (pos + 1) % keys.len(),
+        Some(pos) if !backwards => (pos + 1) % keys.len(),
         Some(pos) => (pos + keys.len() - 1) % keys.len(),
         None => 0,
     };
@@ -1656,6 +1719,59 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_routes_only_title_right_presses_to_the_window_menu() {
+        for label in [
+            "Window title bar",
+            "Minimize window",
+            "Maximize window",
+            "Close window",
+        ] {
+            let mut harness = egui_kittest::Harness::builder().build_eframe(|_| {
+                Gallery::new(
+                    Fixed(vec![scene("sample", "menu", true)], Vec::new()),
+                    Settings::new(Renderer::Wgpu),
+                    None,
+                    None,
+                )
+            });
+            let position = harness.get_by_label(label).rect().center();
+            let key = egui::Id::new((egui::ViewportId::ROOT, "gallery-window-menu-pass"));
+            assert_eq!(harness.ctx.data(|data| data.get_temp::<u64>(key)), None);
+            let frame = harness.ctx.cumulative_frame_nr();
+            harness.input_mut().events.extend([
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            harness.step();
+            let expected = (label == "Window title bar").then_some(frame);
+            assert_eq!(harness.ctx.data(|data| data.get_temp::<u64>(key)), expected);
+            assert!(
+                harness.output().viewport_output[&egui::ViewportId::ROOT]
+                    .commands
+                    .is_empty()
+            );
+            harness.input_mut().events.push(egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.step();
+            assert_eq!(harness.ctx.data(|data| data.get_temp::<u64>(key)), expected);
+            assert!(
+                harness.output().viewport_output[&egui::ViewportId::ROOT]
+                    .commands
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn close_requests_skip_the_last_scene_render() {
         thread_local! {
             static RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -2125,19 +2241,9 @@ mod tests {
     }
 }
 
-/// The scenes a scaffold ships, type-checked against the crate they are written for.
-///
-/// They live outside the workspace, their manifest being written for `cargo generate`
-/// rather than cargo, so `just validate` built this crate and never the files it hands out.
-/// A breaking change to the scene-facing API broke them with every gate still green:
-/// `pad2d` returning a named type shipped a scaffold that would not compile.
-///
-/// Only what a scaffold ships, though — `scripts/offscreen.scene.rs` needs femtovg
-/// and is still reachable only through `just demo`.
-///
-/// `#[scene]` submits to `inventory`, so these twenty land in the test binary's registry.
-/// Nothing reads it here — the fixtures in [`test_support`] are built by hand — but a test
-/// reaching for [`Linked`] would see the template's scenes rather than its own.
+/// Scaffold scenes, compiled into tests so shipped examples stay compatible with the API.
+/// Their `#[scene]` registrations are visible through [`Linked`]. The femtovg example in
+/// `scripts/offscreen.scene.rs` has extra dependencies and is checked separately.
 ///
 /// The directory comes off the module rather than each file: inside a child's `#[path]`,
 /// a `..` resolves against `src/scaffold_scenes/`, which is not a directory that exists.
@@ -2150,6 +2256,8 @@ mod scaffold_scenes {
     mod badge;
     #[path = "example.scene.rs"]
     mod example;
+    #[path = "keyboard.scene.rs"]
+    mod keyboard;
     #[path = "knobs.scene.rs"]
     mod knobs;
     #[path = "matrix.scene.rs"]
@@ -2162,3 +2270,6 @@ mod scaffold_scenes {
     #[path = "wgpu.scene.rs"]
     pub(crate) mod wgpu;
 }
+
+#[cfg(test)]
+mod keyboard_tests;

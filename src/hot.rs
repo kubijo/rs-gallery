@@ -212,16 +212,14 @@ fn codesign(_copy: &Utf8Path) {}
 
 impl SceneSource for HotDylib {
     fn before_frame(&mut self, ctx: &egui::Context) {
-        // Polling unconditionally kept the shell repainting 5×/s forever, so it never came to rest
-        // and a frame-cost reading had nothing at rest to measure.
+        // Only hot runs poll; ordinary runs can remain idle.
         let Some(hot) = self.hot.clone() else { return };
-        // The watcher's thread has no other way to reach the window.
-        hot.wake_with(ctx);
         // Swap in a rebuilt dylib, then keep polling so edits show without user input.
         if self.swap_if_rebuilt() {
             hot.swapped();
         }
         hot.settle();
+        // Wake from the UI thread: the watcher must never contend on egui locks with a dylib.
         ctx.request_repaint_after(if hot.is_moving() { LIVE } else { POLL });
     }
 

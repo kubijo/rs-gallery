@@ -157,8 +157,10 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             false
         }
         Knob::Text { label, value } => {
-            ui.label(label.as_str());
-            ui.text_edit_singleline(value).changed()
+            let label = ui.label(label.as_str());
+            ui.text_edit_singleline(value)
+                .labelled_by(label.id)
+                .changed()
         }
         Knob::Slider {
             label,

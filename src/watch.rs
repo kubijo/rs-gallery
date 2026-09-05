@@ -64,22 +64,14 @@ pub(crate) enum MessageLevel {
     Note,
 }
 
-/// The rebuild cycle as the shell reads it: one handle, cloned to each side that reports into it.
+/// The rebuild cycle, published by the watcher and polled by the UI.
 #[derive(Clone)]
-pub(crate) struct HotStatus(Arc<Mutex<HotState>>);
-
-/// What the handle shares: the phase, and the window to wake when it moves.
-struct HotState {
-    phase: HotPhase,
-    /// Taken from the first frame, so the watcher's thread can wake a window at rest.
-    ctx: Option<egui::Context>,
-}
+pub(crate) struct HotStatus(Arc<Mutex<HotPhase>>);
 
 /// How long a finished cycle stays on the chip.
 const LINGER: Duration = Duration::from_secs(4);
 
-/// How long to wait for a swap. Only a build that compiled something gets here, and it can still
-/// come to the same bytes — which the reloader hashes, recognises, and does not reload.
+/// How long to wait for a swap when Cargo finishes without rewriting the scenes dylib.
 const SWAP_WAIT: Duration = Duration::from_millis(1_500);
 
 /// The quiet before a build: an editor writes a file in several steps, and a save-all touches many.
@@ -93,43 +85,29 @@ const TAIL_LINES: usize = 20;
 
 impl HotStatus {
     pub(crate) fn new() -> Self {
-        Self(Arc::new(Mutex::new(HotState {
-            phase: HotPhase::Watching,
-            ctx: None,
-        })))
+        Self(Arc::new(Mutex::new(HotPhase::Watching)))
     }
 
     /// The phase to draw.
     pub(crate) fn phase(&self) -> HotPhase {
-        self.0.lock().expect("the hot phase").phase.clone()
+        self.0.lock().expect("the hot phase").clone()
     }
 
-    /// Move to `phase` and wake the window, which is how a build starting shows up.
+    /// Publish without touching egui: a background wait on its parking_lot locks can miss
+    /// an unlock from the separately linked scene dylib. HotDylib polls this on the UI thread.
     fn set(&self, phase: HotPhase) {
-        let mut state = self.0.lock().expect("the hot phase");
-        state.phase = phase;
-        if let Some(ctx) = &state.ctx {
-            ctx.request_repaint();
-        }
-    }
-
-    /// Hand over the window to wake. Called every frame; the first lands.
-    pub(crate) fn wake_with(&self, ctx: &egui::Context) {
-        let mut state = self.0.lock().expect("the hot phase");
-        if state.ctx.is_none() {
-            state.ctx = Some(ctx.clone());
-        }
+        *self.0.lock().expect("the hot phase") = phase;
     }
 
     /// The dylib was swapped in — the scenes on screen are the ones just built.
     pub(crate) fn swapped(&self) {
         let mut state = self.0.lock().expect("the hot phase");
-        let took = match state.phase {
+        let took = match *state {
             HotPhase::Swapping { since } => since.elapsed(),
             // A bare `cargo build` elsewhere rebuilt it; it reloaded all the same.
             _ => Duration::ZERO,
         };
-        state.phase = HotPhase::Reloaded {
+        *state = HotPhase::Reloaded {
             at: Instant::now(),
             took,
         };
@@ -138,13 +116,13 @@ impl HotStatus {
     /// Let a finished cycle lapse back to watching, and give up on a swap that is not coming.
     pub(crate) fn settle(&self) {
         let mut state = self.0.lock().expect("the hot phase");
-        let lapsed = match state.phase {
+        let lapsed = match *state {
             HotPhase::Reloaded { at, .. } => at.elapsed() >= LINGER,
             HotPhase::Swapping { since } => since.elapsed() >= SWAP_WAIT,
             _ => false,
         };
         if lapsed {
-            state.phase = HotPhase::Watching;
+            *state = HotPhase::Watching;
         }
     }
 
@@ -1525,6 +1503,67 @@ mod tests {
             "cargo found everything fresh, so the dylib is the one already mapped — a rebuild \
              nobody asked for is a rebuild nobody should be shown"
         );
+    }
+
+    #[test]
+    fn the_hot_shell_polls_updates_without_the_watcher_locking_egui() {
+        use egui_kittest::kittest::Queryable as _;
+
+        // The real HotDylib/Gallery path, waiting on a library that has not been built yet.
+        let source = crate::HotDylib::new("gallery-test-missing-scenes", true).unwrap();
+        let hot = source.hot.clone().unwrap();
+        let mut gallery = crate::Gallery::new(
+            source,
+            crate::Settings::new(crate::Renderer::Wgpu),
+            None,
+            None,
+        );
+        gallery.hot = Some(hot.clone());
+        let mut harness = egui_kittest::Harness::builder()
+            .with_step_dt(0.01)
+            .build_eframe(|cc| {
+                crate::install_context(cc, |_| {});
+                gallery
+            });
+        harness.run();
+
+        for (phase, label) in [
+            (HotPhase::Changed, "Changed"),
+            (
+                HotPhase::Building {
+                    since: Instant::now(),
+                },
+                "Building",
+            ),
+            (
+                HotPhase::Swapping {
+                    since: Instant::now(),
+                },
+                "Swapping",
+            ),
+        ] {
+            let worker = harness.ctx.input_mut(|_| {
+                let hot = hot.clone();
+                let (send, receive) = mpsc::channel();
+                let worker = thread::spawn(move || {
+                    hot.set(phase);
+                    send.send(()).unwrap();
+                });
+                assert!(
+                    receive.recv_timeout(Duration::from_secs(2)).is_ok(),
+                    "the watcher must publish while the UI holds egui's lock",
+                );
+                worker
+            });
+            worker.join().unwrap();
+            harness.run();
+            assert!(
+                harness.query_by_label_contains(label).is_some(),
+                "the shell should display {label}",
+            );
+            let output = &harness.output().viewport_output[&egui::ViewportId::ROOT];
+            assert!(output.repaint_delay <= Duration::from_millis(200));
+        }
     }
 
     #[test]
