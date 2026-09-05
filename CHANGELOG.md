@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-05
+
 - Right-clicking the main title bar opens the native window menu on Wayland and Windows. X11 and the deferred
   performance window remain unsupported.
 - Focused scene widgets can consume Tab, Shift+Tab and Escape before gallery navigation, in normal and hot mode.
