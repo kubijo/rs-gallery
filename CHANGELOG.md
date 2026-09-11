@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-11
+
 - **Catalog-wide typed controls.** Consumer-owned `CatalogGlobals` cross the host/dylib boundary as postcard-validated
   bytes. Scenes receive them through a typed third argument and preview hook. Gallery reuses its knob, reload, and
   capture plumbing—including root and per-shot overrides—and its size-cached SVG masks for title-bar `Icon` choices.
