@@ -5,6 +5,9 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Dependencies are current.** The egui family moves to 0.36.2, `ureq` to 3.4.1, and the Nix inputs and compatible
+  transitive Rust packages receive their latest updates.
+
 ## [0.10.0] - 2026-09-11
 
 - **Catalog-wide typed controls.** Consumer-owned `CatalogGlobals` cross the host/dylib boundary as postcard-validated
