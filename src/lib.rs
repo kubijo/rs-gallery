@@ -52,6 +52,7 @@ mod actions;
 mod context;
 mod diagnostic;
 mod fonts;
+mod globals;
 // glutin builds its EGL backend everywhere but Apple, where the platform GL API is CGL. A headless
 // capture there would need a different context entirely; until one exists, `Renderer::Glow` captures
 // report that rather than failing to compile.
@@ -78,15 +79,20 @@ mod window;
 pub use actions::action;
 use actions::{Log, collecting, render_actions};
 pub use context::{PADDING, SceneCtx, SceneRevision, Stage, StageSpec};
+use globals::GlobalState;
+pub use globals::{CatalogGlobals, GlobalControls, GlobalEntry};
 pub use hot::HotDylib;
 pub use knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
-use knobs::{KnobStore, render_knobs};
+use knobs::{
+    KnobStore, has_panel_globals, render_global_toolbar, render_knobs, render_panel_globals,
+};
 pub use launcher::launch;
 use offscreen::{GlDeps, RenderTarget, TargetStore};
 pub use offscreen::{ImageInput, Offscreen, Pointer, StageTexture};
 pub use pass::ScenePass;
 use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
+pub use svg::Icon;
 use svg::Icons;
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
 use watch::{HotStatus, SceneWatcher, render_build_bar, render_hot_chip};
@@ -98,9 +104,9 @@ pub mod prelude {
     pub use egui::Ui;
 
     pub use crate::{
-        ImageInput, MSAA_SAMPLES, Offscreen, PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx,
-        SceneEntry, ScenePass, SceneRevision, Stage, StageSpec, StageTexture, action, egui, scene,
-        scene_meta, stage,
+        CatalogGlobals, GlobalControls, Icon, ImageInput, MSAA_SAMPLES, Offscreen, PADDING, Pad2D,
+        Pad2DSpec, Pointer, SceneCtx, SceneEntry, ScenePass, SceneRevision, Stage, StageSpec,
+        StageTexture, action, egui, scene, scene_meta, stage,
     };
 }
 
@@ -201,6 +207,11 @@ pub trait SceneSource {
     fn scene_revision(&self) -> SceneRevision {
         SceneRevision::INITIAL
     }
+
+    #[doc(hidden)]
+    fn globals(&mut self) -> Option<GlobalEntry> {
+        None
+    }
 }
 
 /// Scenes compiled into this binary, read from the `inventory`
@@ -214,6 +225,16 @@ impl SceneSource for Linked {
             scenes: inventory::iter::<SceneEntry>().copied().collect(),
             groups: inventory::iter::<SceneGroupMeta>().copied().collect(),
         }
+    }
+
+    fn globals(&mut self) -> Option<GlobalEntry> {
+        let mut entries = inventory::iter::<GlobalEntry>.into_iter();
+        let entry = entries.next().copied();
+        assert!(
+            entries.next().is_none(),
+            "a linked catalog may register only one CatalogGlobals type"
+        );
+        entry
     }
 }
 
@@ -505,6 +526,8 @@ pub struct Gallery<S: SceneSource> {
     /// gallery's own glow context, `Some` under [`Renderer::Glow`]
     /// — used for [`SceneCtx::offscreen`]'s FBO bookkeeping (internal; never in the scene API).
     gl: Option<Arc<eframe::glow::Context>>,
+    globals: Option<GlobalState>,
+    globals_error: Option<String>,
 }
 
 impl<S: SceneSource> Gallery<S> {
@@ -537,6 +560,43 @@ impl<S: SceneSource> Gallery<S> {
             shutdown: None,
             gl_loader,
             gl,
+            globals: None,
+            globals_error: None,
+        }
+    }
+
+    fn reconcile_globals(&mut self, entry: Option<GlobalEntry>, revision: SceneRevision) {
+        if self.globals.as_ref().map(GlobalState::revision) == Some(revision) && entry.is_some() {
+            return;
+        }
+        let result = match entry {
+            Some(entry) => match &mut self.globals {
+                Some(globals) => {
+                    let reloaded = globals.reload(entry, revision);
+                    if reloaded.is_err() {
+                        self.globals = None;
+                    }
+                    reloaded
+                }
+                None => GlobalState::new(entry, revision).map(|globals| {
+                    self.globals = Some(globals);
+                }),
+            },
+            None => {
+                self.globals = None;
+                Ok(())
+            }
+        };
+        self.globals_error = result.err();
+    }
+
+    fn sync_globals(&mut self) {
+        let Some(globals) = &mut self.globals else {
+            return;
+        };
+        match globals.sync() {
+            Ok(()) => self.globals_error = None,
+            Err(error) => self.globals_error = Some(error),
         }
     }
 }
@@ -574,6 +634,8 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
         let gl = self.gl.clone();
         self.source.before_frame(ui.ctx());
         let revision = self.source.scene_revision();
+        let globals = self.source.globals();
+        self.reconcile_globals(globals, revision);
         // egui declares `Style::debug` under `#[cfg(debug_assertions)]`,
         // so the overlay this drives does not exist in a release build
         // — mirror its gate rather than fail to compile there.
@@ -601,12 +663,17 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             .exact_size(window::TITLE_BAR_H)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                window::title_bar(
+                window::title_bar_with(
                     ui,
                     &window_title,
                     maximized,
                     self.window_icon_texture.as_ref(),
                     &self.icons,
+                    |ui| {
+                        if let Some(globals) = &mut self.globals {
+                            render_global_toolbar(ui, globals.knobs_mut());
+                        }
+                    },
                 )
             })
             .inner;
@@ -802,15 +869,31 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            // Filled when the scene renders (below):
-                            // knobs appear one frame after a scene is opened.
-                            match key.as_deref().and_then(|key| self.state.knobs.get_mut(key)) {
-                                Some(knobs) => {
-                                    render_knobs(ui, knobs);
+                            let has_globals = self
+                                .globals
+                                .as_ref()
+                                .is_some_and(|globals| has_panel_globals(globals.knobs()));
+                            if has_globals {
+                                ui.strong("Global");
+                                ui.add_space(4.0);
+                                if let Some(globals) = &mut self.globals {
+                                    render_panel_globals(ui, globals.knobs_mut());
                                 }
-                                None => {
-                                    ui.weak("This scene has no controls.");
-                                }
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.strong("Scene");
+                                ui.add_space(4.0);
+                            }
+                            // A new scene declares its knobs during the preview below.
+                            if let Some(knobs) =
+                                key.as_deref().and_then(|key| self.state.knobs.get_mut(key))
+                            {
+                                render_knobs(ui, knobs);
+                            } else if has_globals {
+                                ui.weak("This scene has no scene-specific controls.");
+                            } else {
+                                ui.weak("This scene has no controls.");
                             }
                         });
                     });
@@ -824,6 +907,9 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 &mut self.state.show_controls,
             );
         }
+
+        // Apply control changes before rendering the preview.
+        self.sync_globals();
 
         // Before the central panel, which takes whatever is left over.
         if self.state.show_actions {
@@ -889,6 +975,11 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                     if let Some(scene) = scene {
                         render_source_view(ui, scene.source);
                     }
+                } else if let Some(error) = &self.globals_error {
+                    ui.colored_label(
+                        egui::Color32::LIGHT_RED,
+                        format!("Catalog globals: {error}"),
+                    );
                 } else if let (Some(scene), Some(key)) = (scene, &key) {
                     let store = self.state.knobs.entry(key.clone()).or_default();
                     let targets = self.state.targets.entry(key.clone()).or_default();
@@ -909,8 +1000,9 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         }),
                         _ => None,
                     };
+                    let globals = self.globals.as_ref().map(GlobalState::parts);
                     let reported = collecting(|| {
-                        _ = render_canvas_at(ui, scene, store, gl_deps, wgpu, revision);
+                        _ = render_canvas_at(ui, scene, store, gl_deps, wgpu, revision, globals);
                     });
                     self.state.actions.extend(key, reported);
                 }
@@ -977,6 +1069,7 @@ impl<S: SceneSource> Drop for Gallery<S> {
 /// Scoped by the scene: two of one shape would otherwise derive one id and share the scroll
 /// offset, folded stages and widget memory egui keeps under it — the scroll area included,
 /// so each scene keeps its own place in the canvas.
+#[cfg(test)]
 pub(crate) fn render_canvas(
     ui: &mut egui::Ui,
     scene: &SceneEntry,
@@ -984,25 +1077,57 @@ pub(crate) fn render_canvas(
     gl_deps: Option<GlDeps<'_>>,
     wgpu: Option<WgpuDeps<'_>>,
 ) -> egui::Vec2 {
-    render_canvas_at(ui, scene, store, gl_deps, wgpu, SceneRevision::INITIAL)
+    render_canvas_at(
+        ui,
+        scene,
+        store,
+        gl_deps,
+        wgpu,
+        SceneRevision::INITIAL,
+        None,
+    )
 }
 
-fn render_canvas_at(
+pub(crate) fn render_canvas_at(
     ui: &mut egui::Ui,
     scene: &SceneEntry,
     store: &mut Vec<Knob>,
     gl_deps: Option<GlDeps<'_>>,
     wgpu: Option<WgpuDeps<'_>>,
     revision: SceneRevision,
+    globals: Option<(GlobalEntry, &[u8])>,
 ) -> egui::Vec2 {
     ui.push_id(scene_key(scene), |ui| {
+        let _preview_style = globals
+            .is_some()
+            .then(|| PreviewContextStyleGuard::new(ui.ctx()));
+        let inherited_style = ui.style().clone();
+        if let Some((entry, bytes)) = globals {
+            entry
+                .prepare(bytes, ui)
+                .expect("gallery validated catalog globals before rendering");
+            if !Arc::ptr_eq(&inherited_style, ui.style()) {
+                ui.painter().rect_filled(
+                    ui.available_rect_before_wrap(),
+                    0.0,
+                    ui.visuals().panel_fill,
+                );
+            }
+        }
+
         egui::ScrollArea::both()
             .auto_shrink(false)
             .show(ui, |ui| {
                 let declared = egui::Frame::new()
                     .inner_margin(egui::Margin::same(16))
                     .show(ui, |ui| {
-                        let mut ctx = SceneCtx::with_revision(store, gl_deps, wgpu, revision);
+                        let mut ctx = SceneCtx::with_globals(
+                            store,
+                            gl_deps,
+                            wgpu,
+                            revision,
+                            globals.map(|(_, bytes)| bytes),
+                        );
                         (scene.render)(&mut ctx, ui);
                         ctx.declared()
                     })
@@ -1013,6 +1138,34 @@ fn render_canvas_at(
             .content_size
     })
     .inner
+}
+
+struct PreviewContextStyleGuard {
+    context: egui::Context,
+    preference: egui::ThemePreference,
+    dark: Arc<egui::Style>,
+    light: Arc<egui::Style>,
+}
+
+impl PreviewContextStyleGuard {
+    fn new(context: &egui::Context) -> Self {
+        Self {
+            context: context.clone(),
+            preference: context.options(|options| options.theme_preference),
+            dark: context.style_of(egui::Theme::Dark),
+            light: context.style_of(egui::Theme::Light),
+        }
+    }
+}
+
+impl Drop for PreviewContextStyleGuard {
+    fn drop(&mut self) {
+        self.context
+            .set_style_of(egui::Theme::Dark, self.dark.clone());
+        self.context
+            .set_style_of(egui::Theme::Light, self.light.clone());
+        self.context.set_theme(self.preference);
+    }
 }
 
 /// Gold folders, blue scene markers.
@@ -1505,9 +1658,22 @@ pub(crate) fn run_with<S: SceneSource + 'static>(
     )
 }
 
-/// The scenes dylib's entire `lib.rs`: `gallery::scenes_dylib!();`.
-/// Pulls in the discovered `*.scene.rs` (from the `build.rs` discovery)
-/// and exports the manifest the loader reads.
+/// Register one catalog-global type for [`Linked`]. Invoke at crate root.
+#[macro_export]
+macro_rules! catalog_globals {
+    ($globals:ty) => {
+        #[doc(hidden)]
+        type __GalleryGlobals = $globals;
+
+        $crate::inventory::submit! {
+            $crate::GlobalEntry::of::<$globals>()
+        }
+    };
+}
+
+/// Generate a scenes dylib from the discovered `*.scene.rs` files.
+///
+/// Use `gallery::scenes_dylib!();`, or pass a catalog-global type.
 #[macro_export]
 macro_rules! scenes_dylib {
     () => {
@@ -1523,6 +1689,32 @@ macro_rules! scenes_dylib {
                     .copied()
                     .collect(),
             }
+        }
+
+        #[unsafe(no_mangle)]
+        pub fn __gallery_globals() -> ::core::option::Option<$crate::GlobalEntry> {
+            ::core::option::Option::None
+        }
+    };
+    ($globals:ty) => {
+        $crate::catalog_globals!($globals);
+        include!(concat!(env!("OUT_DIR"), "/gallery_scenes.rs"));
+
+        #[unsafe(no_mangle)]
+        pub fn __gallery_manifest() -> $crate::Manifest {
+            $crate::Manifest {
+                scenes: $crate::inventory::iter::<$crate::SceneEntry>()
+                    .copied()
+                    .collect(),
+                groups: $crate::inventory::iter::<$crate::SceneGroupMeta>()
+                    .copied()
+                    .collect(),
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub fn __gallery_globals() -> ::core::option::Option<$crate::GlobalEntry> {
+            ::core::option::Option::Some($crate::GlobalEntry::of::<$globals>())
         }
     };
 }
@@ -1716,6 +1908,78 @@ mod tests {
                 groups: self.1.clone(),
             }
         }
+    }
+
+    #[derive(Default, serde::Deserialize, serde::Serialize)]
+    struct ToolbarGlobals {
+        dark: bool,
+    }
+
+    impl CatalogGlobals for ToolbarGlobals {
+        fn controls(&mut self, controls: &mut GlobalControls<'_>) {
+            static ICON: std::sync::LazyLock<Icon> = std::sync::LazyLock::new(|| {
+                Icon::from_svg(include_bytes!("../template/assets/theme-light.svg"))
+            });
+            self.dark = controls.icon_buttons(
+                "Theme",
+                &[("Light", &ICON, false), ("Dark", &ICON, true)],
+                self.dark,
+            );
+        }
+    }
+
+    struct FixedWithGlobals(Fixed);
+
+    impl SceneSource for FixedWithGlobals {
+        fn manifest(&mut self) -> Manifest {
+            self.0.manifest()
+        }
+
+        fn globals(&mut self) -> Option<GlobalEntry> {
+            Some(GlobalEntry::of::<ToolbarGlobals>())
+        }
+    }
+
+    #[test]
+    fn the_shell_puts_icon_globals_in_the_window_bar_instead_of_the_knob_panel() {
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_| {
+            Gallery::new(
+                FixedWithGlobals(Fixed(vec![scene("sample", "toolbar", true)], Vec::new())),
+                Settings::new(Renderer::Wgpu),
+                None,
+                None,
+            )
+        });
+        harness.run_steps(2);
+
+        let title = harness.get_by_label("Window title bar").rect();
+        for label in ["Theme: Light", "Theme: Dark"] {
+            let control = harness.get_by_label(label).rect();
+            assert!(
+                control.min.y >= title.min.y && control.max.y <= title.max.y,
+                "{label} should render in the window bar: {control:?}"
+            );
+        }
+        assert!(
+            harness.query_by_label("Global").is_none(),
+            "icon globals should not also be repeated in the controls panel"
+        );
+        assert!(
+            harness.query_by_label("Theme").is_none(),
+            "the global label belongs in the icon tooltips, not the window bar"
+        );
+
+        harness.get_by_label("Theme: Dark").click();
+        harness.step();
+        assert!(matches!(
+            &harness
+                .state()
+                .globals
+                .as_ref()
+                .expect("catalog globals")
+                .knobs()[0],
+            Knob::IconButtons { value: 1, .. }
+        ));
     }
 
     #[test]
@@ -1990,6 +2254,74 @@ mod tests {
         );
     }
 
+    thread_local! {
+        static PREVIEW_DARK_MODE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+
+    #[derive(Default, serde::Deserialize, serde::Serialize)]
+    struct LightPreview;
+
+    impl CatalogGlobals for LightPreview {
+        fn controls(&mut self, _controls: &mut GlobalControls<'_>) {}
+
+        fn prepare(&self, ui: &mut egui::Ui) {
+            ui.set_style(ui.ctx().style_of(egui::Theme::Light));
+
+            // Verify that context-wide mutations are also restored.
+            ui.ctx().set_theme(egui::Theme::Light);
+            ui.ctx().style_mut_of(egui::Theme::Dark, |style| {
+                style.spacing.button_padding.x = 123.0;
+            });
+        }
+    }
+
+    fn observes_preview_theme(_ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        PREVIEW_DARK_MODE.set(Some(ui.visuals().dark_mode));
+    }
+
+    #[test]
+    fn catalog_theme_styles_the_story_without_changing_the_gallery_context() {
+        PREVIEW_DARK_MODE.set(None);
+        let context = egui::Context::default();
+        context.set_theme(egui::Theme::Dark);
+        let original_dark = context.style_of(egui::Theme::Dark);
+        let globals = GlobalState::new(GlobalEntry::of::<LightPreview>(), SceneRevision::INITIAL)
+            .expect("serializable globals");
+        let shown = SceneEntry {
+            render: observes_preview_theme,
+            ..scene("themed", "preview", true)
+        };
+        let mut knobs = Vec::new();
+
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            render_canvas_at(
+                ui,
+                &shown,
+                &mut knobs,
+                None,
+                None,
+                SceneRevision::INITIAL,
+                Some(globals.parts()),
+            );
+        });
+
+        assert_eq!(
+            PREVIEW_DARK_MODE.get(),
+            Some(false),
+            "the selected light style reaches the story Ui"
+        );
+        assert_eq!(
+            context.options(|options| options.theme_preference),
+            egui::ThemePreference::Dark,
+            "preview setup must not change the shell theme"
+        );
+        assert!(
+            Arc::ptr_eq(&context.style_of(egui::Theme::Dark), &original_dark),
+            "preview setup must not replace a shell style"
+        );
+        output.textures_delta.clear();
+    }
+
     #[test]
     fn what_a_scene_reports_reaches_the_actions_panel() {
         // Once, as an event would — a scene reporting every frame is the misuse the docs warn of.
@@ -2256,6 +2588,8 @@ mod scaffold_scenes {
     mod badge;
     #[path = "example.scene.rs"]
     mod example;
+    #[path = "globals.scene.rs"]
+    pub(crate) mod globals;
     #[path = "keyboard.scene.rs"]
     mod keyboard;
     #[path = "knobs.scene.rs"]
@@ -2270,6 +2604,11 @@ mod scaffold_scenes {
     #[path = "wgpu.scene.rs"]
     pub(crate) mod wgpu;
 }
+
+// Stand in for the alias emitted by `scenes_dylib!` in generated catalogs.
+#[cfg(test)]
+#[doc(hidden)]
+type __GalleryGlobals = scaffold_scenes::globals::Globals;
 
 #[cfg(test)]
 mod keyboard_tests;

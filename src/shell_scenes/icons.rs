@@ -1,12 +1,9 @@
-//! The bundled SVGs, tessellated rather than rasterised, so they hold their edges at any size.
-
 use gallery::prelude::*;
 
 use crate::svg::Icons;
 
 scene_meta! { title: "Shell / Icons" }
 
-// Loaded once, as the shell loads them: parsing and tessellating is no per-frame work.
 thread_local! {
     static ICONS: Icons = Icons::load();
 }

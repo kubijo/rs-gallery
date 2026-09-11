@@ -1,13 +1,10 @@
-//! The `#[scene]` attribute for gallery. Registers a `fn(&mut egui::Ui)` as a scene via `inventory`,
-//! keyed by its `module_path!()`. The name defaults to the title-cased function name; `default` marks
-//! it as its group's default (collapsing a single-scene group in the sidebar); `order = N` sorts it
-//! within the group.
+//! The `#[scene]` inventory registration attribute.
 
 use heck::ToTitleCase;
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
-    Ident, ItemFn, LitStr, Token,
+    FnArg, Ident, ItemFn, LitStr, ReturnType, Token, Type,
     parse::{Parse, ParseStream},
     parse_macro_input,
 };
@@ -89,11 +86,91 @@ pub fn scene(attr: TokenStream, item: TokenStream) -> TokenStream {
         let file: syn::File = syn::parse_quote! { #func };
         prettyplease::unparse(&file)
     };
+    if func.sig.asyncness.is_some() {
+        return syn::Error::new_spanned(&func.sig, "a scene cannot be async")
+            .to_compile_error()
+            .into();
+    }
+    let returns_unit = match &func.sig.output {
+        ReturnType::Default => true,
+        ReturnType::Type(_, output) => {
+            matches!(output.as_ref(), Type::Tuple(tuple) if tuple.elems.is_empty())
+        }
+    };
+    if !returns_unit {
+        return syn::Error::new_spanned(&func.sig.output, "a scene must return `()`")
+            .to_compile_error()
+            .into();
+    }
+    let render = match func.sig.inputs.len() {
+        2 => quote! { #ident },
+        3 => {
+            let Some(FnArg::Typed(globals)) = func.sig.inputs.iter().nth(2) else {
+                return syn::Error::new_spanned(
+                    &func.sig.inputs,
+                    "a scene's third argument must be `globals: &Globals`",
+                )
+                .to_compile_error()
+                .into();
+            };
+            let Type::Reference(reference) = globals.ty.as_ref() else {
+                return syn::Error::new_spanned(
+                    &globals.ty,
+                    "a scene's third argument must be an immutable reference",
+                )
+                .to_compile_error()
+                .into();
+            };
+            if reference.mutability.is_some() {
+                return syn::Error::new_spanned(
+                    &globals.ty,
+                    "catalog globals are read-only while a scene renders",
+                )
+                .to_compile_error()
+                .into();
+            }
+            let adapter = format_ident!("__gallery_render_{ident}");
+            quote! {
+                #adapter
+            }
+        }
+        _ => {
+            return syn::Error::new_spanned(
+                &func.sig.inputs,
+                "a scene takes `(ctx, ui)` or `(ctx, ui, globals: &Globals)`",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+    let adapter = if func.sig.inputs.len() == 3 {
+        let FnArg::Typed(globals) = func.sig.inputs.iter().nth(2).expect("third argument") else {
+            unreachable!("validated above")
+        };
+        let Type::Reference(reference) = globals.ty.as_ref() else {
+            unreachable!("validated above")
+        };
+        let ty = reference.elem.as_ref();
+        let adapter = format_ident!("__gallery_render_{ident}");
+        quote! {
+            #[doc(hidden)]
+            fn #adapter(
+                ctx: &mut ::gallery::SceneCtx<'_>,
+                ui: &mut ::gallery::egui::Ui,
+            ) {
+                let globals: crate::__GalleryGlobals = ctx.__gallery_globals::<#ty>();
+                #ident(ctx, ui, &globals);
+            }
+        }
+    } else {
+        quote! {}
+    };
     quote! {
         #func
+        #adapter
         ::gallery::inventory::submit! {
             ::gallery::SceneEntry {
-                render: #ident,
+                render: #render,
                 name: #name,
                 module_path: ::core::module_path!(),
                 default: #default,

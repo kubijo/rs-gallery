@@ -37,14 +37,98 @@ pub(crate) fn title_bar(
     title_icon: Option<&egui::TextureHandle>,
     icons: &Icons,
 ) -> Option<Action> {
+    title_bar_inner(
+        ui,
+        title,
+        maximized,
+        title_icon,
+        icons,
+        None::<fn(&mut egui::Ui)>,
+    )
+}
+
+pub(crate) fn title_bar_with(
+    ui: &mut egui::Ui,
+    title: &str,
+    maximized: bool,
+    title_icon: Option<&egui::TextureHandle>,
+    icons: &Icons,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> Option<Action> {
+    title_bar_inner(ui, title, maximized, title_icon, icons, Some(add_contents))
+}
+
+fn title_bar_inner(
+    ui: &mut egui::Ui,
+    title: &str,
+    maximized: bool,
+    title_icon: Option<&egui::TextureHandle>,
+    icons: &Icons,
+    add_contents: Option<impl FnOnce(&mut egui::Ui)>,
+) -> Option<Action> {
     let rect = egui::Rect::from_min_size(
         ui.max_rect().min,
         egui::vec2(ui.max_rect().width(), TITLE_BAR_H),
     );
     ui.advance_cursor_after_rect(rect);
 
+    // Compositors may withdraw native focus while moving decorationless windows.
+    outer_border(ui.ctx());
+    ui.painter().rect_filled(rect, 0.0, PANEL_BG);
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom(),
+        egui::Stroke::new(1.0, HAIRLINE),
+    );
+
     let controls = controls_rect(rect);
-    let drag_rect = egui::Rect::from_min_max(rect.min, egui::pos2(controls.left(), rect.bottom()));
+    let mut title_left = rect.left() + 8.0;
+    if let Some(icon) = title_icon {
+        let icon_rect = egui::Rect::from_min_size(
+            egui::pos2(title_left, rect.center().y - TITLE_ICON_SIZE / 2.0),
+            egui::Vec2::splat(TITLE_ICON_SIZE),
+        );
+        ui.painter().image(
+            icon.id(),
+            icon_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        title_left = icon_rect.right() + TITLE_ICON_GAP;
+    }
+
+    let title_font = egui::FontId::proportional(11.0);
+    let title_width = ui
+        .painter()
+        .layout_no_wrap(title.to_owned(), title_font.clone(), egui::Color32::WHITE)
+        .size()
+        .x;
+    let toolbar_left = (title_left + title_width + 12.0).min(controls.left() - 4.0);
+    let toolbar_rect = egui::Rect::from_min_max(
+        egui::pos2(toolbar_left, rect.top()),
+        egui::pos2(controls.left() - 4.0, rect.bottom()),
+    );
+    let contents_left = if let Some(add_contents) = add_contents {
+        let mut contents = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("gallery-window-toolbar")
+                .max_rect(toolbar_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        contents.set_clip_rect(toolbar_rect);
+        add_contents(&mut contents);
+        contents
+            .min_rect()
+            .left()
+            .clamp(toolbar_rect.left(), toolbar_rect.right())
+    } else {
+        controls.left()
+    };
+
+    let drag_rect = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2((contents_left - 4.0).max(rect.left()), rect.bottom()),
+    );
     let drag = ui
         .interact(
             drag_rect,
@@ -55,15 +139,6 @@ pub(crate) fn title_bar(
     drag.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Window title bar")
     });
-
-    // Compositors may withdraw native focus while moving decorationless windows.
-    outer_border(ui.ctx());
-    ui.painter().rect_filled(rect, 0.0, PANEL_BG);
-    ui.painter().hline(
-        rect.x_range(),
-        rect.bottom(),
-        egui::Stroke::new(1.0, HAIRLINE),
-    );
 
     let minimize_rect =
         egui::Rect::from_min_size(controls.min, egui::vec2(ACTION_W, rect.height()));
@@ -103,27 +178,13 @@ pub(crate) fn title_bar(
         true,
     );
 
-    let mut title_left = drag_rect.left() + 8.0;
-    if let Some(icon) = title_icon {
-        let icon_rect = egui::Rect::from_min_size(
-            egui::pos2(title_left, drag_rect.center().y - TITLE_ICON_SIZE / 2.0),
-            egui::Vec2::splat(TITLE_ICON_SIZE),
-        );
-        ui.painter().image(
-            icon.id(),
-            icon_rect,
-            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
-        title_left = icon_rect.right() + TITLE_ICON_GAP;
-    }
     ui.painter()
         .with_clip_rect(drag_rect.shrink2(egui::vec2(8.0, 0.0)))
         .text(
             egui::pos2(title_left, drag_rect.center().y),
             egui::Align2::LEFT_CENTER,
             title,
-            egui::FontId::proportional(11.0),
+            title_font,
             egui::Color32::WHITE,
         );
 
@@ -438,6 +499,112 @@ mod tests {
             *actions.borrow(),
             vec![Action::Minimize, Action::ToggleMaximize, Action::Close]
         );
+    }
+
+    #[test]
+    fn catalog_icon_controls_live_in_the_title_bar_without_becoming_drag_targets() {
+        let selected = Rc::new(RefCell::new(0));
+        let observed = selected.clone();
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let observed_actions = actions.clone();
+        let icons = Icons::load();
+        let mut knobs = vec![
+            crate::Knob::IconButtons {
+                label: "Theme".to_owned(),
+                value: 0,
+                options: vec!["Light".to_owned(), "Dark".to_owned()],
+                icons: vec![
+                    crate::Icon::from_svg(include_bytes!("../template/assets/theme-light.svg")),
+                    crate::Icon::from_svg(include_bytes!("../template/assets/theme-dark.svg")),
+                ],
+            },
+            crate::Knob::IconButtons {
+                label: "Language".to_owned(),
+                value: 0,
+                options: vec!["English".to_owned(), "Finnish".to_owned()],
+                icons: vec![
+                    crate::Icon::from_svg(include_bytes!(
+                        "../template/assets/language-english.svg"
+                    )),
+                    crate::Icon::from_svg(include_bytes!(
+                        "../template/assets/language-finnish.svg"
+                    )),
+                ],
+            },
+        ];
+        let pixels_per_point = 2.0;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_pixels_per_point(pixels_per_point)
+            .build_ui(move |ui| {
+                let action = title_bar_with(ui, "gallery", false, None, &icons, |ui| {
+                    crate::knobs::render_global_toolbar(ui, &mut knobs);
+                });
+                let crate::Knob::IconButtons { value, .. } = &knobs[0] else {
+                    unreachable!()
+                };
+                *observed.borrow_mut() = *value;
+                if let Some(action) = action {
+                    observed_actions.borrow_mut().push(action);
+                }
+            });
+
+        let title = harness.get_by_label("Window title bar").rect();
+        let mut previous_x = f32::NEG_INFINITY;
+        let mut controls = Vec::new();
+        for label in [
+            "Theme: Light",
+            "Theme: Dark",
+            "Language: English",
+            "Language: Finnish",
+        ] {
+            let rect = harness.get_by_label(label).rect();
+            assert!(
+                rect.min.y >= title.min.y && rect.max.y <= title.max.y,
+                "{label} should be inside the window decoration: {rect:?}"
+            );
+            assert!(
+                !title.contains(rect.center()),
+                "{label} must not overlap the native drag target"
+            );
+            assert!(
+                rect.center().x > previous_x,
+                "global controls should retain their declared left-to-right order"
+            );
+            previous_x = rect.center().x;
+            controls.push((label, rect));
+        }
+        for pair in [
+            controls[0..2].try_into().unwrap(),
+            controls[2..4].try_into().unwrap(),
+        ] {
+            let [(left_label, left), (right_label, right)] = pair;
+            assert!(
+                (right.left() - left.right()) * pixels_per_point <= 2.0,
+                "{left_label} and {right_label} should have at most a 2px inner gap"
+            );
+        }
+        for hidden in ["Theme", "Light", "Dark", "Language", "English", "Finnish"] {
+            assert!(
+                !harness.output().shapes.iter().any(|shape| {
+                    matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == hidden)
+                }),
+                "{hidden} should be a tooltip, not title-bar text"
+            );
+        }
+
+        harness.get_by_label("Theme: Light").hover();
+        harness.run();
+        assert!(
+            harness.output().shapes.iter().any(
+                |shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Theme: Light")
+            ),
+            "hovering an icon should paint its label as a tooltip"
+        );
+
+        harness.get_by_label("Theme: Dark").click();
+        harness.step();
+        assert_eq!(*selected.borrow(), 1);
+        assert!(actions.borrow().is_empty());
     }
 
     #[test]

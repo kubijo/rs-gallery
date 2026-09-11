@@ -1,3 +1,3 @@
-//! The reloadable scenes dylib: the discovered `*.scene.rs` compiled in and exported.
+//! The reloadable scenes and catalog globals.
 
-gallery::scenes_dylib!();
+gallery::scenes_dylib!(globals::Globals);

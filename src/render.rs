@@ -23,11 +23,13 @@ use eframe::{egui_glow, glow};
 use crate::glow_capture::SharedCapture;
 
 use crate::{
-    ChoiceStyle, GlLoader, Knob, Manifest, PANEL_BG, RenderTarget, Renderer, SceneEntry,
+    ChoiceStyle, GlLoader, GlobalEntry, Knob, Manifest, PANEL_BG, RenderTarget, Renderer,
+    SceneEntry,
     diagnostic::Diagnostic,
+    globals::{GlobalState, control_shape},
     install_context,
     offscreen::GlDeps,
-    render_canvas, sheet,
+    render_canvas_at, sheet,
     sheet::Panel,
     style::{frame, link, paint},
     tree::{resolve_scene, scene_key},
@@ -50,6 +52,8 @@ pub(crate) struct Shot {
     /// Knob key (exact label, else a case-insensitive regex)
     /// to the value it should take.
     pub(crate) knobs: Vec<KnobOverride>,
+    /// Effective catalog-global overrides.
+    pub(crate) globals: Vec<KnobOverride>,
     /// How many frames to draw — and with `settle`, the most to draw.
     pub(crate) frames: Option<u32>,
     /// Crop the PNG to what the canvas drew.
@@ -137,8 +141,19 @@ pub(crate) fn check_frames(frames: Option<u32>) -> Result<(), String> {
 ///
 /// # Errors
 /// The first shot that fails, having already written the ones before it.
+#[cfg(test)]
 pub(crate) fn render(
     manifest: &Manifest,
+    renderer: Renderer,
+    setup: &impl Fn(&egui::Context),
+    capture: &Capture,
+) -> Result<(), Diagnostic> {
+    render_with_globals(manifest, None, renderer, setup, capture)
+}
+
+pub(crate) fn render_with_globals(
+    manifest: &Manifest,
+    globals: Option<GlobalEntry>,
     renderer: Renderer,
     setup: &impl Fn(&egui::Context),
     capture: &Capture,
@@ -163,7 +178,7 @@ pub(crate) fn render(
         _ = std::fs::remove_file(out);
     }
     for shot in &capture.shots {
-        match shoot(manifest, &session, setup, shot) {
+        match shoot_with_globals(manifest, globals, &session, setup, shot) {
             Ok(None) => {}
             Ok(Some(taken)) => {
                 // Held only for a sheet, so a run without one keeps a single capture in memory
@@ -607,6 +622,7 @@ impl Session {
 ///
 /// # Errors
 /// For a key that named no knob by the last frame.
+#[cfg(test)]
 fn draw(
     scene: SceneEntry,
     session: &Session,
@@ -614,7 +630,22 @@ fn draw(
     shot: &Shot,
     size: egui::Vec2,
 ) -> Result<SceneFrame, Diagnostic> {
+    draw_with_globals(scene, None, session, setup, shot, size)
+}
+
+fn draw_with_globals(
+    scene: SceneEntry,
+    globals: Option<GlobalEntry>,
+    session: &Session,
+    setup: &impl Fn(&egui::Context),
+    shot: &Shot,
+    size: egui::Vec2,
+) -> Result<SceneFrame, Diagnostic> {
     let wgpu_session = matches!(session, Session::Wgpu(_));
+    let globals = globals
+        .map(|entry| GlobalState::new(entry, crate::SceneRevision::INITIAL))
+        .transpose()
+        .map_err(Diagnostic::from)?;
     let mut harness = open(size, shot.scale, session, setup, |cc, painter| {
         let wgpu = cc.wgpu_render_state.clone();
         // Loudly, because the quiet alternative is worse: a capture without the render state
@@ -625,6 +656,7 @@ fn draw(
         );
         Canvas {
             scene,
+            globals,
             knobs: Vec::new(),
             gl: cc.gl.clone(),
             loader: cc.get_proc_address.clone(),
@@ -675,6 +707,8 @@ fn settle(
     harness: &mut egui_kittest::Harness<'static, Canvas>,
     shot: &Shot,
 ) -> Result<Frames, Diagnostic> {
+    let mut unmatched_globals: Vec<&KnobOverride> = shot.globals.iter().collect();
+    apply_globals(harness.state_mut(), &shot.globals, &mut unmatched_globals)?;
     harness.run_steps(1);
     let mut unmatched: Vec<&KnobOverride> = shot.knobs.iter().collect();
     let mut quiet = 0;
@@ -682,6 +716,7 @@ fn settle(
     // The floor is defence rather than adjustment: both ways in reject a smaller `frames`,
     // and a ceiling below it would run the loop no times, applying the recipe never.
     for _ in 1..shot.frames.unwrap_or(DEFAULT_FRAMES).max(MIN_FRAMES) {
+        apply_globals(harness.state_mut(), &shot.globals, &mut unmatched_globals)?;
         apply(&mut harness.state_mut().knobs, &shot.knobs, &mut unmatched)?;
         harness.run_steps(1);
         drawn += 1;
@@ -698,7 +733,21 @@ fn settle(
     }
     // The loop ends on a draw, so a scene's own writes would outlive the last apply.
     // One more settles the store on the recipe, which is what `--list-knobs` then reports.
+    apply_globals(harness.state_mut(), &shot.globals, &mut unmatched_globals)?;
     apply(&mut harness.state_mut().knobs, &shot.knobs, &mut unmatched)?;
+    if !unmatched_globals.is_empty() {
+        let declared = harness
+            .state()
+            .globals
+            .as_ref()
+            .map_or(&[][..], GlobalState::knobs);
+        return Err(unknown_controls(
+            &unmatched_globals,
+            declared,
+            "catalog global control",
+            "`--list-knobs` prints the global controls with their kinds and current values",
+        ));
+    }
     if !unmatched.is_empty() {
         return Err(unknown_knobs(&unmatched, &harness.state().knobs));
     }
@@ -711,8 +760,19 @@ fn settle(
 }
 
 /// Draw one shot: resolve its scene, draw it at a size that holds it, then capture.
+#[cfg(test)]
 fn shoot(
     manifest: &Manifest,
+    session: &Session,
+    setup: &impl Fn(&egui::Context),
+    shot: &Shot,
+) -> Result<Option<ShotOutput>, Diagnostic> {
+    shoot_with_globals(manifest, None, session, setup, shot)
+}
+
+fn shoot_with_globals(
+    manifest: &Manifest,
+    globals: Option<GlobalEntry>,
     session: &Session,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
@@ -721,7 +781,7 @@ fn shoot(
     let SceneFrame {
         mut harness,
         mut frames,
-    } = draw(scene, session, setup, shot, shot.size)?;
+    } = draw_with_globals(scene, globals, session, setup, shot, shot.size)?;
 
     // The canvas scrolls, so a scene that outgrew its size would be cropped to it.
     // A shot names the size to lay out at, not how much of the result to keep,
@@ -742,6 +802,18 @@ fn shoot(
     }
 
     if shot.list {
+        if let Some(global) = harness
+            .state()
+            .globals
+            .as_ref()
+            .filter(|global| !global.knobs().is_empty())
+        {
+            println!("Global controls:");
+            for knob in global.knobs() {
+                println!("{}", describe(knob));
+            }
+            println!("Scene knobs:");
+        }
         for knob in &harness.state().knobs {
             println!("{}", describe(knob));
         }
@@ -749,7 +821,17 @@ fn shoot(
     if shot.template {
         print!(
             "{}",
-            capture_template(&scene, &harness.state().knobs, shot.size, shot.scale)
+            capture_template_with_globals(
+                &scene,
+                harness
+                    .state()
+                    .globals
+                    .as_ref()
+                    .map_or(&[][..], GlobalState::knobs),
+                &harness.state().knobs,
+                shot.size,
+                shot.scale,
+            )
         );
     }
     if let Some(out) = &shot.out {
@@ -814,6 +896,7 @@ fn trim(image: image::RgbaImage, drawn: egui::Vec2, scale: f32) -> image::RgbaIm
 /// and mirror what `Gallery` holds in a window.
 struct Canvas {
     scene: SceneEntry,
+    globals: Option<GlobalState>,
     knobs: Vec<Knob>,
     gl: Option<std::sync::Arc<glow::Context>>,
     loader: Option<GlLoader>,
@@ -833,6 +916,7 @@ impl eframe::App for Canvas {
         // Split so the painter and the targets can be borrowed at once.
         let Self {
             scene,
+            globals,
             knobs,
             gl,
             loader,
@@ -861,9 +945,72 @@ impl eframe::App for Canvas {
                     state,
                     targets: passes,
                 });
-                *wanted = render_canvas(ui, scene, knobs, gl_deps, wgpu_deps);
+                let globals = globals.as_ref().map(GlobalState::parts);
+                *wanted = render_canvas_at(
+                    ui,
+                    scene,
+                    knobs,
+                    gl_deps,
+                    wgpu_deps,
+                    crate::SceneRevision::INITIAL,
+                    globals,
+                );
             });
     }
+}
+
+fn apply_globals<'shot>(
+    canvas: &mut Canvas,
+    overrides: &'shot [KnobOverride],
+    unmatched: &mut Vec<&'shot KnobOverride>,
+) -> Result<(), Diagnostic> {
+    let Some(globals) = &mut canvas.globals else {
+        return apply(&mut [], overrides, unmatched);
+    };
+    const MAX_PASSES: usize = 256;
+
+    let mut invalid = None;
+    let mut stable_passes = 0;
+    for _ in 0..MAX_PASSES {
+        let pending = unmatched.len();
+        let shape = control_shape(globals.knobs());
+        invalid = apply_global_pass(globals.knobs_mut(), overrides, unmatched)?;
+        globals.sync().map_err(Diagnostic::from)?;
+        if unmatched.len() == pending && control_shape(globals.knobs()) == shape {
+            stable_passes += 1;
+        } else {
+            stable_passes = 0;
+        }
+        // Declarations may precede controls they depend on, so require two stable passes.
+        if stable_passes >= 2 {
+            return invalid.map_or(Ok(()), Err);
+        }
+    }
+    match invalid {
+        Some(error) => Err(error),
+        None if unmatched.is_empty() => Err(Diagnostic::new(
+            "catalog global controls did not stabilize while applying overrides",
+        )),
+        None => Ok(()),
+    }
+}
+
+fn apply_global_pass<'shot>(
+    knobs: &mut [Knob],
+    overrides: &'shot [KnobOverride],
+    unmatched: &mut Vec<&'shot KnobOverride>,
+) -> Result<Option<Diagnostic>, Diagnostic> {
+    let mut invalid = None;
+    for over in overrides {
+        if let Some(at) = find(knobs, &over.key)? {
+            match set(&mut knobs[at], &over.value) {
+                Ok(()) => unmatched.retain(|left| !std::ptr::eq(*left, over)),
+                Err(error) if invalid.is_none() => invalid = Some(error.into()),
+                Err(_) => {}
+            }
+        }
+    }
+    Ok(invalid)
 }
 
 /// Apply every override whose knob the scene has declared,
@@ -960,7 +1107,9 @@ fn set(knob: &mut Knob, raw: &str) -> Result<(), String> {
             Ok(parsed) => *value = parsed,
             Err(_) => return bad("colour", "a hex colour (#RGB, #RGBA, #RRGGBB or #RRGGBBAA)"),
         },
-        Knob::Select { value, options, .. } => *value = choice(options, raw, &label)?,
+        Knob::Select { value, options, .. } | Knob::IconButtons { value, options, .. } => {
+            *value = choice(options, raw, &label)?;
+        }
         Knob::Pad2D {
             x,
             y,
@@ -1022,6 +1171,7 @@ fn label(knob: &Knob) -> &str {
         | Knob::Toggle { label, .. }
         | Knob::Color { label, .. }
         | Knob::Select { label, .. }
+        | Knob::IconButtons { label, .. }
         | Knob::Pad2D { label, .. }
         | Knob::Group { label } => label,
     }
@@ -1051,6 +1201,16 @@ fn describe(knob: &Knob) -> String {
         } => format!(
             "{:<7} {label:?} = {:?}  ({})",
             accessor(*style),
+            options.get(*value).map_or("", String::as_str),
+            options.join(" | ")
+        ),
+        Knob::IconButtons {
+            label,
+            value,
+            options,
+            ..
+        } => format!(
+            "buttons {label:?} = {:?}  ({})",
             options.get(*value).map_or("", String::as_str),
             options.join(" | ")
         ),
@@ -1089,6 +1249,22 @@ fn unknown_knobs(pending: &[&KnobOverride], declared: &[Knob]) -> Diagnostic {
     Diagnostic::new(format!("this scene declares no knob matching {named}"))
         .candidates(declared.iter().map(|knob| format!("{:?}", label(knob))))
         .hint("`--list-knobs` prints these with their kinds and current values")
+}
+
+fn unknown_controls(
+    pending: &[&KnobOverride],
+    declared: &[Knob],
+    kind: &str,
+    hint: &str,
+) -> Diagnostic {
+    let named = pending
+        .iter()
+        .map(|over| format!("`{}`", over.key))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Diagnostic::new(format!("this catalog declares no {kind} matching {named}"))
+        .candidates(declared.iter().map(|knob| format!("{:?}", label(knob))))
+        .hint(hint)
 }
 
 /// Always PNG, whatever the path is called: the caller picked
@@ -1154,6 +1330,9 @@ struct Recipe {
     settle: Option<bool>,
     /// Write what the run came to as JSON here. Off unless asked for.
     report: Option<Utf8PathBuf>,
+    /// Catalog globals inherited by each shot.
+    #[serde(default)]
+    globals: BTreeMap<String, toml::Value>,
     #[serde(default, rename = "shot")]
     shots: Vec<RecipeShot>,
 }
@@ -1171,6 +1350,9 @@ struct RecipeShot {
     settle: Option<bool>,
     #[serde(default)]
     knobs: BTreeMap<String, toml::Value>,
+    /// Globals overridden for this shot.
+    #[serde(default)]
+    globals: BTreeMap<String, toml::Value>,
 }
 
 /// Read a capture recipe into the shots it describes,
@@ -1237,6 +1419,18 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                         })
                     })
                     .collect::<Result<_, String>>()?,
+                globals: recipe
+                    .globals
+                    .iter()
+                    .filter(|(key, _)| !shot.globals.contains_key(*key))
+                    .chain(&shot.globals)
+                    .map(|(key, value)| {
+                        Ok(KnobOverride {
+                            key: key.clone(),
+                            value: scalar(key, value)?,
+                        })
+                    })
+                    .collect::<Result<_, String>>()?,
                 frames: shot.frames,
                 trim: shot.trim.or(recipe.trim).unwrap_or(true),
                 settle: shot.settle.or(recipe.settle).unwrap_or(false),
@@ -1279,7 +1473,18 @@ fn scalar(key: &str, value: &toml::Value) -> Result<String, String> {
 /// The generated file renders exactly what `--render` would,
 /// so the first edit is the state you were after — nothing has to be looked up.
 /// Labels arrive already quoted the way TOML needs them.
+#[cfg(test)]
 fn capture_template(scene: &SceneEntry, knobs: &[Knob], size: egui::Vec2, scale: f32) -> String {
+    capture_template_with_globals(scene, &[], knobs, size, scale)
+}
+
+fn capture_template_with_globals(
+    scene: &SceneEntry,
+    globals: &[Knob],
+    knobs: &[Knob],
+    size: egui::Vec2,
+    scale: f32,
+) -> String {
     let (width, height) = (size.x, size.y);
     let (name, key) = (slug(scene.name), scene_key(scene));
     // Stated only when it was asked for, so the ordinary recipe carries no line
@@ -1297,19 +1502,22 @@ fn capture_template(scene: &SceneEntry, knobs: &[Knob], size: egui::Vec2, scale:
         size = "{width}x{height}"
         {magnified}# Uncomment once there is a second shot: gathers limit-safe copies onto one captioned image.
         # sheet = "sheet.png"
-
-        [[shot]]
-        name = {name:?}
-        scene = {key:?}
     "#};
+    write_controls(&mut out, "globals", globals);
+    let _ = write!(out, "\n[[shot]]\nname = {name:?}\nscene = {key:?}\n");
     // A `[shot.knobs]` table rather than an inline one,
     // so a long list stays one knob per line and any single knob can be commented out.
     // Groups and buttons carry no value, so they don't count towards needing the table at all.
+    write_controls(&mut out, "shot.knobs", knobs);
+    out
+}
+
+fn write_controls(out: &mut String, table: &str, knobs: &[Knob]) {
     if knobs
         .iter()
         .any(|knob| !matches!(knob, Knob::Button { .. } | Knob::Group { .. }))
     {
-        out.push_str("\n[shot.knobs]\n");
+        let _ = writeln!(out, "\n[{table}]");
     }
     for knob in knobs {
         match knob {
@@ -1324,7 +1532,6 @@ fn capture_template(scene: &SceneEntry, knobs: &[Knob], size: egui::Vec2, scale:
             }
         }
     }
-    out
 }
 
 /// A knob's current value as TOML, in the spelling [`set`] reads back.
@@ -1336,7 +1543,7 @@ fn toml_value(knob: &Knob) -> String {
         Knob::Slider { value, .. } => value.to_string(),
         Knob::Color { value, .. } => format!("{:?}", value.to_hex()),
         // By option label, not by index — the same reason `set` prefers one.
-        Knob::Select { value, options, .. } => {
+        Knob::Select { value, options, .. } | Knob::IconButtons { value, options, .. } => {
             format!("{:?}", options.get(*value).map_or("", String::as_str))
         }
         Knob::Pad2D { x, y, .. } => format!("{:?}", format!("{x},{y}")),
@@ -1732,6 +1939,7 @@ mod tests {
                 out: Some(out.clone()),
                 size: egui::vec2(200.0, 200.0),
                 knobs: Vec::new(),
+                globals: Vec::new(),
                 frames: None,
                 trim: true,
                 settle: false,
@@ -1845,6 +2053,7 @@ mod tests {
             out: Some(dir.join(format!("{name}.png"))),
             size: egui::vec2(120.0, 120.0),
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -1930,6 +2139,7 @@ mod tests {
                     out: Some(out.clone()),
                     size: egui::vec2(200.0, 120.0),
                     knobs: Vec::new(),
+                    globals: Vec::new(),
                     frames: Some(6),
                     trim: true,
                     settle: false,
@@ -2012,6 +2222,7 @@ mod tests {
             out: Some(out.clone()),
             size: egui::vec2(200.0, 120.0),
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -2085,6 +2296,7 @@ mod tests {
                 out: Some(dir.join("restless.png")),
                 size: egui::vec2(80.0, 40.0),
                 knobs: Vec::new(),
+                globals: Vec::new(),
                 frames: Some(5),
                 trim: true,
                 settle: true,
@@ -2155,6 +2367,7 @@ mod tests {
             out: Some(dir.join(format!("{name}.png"))),
             size: egui::vec2(60.0, 40.0),
             knobs,
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -2224,6 +2437,7 @@ mod tests {
             out: Some(dir.join(format!("{name}.png"))),
             size: egui::vec2(60.0, 40.0),
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -2305,6 +2519,7 @@ mod tests {
             out: None,
             size: egui::vec2(80.0, 40.0),
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: Some(CAP),
             trim: true,
             settle,
@@ -2457,6 +2672,7 @@ mod tests {
                 out: Some(out.clone()),
                 size: egui::vec2(120.0, 120.0),
                 knobs: Vec::new(),
+                globals: Vec::new(),
                 frames: None,
                 trim: true,
                 settle: false,
@@ -2547,6 +2763,7 @@ mod tests {
                 out: Some(out.clone()),
                 size: egui::vec2(80.0, 80.0),
                 knobs: Vec::new(),
+                globals: Vec::new(),
                 frames: None,
                 trim: true,
                 settle: false,
@@ -2638,6 +2855,7 @@ mod tests {
             out: Some(dir.join(format!("{name}.png"))),
             size: egui::vec2(120.0, 120.0),
             knobs,
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -2768,6 +2986,7 @@ mod tests {
             out: None,
             size: egui::vec2(200.0, 200.0),
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -2812,6 +3031,7 @@ mod tests {
             out: None,
             size: egui::vec2(200.0, 200.0),
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -2887,6 +3107,7 @@ mod tests {
             // Well under the 64×64 image plus its padding, so the fitting size differs.
             size: egui::vec2(24.0, 24.0),
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -2942,6 +3163,7 @@ mod tests {
             out: None,
             size: egui::vec2(320.0, 200.0),
             knobs: knobs(&[("speed", "5")]),
+            globals: Vec::new(),
             frames: None,
             trim: true,
             settle: false,
@@ -2955,6 +3177,199 @@ mod tests {
         assert!(
             matches!(harness.state().knobs[0], Knob::Slider { value, .. } if value == 5.0),
             "every settle frame re-applies the recipe, and one more after the last draw"
+        );
+    }
+
+    #[test]
+    fn global_overrides_resolve_conditional_control_chains_before_drawing() {
+        #[derive(Default, serde::Deserialize, serde::Serialize)]
+        struct Conditional {
+            first: bool,
+            second: bool,
+            third: bool,
+        }
+
+        impl crate::CatalogGlobals for Conditional {
+            fn controls(&mut self, controls: &mut crate::GlobalControls<'_>) {
+                if self.second {
+                    self.third = controls.toggle("third", self.third);
+                }
+                if self.first {
+                    self.second = controls.toggle("second", self.second);
+                }
+                self.first = controls.toggle("first", self.first);
+            }
+        }
+
+        let mut canvas = Canvas {
+            scene: crate::test_support::scene("conditional", "globals", true),
+            globals: Some(
+                GlobalState::new(
+                    GlobalEntry::of::<Conditional>(),
+                    crate::SceneRevision::INITIAL,
+                )
+                .expect("global state"),
+            ),
+            knobs: Vec::new(),
+            gl: None,
+            loader: None,
+            painter: None,
+            targets: Vec::new(),
+            wgpu: None,
+            passes: Vec::new(),
+            wanted: egui::Vec2::ZERO,
+        };
+        let overrides = knobs(&[("first", "true"), ("second", "true"), ("third", "true")]);
+        let mut unmatched: Vec<&KnobOverride> = overrides.iter().collect();
+
+        apply_globals(&mut canvas, &overrides, &mut unmatched).expect("global overrides apply");
+
+        assert!(unmatched.is_empty());
+        let (_, bytes) = canvas.globals.as_ref().expect("globals").parts();
+        let value: Conditional = postcard::from_bytes(bytes).expect("typed state");
+        assert!(value.first && value.second && value.third);
+    }
+
+    #[test]
+    fn global_overrides_are_rechecked_after_choice_options_change() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct DynamicChoice {
+            expanded: bool,
+            choice: String,
+        }
+
+        impl Default for DynamicChoice {
+            fn default() -> Self {
+                Self {
+                    expanded: false,
+                    choice: "target".to_owned(),
+                }
+            }
+        }
+
+        impl crate::CatalogGlobals for DynamicChoice {
+            fn controls(&mut self, controls: &mut crate::GlobalControls<'_>) {
+                self.choice = if self.expanded {
+                    controls.select("choice", &[("Other", "other")], "other")
+                } else {
+                    controls.select("choice", &[("Target", "target")], "target")
+                }
+                .to_owned();
+                self.expanded = controls.toggle("expanded", self.expanded);
+            }
+        }
+
+        let mut canvas = Canvas {
+            scene: crate::test_support::scene("dynamic", "globals", true),
+            globals: Some(
+                GlobalState::new(
+                    GlobalEntry::of::<DynamicChoice>(),
+                    crate::SceneRevision::INITIAL,
+                )
+                .expect("global state"),
+            ),
+            knobs: Vec::new(),
+            gl: None,
+            loader: None,
+            painter: None,
+            targets: Vec::new(),
+            wgpu: None,
+            passes: Vec::new(),
+            wanted: egui::Vec2::ZERO,
+        };
+        let overrides = knobs(&[("choice", "Target"), ("expanded", "true")]);
+        let mut unmatched: Vec<&KnobOverride> = overrides.iter().collect();
+
+        let error = apply_globals(&mut canvas, &overrides, &mut unmatched)
+            .expect_err("the final choice options reject the override");
+
+        assert!(error.plain().contains("no option `Target`"));
+    }
+
+    #[test]
+    fn a_shot_applies_typed_globals_before_render_and_the_next_shot_starts_fresh() {
+        use crate::{SceneSource as _, scaffold_scenes::globals};
+
+        let scene = crate::Linked
+            .manifest()
+            .scenes
+            .into_iter()
+            .find(|scene| scene.module_path.ends_with("scaffold_scenes::globals"))
+            .expect("the generated globals demo is compiled into the tests");
+        let session = Session::open(Renderer::Wgpu).expect("headless wgpu session");
+        let shot = Shot {
+            scene: "globals".to_owned(),
+            out: None,
+            size: egui::vec2(520.0, 240.0),
+            knobs: Vec::new(),
+            globals: knobs(&[("Theme", "Dark"), ("Language", "Finnish")]),
+            frames: None,
+            trim: true,
+            settle: false,
+            scale: DEFAULT_SCALE,
+            list: false,
+            template: false,
+        };
+
+        let mut dark = draw_with_globals(
+            scene,
+            Some(crate::GlobalEntry::of::<globals::Globals>()),
+            &session,
+            &|_: &egui::Context| {},
+            &shot,
+            shot.size,
+        )
+        .expect("the shipped demo draws with its global overrides");
+        let dark_image = dark.harness.render().expect("render the dark story");
+        let (_, bytes) = dark
+            .harness
+            .state()
+            .globals
+            .as_ref()
+            .expect("global state")
+            .parts();
+        let value: globals::Globals = postcard::from_bytes(bytes).expect("postcard globals");
+        assert!(matches!(value.theme, globals::Theme::Dark));
+        assert!(matches!(value.language, globals::Language::Finnish));
+        drop(dark);
+
+        let default_shot = Shot {
+            globals: Vec::new(),
+            ..shot
+        };
+        let mut fresh = draw_with_globals(
+            scene,
+            Some(crate::GlobalEntry::of::<globals::Globals>()),
+            &session,
+            &|_: &egui::Context| {},
+            &default_shot,
+            default_shot.size,
+        )
+        .expect("fresh shot draws");
+        let light_image = fresh.harness.render().expect("render the light story");
+        let (_, bytes) = fresh
+            .harness
+            .state()
+            .globals
+            .as_ref()
+            .expect("global state")
+            .parts();
+        let value: globals::Globals = postcard::from_bytes(bytes).expect("postcard globals");
+        assert!(
+            matches!(value.theme, globals::Theme::Light)
+                && matches!(value.language, globals::Language::English),
+            "shots do not inherit the previous shot's globals"
+        );
+        let luminance = |image: &image::RgbaImage| {
+            image
+                .pixels()
+                .map(|pixel| u64::from(pixel[0]) + u64::from(pixel[1]) + u64::from(pixel[2]))
+                .sum::<u64>()
+                / image.pixels().len() as u64
+        };
+        assert!(
+            luminance(&dark_image) < luminance(&light_image),
+            "the selected theme reaches the captured story background"
         );
     }
 
@@ -3070,7 +3485,7 @@ mod tests {
                 Knob::Toggle { value, .. } => *value = false,
                 Knob::Slider { value, .. } => *value = 0.0,
                 Knob::Color { value, .. } => *value = egui::Color32::BLACK,
-                Knob::Select { value, .. } => *value = 0,
+                Knob::Select { value, .. } | Knob::IconButtons { value, .. } => *value = 0,
                 Knob::Pad2D { x, y, .. } => (*x, *y) = (0.0, 0.0),
                 Knob::Group { .. } => {}
             }
@@ -3092,6 +3507,75 @@ mod tests {
                 label(before)
             );
         }
+    }
+
+    #[test]
+    fn recipe_globals_inherit_from_the_root_and_a_shot_wins() {
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join("gallery-global-recipe");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("capture.toml");
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                out = "renders"
+                size = "320x200"
+
+                [globals]
+                Theme = "not an option"
+                Language = "English"
+
+                [[shot]]
+                name = "dark-finnish"
+                scene = "settings"
+
+                [shot.globals]
+                Theme = "Dark"
+                Language = "Finnish"
+            "#},
+        )
+        .expect("write recipe");
+
+        let shot = read_recipe(&path, None)
+            .expect("global recipe parses")
+            .shots
+            .into_iter()
+            .next()
+            .expect("one shot");
+        let mut declared = vec![
+            select("Theme", &["System", "Light", "Dark"]),
+            select("Language", &["English", "Finnish"]),
+        ];
+        let mut unmatched: Vec<&KnobOverride> = shot.globals.iter().collect();
+        apply(&mut declared, &shot.globals, &mut unmatched).expect("all globals apply");
+
+        assert_eq!(shot.globals.len(), 2, "shot keys replace inherited keys");
+        assert!(unmatched.is_empty());
+        assert!(matches!(declared[0], Knob::Select { value: 2, .. }));
+        assert!(matches!(declared[1], Knob::Select { value: 1, .. }));
+    }
+
+    #[test]
+    fn a_generated_recipe_writes_globals_before_the_shot() {
+        let scene = crate::test_support::scene("settings", "demo", true);
+        let globals = vec![
+            select("Theme", &["System", "Light", "Dark"]),
+            select("Language", &["English", "Finnish"]),
+        ];
+        let generated = capture_template_with_globals(
+            &scene,
+            &globals,
+            &[],
+            egui::vec2(320.0, 200.0),
+            DEFAULT_SCALE,
+        );
+
+        let globals_at = generated.find("[globals]").expect("a globals table");
+        let shot_at = generated.find("[[shot]]").expect("a shot");
+        assert!(globals_at < shot_at, "root defaults precede the shot");
+        assert!(generated.contains("Theme = \"System\""));
+        assert!(generated.contains("Language = \"English\""));
     }
 
     #[test]
@@ -3352,6 +3836,7 @@ mod tests {
                 out: Some(out.clone()),
                 size: asked,
                 knobs: Vec::new(),
+                globals: Vec::new(),
                 frames: None,
                 trim: true,
                 settle: false,
@@ -3397,6 +3882,7 @@ mod tests {
             out: Some(dir.join(format!("{name}.png"))),
             size: egui::vec2(900.0, 700.0),
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: None,
             trim,
             settle: false,
@@ -3477,6 +3963,7 @@ mod tests {
                         value: (*value).to_owned(),
                     })
                     .collect(),
+                globals: Vec::new(),
                 frames: None,
                 trim: true,
                 settle: false,
@@ -3759,6 +4246,7 @@ mod tests {
                 // to sit just over a 900×460 stage.
                 size: egui::vec2(964.0, 520.0),
                 knobs: Vec::new(),
+                globals: Vec::new(),
                 frames: None,
                 trim: true,
                 settle: false,

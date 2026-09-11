@@ -87,11 +87,18 @@ pub fn launch(
         source.hot = Some(hot.clone());
     }
     let manifest = source.manifest();
+    let globals = source.globals();
 
     // Everything above is how scenes get here at all, so a headless run branches only where the window
     // would have opened — before any watcher, which nothing would be left to shut down.
     if let Some(capture) = shots(&cli, &config.path) {
-        return match render::render(&manifest, settings.renderer, &setup, &capture) {
+        return match render::render_with_globals(
+            &manifest,
+            globals,
+            settings.renderer,
+            &setup,
+            &capture,
+        ) {
             Ok(()) => Ok(()),
             Err(reason) => fail(&reason),
         };
@@ -175,6 +182,7 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
                 .unwrap_or_else(|reason| fail(&reason.into())),
             scale,
             knobs: Vec::new(),
+            globals: Vec::new(),
             frames: cli.frames,
             trim: !cli.no_trim,
             // A recipe option: one shot on the command line is drawn as asked.

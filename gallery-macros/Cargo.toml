@@ -5,7 +5,7 @@ publish.workspace = true
 edition.workspace = true
 repository.workspace = true
 license = "Unlicense"
-description = "Proc-macro for gallery: #[scene(\"name\")] registers a fn(&mut SceneCtx) as a discoverable scene."
+description = "Attribute macro for registering Gallery scenes."
 
 [lib]
 proc-macro = true

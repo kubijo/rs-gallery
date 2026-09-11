@@ -39,6 +39,7 @@ impl SceneRevision {
 /// ```
 pub struct SceneCtx<'a> {
     knobs: &'a mut Vec<Knob>,
+    globals: Option<&'a [u8]>,
     revision: SceneRevision,
     cursor: usize,
     stages: usize,
@@ -195,14 +196,26 @@ impl<'a> SceneCtx<'a> {
         Self::with_revision(knobs, gl, wgpu, SceneRevision::INITIAL)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_revision(
         knobs: &'a mut Vec<Knob>,
         gl: Option<GlDeps<'a>>,
         wgpu: Option<WgpuDeps<'a>>,
         revision: SceneRevision,
     ) -> Self {
+        Self::with_globals(knobs, gl, wgpu, revision, None)
+    }
+
+    pub(crate) fn with_globals(
+        knobs: &'a mut Vec<Knob>,
+        gl: Option<GlDeps<'a>>,
+        wgpu: Option<WgpuDeps<'a>>,
+        revision: SceneRevision,
+        globals: Option<&'a [u8]>,
+    ) -> Self {
         Self {
             knobs,
+            globals,
             revision,
             cursor: 0,
             stages: 0,
@@ -210,6 +223,14 @@ impl<'a> SceneCtx<'a> {
             gl,
             wgpu,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn __gallery_globals<T: crate::CatalogGlobals>(&self) -> T {
+        crate::globals::decode(
+            self.globals
+                .expect("this scene takes globals but its catalog declares none"),
+        )
     }
 
     /// The host-issued revision of the loaded scene code.

@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-/// One control in the knobs panel.
+use crate::Icon;
+
+/// One scene or catalog-global control.
 #[derive(Clone)]
 pub enum Knob {
     /// A momentary action. `clicked` is set by the panel and consumed by the scene on its next
@@ -41,6 +43,13 @@ pub enum Knob {
         options: Vec<String>,
         style: ChoiceStyle,
     },
+    /// An icon choice with stable labels for persistence and accessibility.
+    IconButtons {
+        label: String,
+        value: usize,
+        options: Vec<String>,
+        icons: Vec<Icon>,
+    },
     /// A 2-axis pad: two values dragged together (e.g. pitch/yaw). `invert_y` flips screen-Y → value-Y
     /// so dragging up increases y.
     Pad2D {
@@ -71,7 +80,7 @@ pub enum ChoiceStyle {
 
 /// Where a [`SceneCtx::pad2d`](crate::SceneCtx::pad2d) knob sits,
 /// in the ranges its [`Pad2DSpec`] declared.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Pad2D {
     pub x: f32,
     pub y: f32,
@@ -79,7 +88,7 @@ pub struct Pad2D {
 
 /// How a [`SceneCtx::pad2d`](crate::SceneCtx::pad2d) knob is set up: its default position, per-axis
 /// ranges, and y-orientation.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
 pub struct Pad2DSpec {
     pub default_x: f32,
     pub default_y: f32,
@@ -114,16 +123,67 @@ pub fn render_knobs(ui: &mut egui::Ui, knobs: &mut [Knob]) -> bool {
         ui.weak("This scene has no controls.");
         return false;
     }
+    render_knob_grid(ui, "gallery-scene-knobs", knobs.iter_mut())
+}
+
+pub(crate) fn has_panel_globals(knobs: &[Knob]) -> bool {
+    knobs
+        .iter()
+        .any(|knob| !matches!(knob, Knob::IconButtons { .. }))
+}
+
+pub(crate) fn render_panel_globals(ui: &mut egui::Ui, knobs: &mut [Knob]) -> bool {
+    render_knob_grid(
+        ui,
+        "gallery-global-knobs",
+        knobs
+            .iter_mut()
+            .filter(|knob| !matches!(knob, Knob::IconButtons { .. })),
+    )
+}
+
+fn render_knob_grid<'a>(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    knobs: impl Iterator<Item = &'a mut Knob>,
+) -> bool {
     let mut changed = false;
-    egui::Grid::new("gallery-knobs")
+    egui::Grid::new(ui.id().with(id_salt))
         .num_columns(2)
         .spacing([8.0, 6.0])
         .show(ui, |ui| {
-            for knob in knobs.iter_mut() {
+            for knob in knobs {
                 changed |= render_knob(ui, knob);
                 ui.end_row();
             }
         });
+    changed
+}
+
+pub(crate) fn render_global_toolbar(ui: &mut egui::Ui, knobs: &mut [Knob]) -> bool {
+    let mut changed = false;
+    ui.spacing_mut().item_spacing.x = 2.0 / ui.ctx().pixels_per_point();
+    ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
+
+    let mut first = true;
+    for knob in knobs.iter_mut().rev() {
+        let Knob::IconButtons {
+            label,
+            value,
+            options,
+            icons,
+        } = knob
+        else {
+            continue;
+        };
+        if !first {
+            ui.add_space(8.0);
+        }
+        first = false;
+        for i in (0..options.len()).rev() {
+            changed |= render_icon_option(ui, label, value, i, options, icons, false);
+        }
+    }
     changed
 }
 
@@ -203,9 +263,8 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
                     });
                 }
                 ChoiceStyle::Buttons => {
-                    // The `vertical` wrapper is load-bearing, not redundant nesting. A bare `horizontal_wrapped`
-                    // in a grid cell reports too little height for its rows, so the grid under-reserves the row
-                    // and the next knob draws over them — the `wrapped_buttons_reserve_…` test guards it.
+                    // A wrapping row underreports its height in a grid.
+                    // The vertical wrapper reserves the full row.
                     ui.vertical(|ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
@@ -236,6 +295,24 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             }
             changed
         }
+        Knob::IconButtons {
+            label,
+            value,
+            options,
+            icons,
+        } => {
+            ui.label(label.as_str());
+            let mut changed = false;
+            ui.vertical(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                    for i in 0..options.len() {
+                        changed |= render_icon_option(ui, label, value, i, options, icons, true);
+                    }
+                });
+            });
+            changed
+        }
         Knob::Pad2D {
             label,
             x,
@@ -249,6 +326,57 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             ui.label(label.as_str());
             render_pad2d(ui, x, y, *min_x, *max_x, *min_y, *max_y, *invert_y)
         }
+    }
+}
+
+fn render_icon_option(
+    ui: &mut egui::Ui,
+    group: &str,
+    value: &mut usize,
+    index: usize,
+    options: &[String],
+    icons: &[Icon],
+    show_caption: bool,
+) -> bool {
+    let active = *value == index;
+    let option = &options[index];
+    let occurrence = options[..index]
+        .iter()
+        .filter(|candidate| *candidate == option)
+        .count();
+    let icon_id = ui
+        .id()
+        .with(("gallery-icon-button", group, option.as_str(), occurrence));
+    let icon_size = if show_caption { 14.0 } else { 16.0 };
+    let icon_atom = egui::Atom::custom(icon_id, egui::Vec2::splat(icon_size));
+    let button = if show_caption {
+        egui::Button::new((icon_atom, option.as_str())).gap(6.0)
+    } else {
+        egui::Button::new(icon_atom).min_size(egui::Vec2::splat(22.0))
+    };
+    let rendered = button.selected(active).atom_ui(ui);
+    let icon_rect = rendered.rect(icon_id);
+    let mut response = rendered.response;
+    if !show_caption {
+        let tooltip = format!("{group}: {option}");
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, &tooltip)
+        });
+        response = response.on_hover_text(tooltip);
+    }
+    if let (Some(icon), Some(rect)) = (icons.get(index), icon_rect) {
+        let color = ui
+            .style()
+            .interact_selectable(&response, active)
+            .fg_stroke
+            .color;
+        icon.paint(ui.painter(), rect, color);
+    }
+    if response.clicked() && !active {
+        *value = index;
+        true
+    } else {
+        false
     }
 }
 
@@ -403,6 +531,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
 
         let options = |a: &str, b: &str| vec![a.to_owned(), b.to_owned()];
+        let icon = Icon::from_svg(include_bytes!("../assets/icons/app.svg"));
         let mut knobs = vec![
             Knob::Button {
                 label: "rebuild".to_owned(),
@@ -448,6 +577,12 @@ mod tests {
                 options: options("epsilon", "zeta"),
                 style: ChoiceStyle::Buttons,
             },
+            Knob::IconButtons {
+                label: "icon buttons".to_owned(),
+                value: 0,
+                options: options("eta", "theta"),
+                icons: vec![icon.clone(), icon],
+            },
             Knob::Pad2D {
                 label: "aim".to_owned(),
                 x: 0.0,
@@ -466,8 +601,17 @@ mod tests {
         harness.run();
 
         for label in [
-            "rebuild", "section", "note", "size", "enabled", "tint", "dropdown", "radio",
-            "buttons", "aim",
+            "rebuild",
+            "section",
+            "note",
+            "size",
+            "enabled",
+            "tint",
+            "dropdown",
+            "radio",
+            "buttons",
+            "icon buttons",
+            "aim",
         ] {
             assert!(
                 harness.query_by_label(label).is_some(),
@@ -482,6 +626,109 @@ mod tests {
                 "option `{option}` should render"
             );
         }
+        for option in ["eta", "theta"] {
+            assert!(
+                harness.query_by_label(option).is_some(),
+                "icon button option `{option}` should render"
+            );
+        }
+    }
+
+    #[test]
+    fn icon_buttons_paint_their_svg_inside_the_button() {
+        fn render(icon: Icon) -> image::RgbaImage {
+            let mut knobs = vec![Knob::IconButtons {
+                label: "theme".to_owned(),
+                value: 0,
+                options: vec!["Light".to_owned()],
+                icons: vec![icon],
+            }];
+            let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+                render_knobs(ui, &mut knobs);
+            });
+            harness.run();
+            harness.render().expect("the icon button renders")
+        }
+
+        let painted = render(Icon::from_svg(include_bytes!(
+            "../template/assets/theme-light.svg"
+        )));
+        let empty = render(Icon::from_svg(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"/>"#,
+        ));
+        assert_ne!(
+            painted.as_raw(),
+            empty.as_raw(),
+            "the supplied SVG geometry must change the button's pixels"
+        );
+    }
+
+    #[test]
+    fn catalog_and_scene_knob_grids_do_not_reuse_an_egui_id() {
+        let slider = |label: &str| Knob::Slider {
+            label: label.to_owned(),
+            value: 0.0,
+            min: 0.0,
+            max: 1.0,
+            step: 0.1,
+        };
+        let mut globals = vec![slider("Global slider")];
+        let mut scene = vec![slider("Scene slider")];
+        let harness = egui_kittest::Harness::new_ui(move |ui| {
+            render_panel_globals(ui, &mut globals);
+            ui.add_space(24.0);
+            render_knobs(ui, &mut scene);
+        });
+
+        let grid_id_warnings: Vec<&str> = harness
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().contains("use of Grid ID") => {
+                    Some(text.galley.text())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            grid_id_warnings.is_empty(),
+            "global and scene grids must have distinct IDs: {grid_id_warnings:?}"
+        );
+    }
+
+    #[test]
+    fn repeated_raw_icon_labels_do_not_reuse_an_atom_id() {
+        let icon = Icon::from_svg(include_bytes!("../assets/icons/app.svg"));
+        let mut knobs = vec![Knob::IconButtons {
+            label: "theme".to_owned(),
+            value: 0,
+            options: vec!["same".to_owned(), "same".to_owned()],
+            icons: vec![icon.clone(), icon],
+        }];
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            render_global_toolbar(ui, &mut knobs);
+        });
+        harness.run();
+
+        let id_warnings: Vec<&str> = harness
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text)
+                    if text.galley.text().contains("use of")
+                        && text.galley.text().contains("ID") =>
+                {
+                    Some(text.galley.text())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            id_warnings.is_empty(),
+            "raw icon labels must still receive distinct atom IDs: {id_warnings:?}"
+        );
     }
 
     #[test]

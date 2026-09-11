@@ -24,6 +24,19 @@ report = "capture.json"
 # settles — an endless animation — is caught there and reported as still moving. Per-shot too.
 settle = true
 
+[globals]
+# These controls are inherited by every shot. A shot can override either one below.
+Theme = "Light"
+Language = "English"
+
+[[shot]]
+name = "globals-finnish-dark"
+scene = "globals"
+
+[shot.globals]
+Theme = "Dark"
+Language = "Finnish"
+
 [[shot]]
 # The name is the shot's identity and its filename — here `renders/knobs-choice.png`.
 name = "knobs-choice"

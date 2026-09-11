@@ -25,7 +25,7 @@ render SCENE OUT SIZE="1280x720":
 capture FILE="capture.toml" OUT="":
     cargo run --quiet -- --capture {{ FILE }} {{ if OUT == "" { "" } else { "--out " + OUT } }}
 
-# List SCENE's knobs, their kinds and their values — the labels a capture recipe sets.
+# List the catalog globals and SCENE's knobs — the labels a capture recipe sets.
 knobs SCENE:
     cargo run --quiet -- --scene {{ SCENE }} --list-knobs
 

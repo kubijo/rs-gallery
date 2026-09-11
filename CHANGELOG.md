@@ -5,6 +5,10 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Catalog-wide typed controls.** Consumer-owned `CatalogGlobals` cross the host/dylib boundary as postcard-validated
+  bytes. Scenes receive them through a typed third argument and preview hook. Gallery reuses its knob, reload, and
+  capture plumbing—including root and per-shot overrides—and its size-cached SVG masks for title-bar `Icon` choices.
+
 ## [0.9.0] - 2026-09-05
 
 - Right-clicking the main title bar opens the native window menu on Wayland and Windows. X11 and the deferred

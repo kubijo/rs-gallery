@@ -113,6 +113,99 @@ uses `ctx.button("Reset", || reset())`; its callback runs once per click and car
 `ctx.set_slider(...)` family writes a value back by label, so content that does its own hit-testing — a slider drawn
 inside the preview, a rendered button — drives the panel too.
 
+Define catalog-wide controls with `CatalogGlobals`. Gallery renders the controls and passes their typed value to scenes;
+the consumer decides how the value affects the preview. The generated demo has the runnable version in
+[`globals.scene.rs`](template/globals.scene.rs).
+
+```rust
+use std::sync::LazyLock;
+
+use gallery::{CatalogGlobals, GlobalControls, Icon};
+use serde::{Deserialize, Serialize};
+
+static LIGHT_ICON: LazyLock<Icon> =
+    LazyLock::new(|| Icon::from_svg(include_bytes!("assets/theme-light.svg")));
+static DARK_ICON: LazyLock<Icon> =
+    LazyLock::new(|| Icon::from_svg(include_bytes!("assets/theme-dark.svg")));
+static ENGLISH_ICON: LazyLock<Icon> =
+    LazyLock::new(|| Icon::from_svg(include_bytes!("assets/language-english.svg")));
+static FINNISH_ICON: LazyLock<Icon> =
+    LazyLock::new(|| Icon::from_svg(include_bytes!("assets/language-finnish.svg")));
+
+#[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+pub enum Theme {
+    #[default]
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+pub enum Language {
+    #[default]
+    English,
+    Finnish,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+pub struct Globals {
+    pub theme: Theme,
+    pub language: Language,
+}
+
+impl CatalogGlobals for Globals {
+    fn controls(&mut self, controls: &mut GlobalControls<'_>) {
+        self.theme = controls.icon_buttons(
+            "Theme",
+            &[
+                ("Light", &LIGHT_ICON, Theme::Light),
+                ("Dark", &DARK_ICON, Theme::Dark),
+            ],
+            self.theme,
+        );
+        self.language = controls.icon_buttons(
+            "Language",
+            &[
+                ("English", &ENGLISH_ICON, Language::English),
+                ("Finnish", &FINNISH_ICON, Language::Finnish),
+            ],
+            self.language,
+        );
+    }
+
+    fn prepare(&self, ui: &mut gallery::egui::Ui) {
+        let style = ui.ctx().style_of(match self.theme {
+            Theme::Light => gallery::egui::Theme::Light,
+            Theme::Dark => gallery::egui::Theme::Dark,
+        });
+        ui.set_style(style);
+    }
+}
+
+gallery::scenes_dylib!(Globals);
+```
+
+```rust
+#[scene]
+fn translated(ctx: &mut SceneCtx, ui: &mut Ui, globals: &crate::Globals) {
+    let greeting = match globals.language {
+        crate::Language::English => "Hello",
+        crate::Language::Finnish => "Hei",
+    };
+    stage!(ctx, ui, |ui| {
+        ui.label(greeting);
+    });
+}
+```
+
+`prepare` also affects two-argument scenes. With `Linked`, register the type using `gallery::catalog_globals!(Globals)`.
+`icon_buttons` places monochrome SVG choices in the window bar; each option's label identifies captures and reloads and
+supplies its tooltip and accessibility name. Other controls stay in the controls panel. Apply themes with
+`Ui::set_style` so they remain inside the preview.
+
+`CatalogGlobals` requires `Default + Serialize + DeserializeOwned`. Gallery validates and stores postcard bytes after
+every change. A reload starts with the new type's default and restores compatible controls by label, so new code never
+decodes the previous type's bytes. Source linting can enforce stricter postcard-compatible serde forms.
+
 `ctx.scene_revision()` changes after a successful hot reload. A scene can store it beside host-owned cached GPU output
 and replace that output when the revision differs; it remains stable across ordinary frames and scene switches.
 
@@ -212,10 +305,17 @@ sheet = "sheet.png" # optional; gathers the run onto one captioned image as well
 settle = true # optional; shoot each scene once it stops animating, `frames` being the most to draw
 report = "capture.json" # optional; what the run came to, for something other than a person to read
 
+[globals] # inherited by every shot
+Theme = "Light"
+Language = "English"
+
 [[shot]]
 name = "night" # the shot's identity, and its filename: renders/night.png
 scene = "vehicle"
 knobs = { night = true, "sunroof open" = true, "body style" = "SUV" }
+
+[shot.globals] # optional; replaces matching root globals for this shot
+Theme = "Dark"
 
 [[shot]]
 name = "spinning"
@@ -224,8 +324,9 @@ frames = 40 # an animated scene draws a different frame each time; pick one
 knobs = { dots = 96, accent = "#6C9CD8" }
 ```
 
-A knob key is its label, or a regex over the labels — the exact label wins, so punctuation like `width (chars)` needs no
-escaping. Choices take an option label, colours a hex string. `just knobs <scene>` prints them ready to paste:
+A knob or global-control key is its label, or a regex over the labels — the exact label wins, so punctuation like
+`width (chars)` needs no escaping. Choices take an option label, colours a hex string. `just knobs <scene>` prints
+global controls first when the catalog declares them, followed by scene knobs, ready to paste:
 
 ```text
 buttons "body style" = "sedan"  (sedan | suv | hatch)

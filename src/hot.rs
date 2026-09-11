@@ -13,7 +13,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use libloading::Library;
 use tempfile::{Builder, NamedTempFile};
 
-use crate::{Manifest, SceneRevision, SceneSource, watch::HotStatus};
+use crate::{GlobalEntry, Manifest, SceneRevision, SceneSource, watch::HotStatus};
 
 /// What the platform calls a dynamic library.
 #[cfg(target_os = "windows")]
@@ -243,6 +243,13 @@ impl SceneSource for HotDylib {
 
     fn scene_revision(&self) -> SceneRevision {
         self.revision
+    }
+
+    fn globals(&mut self) -> Option<GlobalEntry> {
+        let library = self.loaded.last()?;
+        // SAFETY: emitted by `scenes_dylib!` from the same gallery version as the manifest.
+        let entry = unsafe { library.get::<fn() -> Option<GlobalEntry>>(b"__gallery_globals\0") };
+        entry.ok().and_then(|globals| globals())
     }
 }
 
