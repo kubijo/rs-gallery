@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-11
+
 - **Dependencies are current.** The egui family moves to 0.36.2, `ureq` to 3.4.1, and the Nix inputs and compatible
   transitive Rust packages receive their latest updates.
 
