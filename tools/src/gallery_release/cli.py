@@ -7,6 +7,7 @@ One long line per paragraph, too — rich wraps help text to the terminal, and h
 here survive into the middle of its lines.
 """
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -112,11 +113,9 @@ def _cut(level: Level) -> None:
     date_unreleased(changelog, version, date)
     run("cargo", "update", "--workspace", "--quiet", cwd=here)
 
-    # Read back what the edits came to, then put the release through the gate it has to pass.
     out.rule("[bold]checking the release it came to")
     verify(f"v{version}")
-    out.rule("[bold]validate")
-    run("just", "validate", cwd=here)
+    _run_release_checks(here)
 
     run("git", "add", "-A", cwd=here)
     run("git", "commit", "-q", "-m", f"release: v{version}", cwd=here)
@@ -130,6 +129,12 @@ def _cut(level: Level) -> None:
             title="done",
         )
     )
+
+
+def _run_release_checks(here: Path) -> None:
+    for recipe in ("validate", "audit", "outdated"):
+        out.rule(f"[bold]{recipe}")
+        run("just", recipe, cwd=here)
 
 
 def _plan(current: str, version: str, date: str) -> Table:

@@ -1,5 +1,6 @@
 import pytest
 
+from gallery_release import cli
 from gallery_release.repo import (
     UNRELEASED,
     VERSION_LINE,
@@ -26,6 +27,19 @@ CHANGELOG = f"""# Changelog
 
 - from before any of this was tagged
 """
+
+
+def test_release_runs_every_gate(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, "run", lambda *command, cwd: calls.append((command, cwd)))
+
+    cli._run_release_checks(tmp_path)
+
+    assert calls == [
+        (("just", "validate"), tmp_path),
+        (("just", "audit"), tmp_path),
+        (("just", "outdated"), tmp_path),
+    ]
 
 
 def test_a_level_moves_its_own_part_and_resets_what_is_under_it():
