@@ -91,7 +91,7 @@ exclude = ["template"]
 # to compare a tag against. Their licenses differ (only this one bundles fonts) and so do their
 # descriptions, so those stay where they are.
 [workspace.package]
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 publish = false
 repository = "https://github.com/kubijo/rs-gallery"

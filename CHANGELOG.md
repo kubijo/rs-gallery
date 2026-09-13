@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-13
+
 - **Canvas containment.** Scene paint remains inside the preview. The generated demo carries the clipping regression
   scene.
 
