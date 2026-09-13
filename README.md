@@ -91,6 +91,9 @@ room it has — a wrapping layout, anything with a breakpoint:
 `fill` measures what is left where it is called, so a single `fill` gets the whole canvas while one placed after other
 content takes only the remainder.
 
+Stages retain the dark transparency backdrop by default, so existing scenes need no changes. A caller can use
+`Stage::Fit.on_light()` or select dynamically with `.checkerboard(..)`, including from a typed catalog global.
+
 A stage whose content runs past it scrolls rather than growing — `scroll` is `fill` that scrolls, and any other size
 takes `.scrollable()`, as in `Stage::Fixed(egui::vec2(300.0, 200.0)).scrollable()`. The box stays the size it declared
 and the content scrolls inside it; [`example.scene.rs`](template/example.scene.rs) shows them running.
@@ -197,10 +200,11 @@ fn translated(ctx: &mut SceneCtx, ui: &mut Ui, globals: &crate::Globals) {
 }
 ```
 
-`prepare` also affects two-argument scenes. With `Linked`, register the type using `gallery::catalog_globals!(Globals)`.
-`icon_buttons` places monochrome SVG choices in the window bar; each option's label identifies captures and reloads and
-supplies its tooltip and accessibility name. Other controls stay in the controls panel. Apply themes with
-`Ui::set_style` so they remain inside the preview.
+`prepare` styles content inside stages, including stages in two-argument scenes. Gallery keeps its canvas and stage
+chrome on the host style. With `Linked`, register the type using `gallery::catalog_globals!(Globals)`. `icon_buttons`
+places monochrome SVG choices in the window bar; each option's label identifies captures and reloads and supplies its
+tooltip and accessibility name. Other controls stay in the controls panel. Apply themes with `Ui::set_style` so they
+remain inside staged content.
 
 `CatalogGlobals` requires `Default + Serialize + DeserializeOwned`. Gallery validates and stores postcard bytes after
 every change. A reload starts with the new type's default and restores compatible controls by label, so new code never

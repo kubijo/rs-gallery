@@ -5,6 +5,25 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Canvas containment.** Scene paint remains inside the preview. The generated demo carries the clipping regression
+  scene.
+
+- **Clean preview edges.** The canvas scroller no longer paints overflow fades against adjacent shell panels.
+
+- **Theme-isolated previews.** Canvas and stage chrome retain gallery styling, while staged content uses the preview
+  style. Existing stages keep their dark checkerboard; a consumer can select another per stage:
+
+  ```rust
+  ctx.stage(ui, Stage::Fit.on_light(), content);
+  ```
+
+- **Deterministic startup selection.** Automatic and requested selections follow sidebar order and reveal their folders.
+
+- **Complete borderless resize handles.** The top-right corner resizes while the rest of Close retains its button
+  target.
+
+- **Responsive terminal shutdown.** Ctrl+C wakes and closes an unfocused hot gallery immediately.
+
 ## [0.10.1] - 2026-09-11
 
 - **Dependencies are current.** The egui family moves to 0.36.2, `ureq` to 3.4.1, and the Nix inputs and compatible

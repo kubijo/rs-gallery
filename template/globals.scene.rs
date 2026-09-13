@@ -38,6 +38,15 @@ pub(crate) struct Globals {
     pub(crate) language: Language,
 }
 
+impl Globals {
+    fn checkerboard(&self) -> Checkerboard {
+        match self.theme {
+            Theme::Light => Checkerboard::Light,
+            Theme::Dark => Checkerboard::Dark,
+        }
+    }
+}
+
 impl CatalogGlobals for Globals {
     fn controls(&mut self, controls: &mut GlobalControls<'_>) {
         self.theme = controls.icon_buttons(
@@ -83,11 +92,15 @@ fn theme_and_language(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
         ),
     };
 
-    stage!(ctx, ui, (440, 150), |ui| {
-        ui.vertical_centered(|ui| {
-            ui.heading(heading);
-            ui.add_space(8.0);
-            ui.label(description);
-        });
-    });
+    ctx.stage(
+        ui,
+        Stage::Fixed(egui::vec2(440.0, 150.0)).checkerboard(globals.checkerboard()),
+        |ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading(heading);
+                ui.add_space(8.0);
+                ui.label(description);
+            });
+        },
+    );
 }

@@ -55,6 +55,20 @@ release-check TAG:
 outdated:
     @just in-shell cargo outdated --root-deps-only --ignore glow --exit-code 1
 
+# Upgrade every dependency lock.
+upgrade:
+    @just upgrade-nix
+    @just upgrade-cargo
+    @just upgrade-python
+
+# Upgrade Nix inputs.
+upgrade-nix *args:
+    @nix flake update {{ args }}
+
+# Upgrade Rust dependencies within their declared requirements.
+upgrade-cargo *args:
+    @just in-shell cargo update {{ args }}
+
 # Upgrade every Python tool dependency allowed by tools/pyproject.toml.
 upgrade-python *args:
     @just in-shell uv lock --project tools --upgrade {{ args }}

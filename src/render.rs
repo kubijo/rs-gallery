@@ -2949,7 +2949,7 @@ mod tests {
         assert!(DREW.get() > 0, "an open stage draws");
         assert_eq!(harness.state().targets.len(), 1);
 
-        harness.get_by_label("▾").click();
+        harness.get_by_label("Collapse stage").click();
         harness.run_steps(2);
         let folded = DREW.get();
         harness.run_steps(2);
@@ -3620,6 +3620,8 @@ mod tests {
     /// standing in for another's — which reads as the same picture repeated, at the wrong shape.
     /// The last is staged, which also holds the chrome a rendered frame gets.
     fn draws_offscreen_slots(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+        const SLOT_GAP: f32 = 6.0;
+
         fn flat(target: &crate::Offscreen, rgb: (f32, f32, f32)) {
             let loader = target.gl_loader();
             // SAFETY: the capture made its context current, and `loader` resolves against it.
@@ -3633,8 +3635,10 @@ mod tests {
         }
         ui.label("wide");
         ctx.offscreen(ui, [64_u32, 24], |target| flat(target, (0.9, 0.2, 0.2)));
+        ui.add_space(SLOT_GAP);
         ui.label("tall");
         ctx.offscreen(ui, [24_u32, 48], |target| flat(target, (0.2, 0.4, 0.9)));
+        ui.add_space(SLOT_GAP);
         // Staged, so the reference also holds the chrome a rendered frame gets:
         // the checkerboard around it, the size caption, the collapse arrow.
         ui.label("staged");

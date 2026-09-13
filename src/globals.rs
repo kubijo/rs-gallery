@@ -14,10 +14,11 @@ pub trait CatalogGlobals: Default + Serialize + DeserializeOwned + 'static {
     /// [`button`](GlobalControls::button) callbacks, avoid external side effects.
     fn controls(&mut self, controls: &mut GlobalControls<'_>);
 
-    /// Prepare the preview before a scene renders.
+    /// Prepare staged scene content before a scene renders.
     ///
     /// Runs in windows and captures, including for two-argument scenes. Apply themes with
-    /// `Ui::set_style`; Gallery restores context styles afterward.
+    /// `Ui::set_style`; Gallery keeps that style inside stages and restores its canvas and
+    /// context styles.
     fn prepare(&self, _ui: &mut egui::Ui) {}
 }
 

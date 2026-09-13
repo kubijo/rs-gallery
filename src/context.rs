@@ -8,6 +8,8 @@
 //! exception: it runs a callback once instead of carrying a value. Under the glow renderer the context
 //! also exposes offscreen GL rendering (see [`SceneCtx::offscreen`]).
 
+use std::sync::Arc;
+
 use eframe::{egui_wgpu, glow};
 
 use crate::knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
@@ -47,6 +49,19 @@ pub struct SceneCtx<'a> {
     offscreens: usize,
     gl: Option<GlDeps<'a>>,
     wgpu: Option<WgpuDeps<'a>>,
+    stage_styles: Option<StageStyles>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StageStyles {
+    chrome: Arc<egui::Style>,
+    content: Arc<egui::Style>,
+}
+
+impl StageStyles {
+    pub(crate) fn new(chrome: Arc<egui::Style>, content: Arc<egui::Style>) -> Self {
+        Self { chrome, content }
+    }
 }
 
 /// A choice knob found by label: which option it sits on, and what it may sit on.
@@ -89,6 +104,32 @@ impl Stage {
     pub fn padding(self, points: i8) -> StageSpec {
         StageSpec::from(self).padding(points)
     }
+
+    /// Select the transparency backdrop for this stage.
+    #[must_use]
+    pub fn checkerboard(self, checkerboard: Checkerboard) -> StageSpec {
+        StageSpec::from(self).checkerboard(checkerboard)
+    }
+
+    /// Put this stage on the light transparency backdrop.
+    #[must_use]
+    pub fn on_light(self) -> StageSpec {
+        self.checkerboard(Checkerboard::Light)
+    }
+
+    /// Put this stage on the dark transparency backdrop.
+    #[must_use]
+    pub fn on_dark(self) -> StageSpec {
+        self.checkerboard(Checkerboard::Dark)
+    }
+}
+
+/// The transparency backdrop behind one stage. Existing stages default to [`Self::Dark`].
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Checkerboard {
+    Light,
+    #[default]
+    Dark,
 }
 
 /// A [`Stage`] and how it behaves — what [`stage`](SceneCtx::stage)
@@ -99,6 +140,7 @@ pub struct StageSpec {
     size: Stage,
     scroll: bool,
     padding: i8,
+    checkerboard: Checkerboard,
 }
 
 impl From<Stage> for StageSpec {
@@ -107,6 +149,7 @@ impl From<Stage> for StageSpec {
             size,
             scroll: false,
             padding: PADDING,
+            checkerboard: Checkerboard::default(),
         }
     }
 }
@@ -131,6 +174,25 @@ impl StageSpec {
     pub fn padding(mut self, points: i8) -> Self {
         self.padding = points.max(0);
         self
+    }
+
+    /// Select the transparency backdrop independently of the preview theme.
+    #[must_use]
+    pub fn checkerboard(mut self, checkerboard: Checkerboard) -> Self {
+        self.checkerboard = checkerboard;
+        self
+    }
+
+    /// Put this stage on the light transparency backdrop.
+    #[must_use]
+    pub fn on_light(self) -> Self {
+        self.checkerboard(Checkerboard::Light)
+    }
+
+    /// Put this stage on the dark transparency backdrop.
+    #[must_use]
+    pub fn on_dark(self) -> Self {
+        self.checkerboard(Checkerboard::Dark)
     }
 }
 
@@ -182,6 +244,9 @@ stage_from!(f32, f64, u16, i16, u32, i32, usize, isize);
 /// Breathing room between a staged component and the edge of its checkerboard,
 /// unless a stage says otherwise ([`StageSpec::padding`]).
 pub const PADDING: i8 = 16;
+const STAGE_LEADING_TIGHTEN: f32 = 2.0;
+const STAGE_CAPTION_SPACING: f32 = -2.0;
+const STAGE_TRAILING_SPACE: f32 = 6.0;
 
 /// What a [`render_pass`](SceneCtx::render_pass) scene shows where it cannot draw.
 const PASS_NEEDS_WGPU: &str = "render_pass() needs the wgpu renderer";
@@ -203,7 +268,7 @@ impl<'a> SceneCtx<'a> {
         wgpu: Option<WgpuDeps<'a>>,
         revision: SceneRevision,
     ) -> Self {
-        Self::with_globals(knobs, gl, wgpu, revision, None)
+        Self::with_globals(knobs, gl, wgpu, revision, None, None)
     }
 
     pub(crate) fn with_globals(
@@ -212,6 +277,7 @@ impl<'a> SceneCtx<'a> {
         wgpu: Option<WgpuDeps<'a>>,
         revision: SceneRevision,
         globals: Option<&'a [u8]>,
+        stage_styles: Option<StageStyles>,
     ) -> Self {
         Self {
             knobs,
@@ -222,6 +288,7 @@ impl<'a> SceneCtx<'a> {
             offscreens: 0,
             gl,
             wgpu,
+            stage_styles,
         }
     }
 
@@ -252,9 +319,26 @@ impl<'a> SceneCtx<'a> {
         let spec = size.into();
         let id = Self::stage_id(ui, self.stages);
         self.stages += 1;
+        let current_style = ui.style().clone();
+        let (stage_style, content_style) = self.stage_styles.as_ref().map_or_else(
+            || (current_style.clone(), current_style),
+            |styles| (styles.chrome.clone(), styles.content.clone()),
+        );
+        let stack_spacing = ui.layout().is_vertical() && spec.size != Stage::Fill;
+        let follows_content = ui.cursor().min.y > ui.min_rect().bottom();
         // One block wherever it is placed: the badge and the content are two items,
         // and a parent laying out in a row would otherwise set them beside each other.
-        ui.vertical(|ui| self.staging(ui, id, spec, add));
+        ui.vertical(|ui| {
+            ui.set_style(stage_style);
+            if stack_spacing && follows_content {
+                // Pull the badge into the preceding label's ordinary item gap.
+                ui.add_space(-STAGE_LEADING_TIGHTEN);
+            }
+            self.staging(ui, id, spec, content_style, add);
+            if stack_spacing {
+                ui.add_space(STAGE_TRAILING_SPACE);
+            }
+        });
     }
 
     /// One stage per size, in as many columns as fit across `ui`, aligned in a grid.
@@ -319,12 +403,14 @@ impl<'a> SceneCtx<'a> {
         ui: &mut egui::Ui,
         id: egui::Id,
         spec: StageSpec,
+        content_style: Arc<egui::Style>,
         add: impl FnOnce(&mut egui::Ui),
     ) {
         let StageSpec {
             size,
             scroll,
             padding,
+            checkerboard,
         } = spec;
         let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
 
@@ -332,16 +418,23 @@ impl<'a> SceneCtx<'a> {
         // once drawn, so keep the position and paint the text in afterwards.
         let badge_at = ui
             .horizontal(|ui| {
-                let arrow = if open { "▾" } else { "▸" };
-                if ui
-                    .add(egui::Button::new(arrow).small().frame(false))
-                    .on_hover_text(if open { "Collapse" } else { "Expand" })
-                    .clicked()
-                {
+                // The 12-point hit target has blank space around the painted caret.
+                ui.spacing_mut().item_spacing.x = STAGE_CAPTION_SPACING;
+                let (direction, action) = if open {
+                    (crate::Caret::Down, "Collapse stage")
+                } else {
+                    (crate::Caret::Right, "Expand stage")
+                };
+                let toggle = crate::caret(ui, direction);
+                let center_y = toggle.rect.center().y;
+                toggle.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, action)
+                });
+                if toggle.on_hover_text(action).clicked() {
                     open = !open;
                     ui.data_mut(|d| d.insert_temp(id, open));
                 }
-                ui.cursor().min
+                egui::pos2(ui.cursor().min.x, center_y)
             })
             .inner;
 
@@ -349,19 +442,22 @@ impl<'a> SceneCtx<'a> {
         // shrinks the moment the bar appears, and a stage that resized to it would take the bar
         // away again, flipping every frame.
         let sized = |ui: &mut egui::Ui, fill: egui::Vec2| {
-            ui.scope(|ui| match size {
-                Stage::Fit => add(ui),
-                Stage::Fixed(wanted) => {
-                    ui.allocate_ui(wanted, |ui| {
-                        ui.set_min_size(wanted);
-                        add(ui);
-                    });
-                }
-                Stage::Fill => {
-                    ui.allocate_ui(fill, |ui| {
-                        ui.set_min_size(fill);
-                        add(ui);
-                    });
+            ui.scope(|ui| {
+                ui.set_style(content_style.clone());
+                match size {
+                    Stage::Fit => add(ui),
+                    Stage::Fixed(wanted) => {
+                        ui.allocate_ui(wanted, |ui| {
+                            ui.set_min_size(wanted);
+                            add(ui);
+                        });
+                    }
+                    Stage::Fill => {
+                        ui.allocate_ui(fill, |ui| {
+                            ui.set_min_size(fill);
+                            add(ui);
+                        });
+                    }
                 }
             })
             .response
@@ -427,14 +523,14 @@ impl<'a> SceneCtx<'a> {
             let backdrop_rect = framed.response.rect;
             ui.painter().set(
                 backdrop,
-                egui::Shape::Vec(crate::checkerboard(backdrop_rect)),
+                egui::Shape::Vec(crate::checkerboard(backdrop_rect, checkerboard)),
             );
         }
         // The component's own size, not the padded box around it.
         let content = framed.inner;
         ui.painter().text(
             badge_at,
-            egui::Align2::LEFT_TOP,
+            egui::Align2::LEFT_CENTER,
             format!("{:.0}×{:.0}", content.width(), content.height()),
             egui::FontId::proportional(10.0),
             ui.visuals().weak_text_color(),
@@ -1467,6 +1563,25 @@ mod tests {
         assert_eq!(
             Stage::from(egui::vec2(4.0, 5.0)),
             Stage::Fixed(egui::vec2(4.0, 5.0))
+        );
+    }
+
+    #[test]
+    fn each_stage_selects_its_checkerboard() {
+        assert_eq!(
+            StageSpec::from(Stage::Fit).checkerboard,
+            Checkerboard::Dark,
+            "the compatible default is stable"
+        );
+        assert_eq!(Stage::Fit.on_light().checkerboard, Checkerboard::Light);
+        assert_eq!(
+            Stage::Fit.scrollable().on_light().checkerboard,
+            Checkerboard::Light,
+            "the modifier composes on an existing spec"
+        );
+        assert_eq!(
+            Stage::Fit.on_light().on_dark().checkerboard,
+            Checkerboard::Dark
         );
     }
 
