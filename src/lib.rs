@@ -78,7 +78,7 @@ mod watch;
 mod window;
 pub use actions::action;
 use actions::{Log, collecting, render_actions};
-pub use context::{PADDING, SceneCtx, SceneRevision, Stage, StageSpec};
+pub use context::{Checkerboard, PADDING, SceneCtx, SceneRevision, Stage, StageSpec};
 use globals::GlobalState;
 pub use globals::{CatalogGlobals, GlobalControls, GlobalEntry};
 pub use hot::HotDylib;
@@ -104,9 +104,9 @@ pub mod prelude {
     pub use egui::Ui;
 
     pub use crate::{
-        CatalogGlobals, GlobalControls, Icon, ImageInput, MSAA_SAMPLES, Offscreen, PADDING, Pad2D,
-        Pad2DSpec, Pointer, SceneCtx, SceneEntry, ScenePass, SceneRevision, Stage, StageSpec,
-        StageTexture, action, egui, scene, scene_meta, stage,
+        CatalogGlobals, Checkerboard, GlobalControls, Icon, ImageInput, MSAA_SAMPLES, Offscreen,
+        PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, ScenePass, SceneRevision, Stage,
+        StageSpec, StageTexture, action, egui, scene, scene_meta, stage,
     };
 }
 
@@ -321,8 +321,7 @@ impl Shutdown {
             .ok()
             .and_then(|context| context.as_ref().cloned());
         if let Some(context) = context {
-            context.send_viewport_cmd(egui::ViewportCommand::Close);
-            context.request_repaint();
+            context.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
         }
     }
 
@@ -335,7 +334,7 @@ impl Shutdown {
         }
         let requested = self.requested.load(Ordering::Acquire);
         if requested {
-            context.send_viewport_cmd(egui::ViewportCommand::Close);
+            context.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
         }
         requested
     }
@@ -690,8 +689,9 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             self.state.show_perf = false;
         }
         let manifest = self.source.manifest();
-        if let Some(key) = self.scene_request.take() {
-            self.state.selected = Some(key);
+        let mut reveal_selected = self.scene_request.take();
+        if let Some(key) = &reveal_selected {
+            self.state.selected = Some(key.clone());
         }
         let tree = build_tree(&manifest);
 
@@ -702,7 +702,10 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             .as_deref()
             .is_some_and(|key| manifest.scenes.iter().any(|scene| scene_key(scene) == key));
         if !still_here {
-            self.state.selected = manifest.scenes.first().map(scene_key);
+            let mut order = Vec::new();
+            visible_scenes(&tree, &manifest.scenes, "", false, &mut order);
+            self.state.selected = order.first().map(|&i| scene_key(&manifest.scenes[i]));
+            reveal_selected.clone_from(&self.state.selected);
         }
 
         handle_shortcuts(ui.ctx(), &mut self.state);
@@ -812,6 +815,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                                 icons,
                                 filter: &filter,
                                 collapsed: &self.settings.collapsed,
+                                reveal: reveal_selected.as_deref(),
                             };
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 render_node(
@@ -1061,6 +1065,7 @@ impl<S: SceneSource> Drop for Gallery<S> {
 /// The canvas: the scene, padded off the edges, and none of the shell around it.
 /// Left plain — the checkerboard belongs to each [`SceneCtx::stage`], around
 /// the component it frames, so a scene's prose reads as prose.
+/// Catalog globals style staged content while this canvas retains the gallery style.
 ///
 /// Shared with the headless renderer, which draws it as the whole viewport:
 /// a captured PNG is then the same pixels the window shows for a canvas that size,
@@ -1088,6 +1093,103 @@ pub(crate) fn render_canvas(
     )
 }
 
+// Scene code can replace its UI clip.
+// Remember its new shapes so gallery can restore the canvas
+// boundary after rendering, before egui appends the scroll bars.
+struct PaintScope {
+    root: egui::LayerId,
+    starts: Vec<(egui::LayerId, usize)>,
+}
+
+struct PaintRanges(Vec<(egui::LayerId, std::ops::Range<usize>)>);
+
+impl PaintScope {
+    fn begin(ui: &egui::Ui) -> Self {
+        let root = ui.layer_id();
+        let layers = paint_layers(ui.ctx(), root);
+        let starts = ui.ctx().graphics(|graphics| {
+            layers
+                .into_iter()
+                .map(|layer| {
+                    let next = graphics.get(layer).map_or(0, |list| list.next_idx().0);
+                    (layer, next)
+                })
+                .collect()
+        });
+        Self { root, starts }
+    }
+
+    fn finish(self, context: &egui::Context) -> PaintRanges {
+        let mut layers = paint_layers(context, self.root);
+        for &(layer, _) in &self.starts {
+            if !layers.contains(&layer) {
+                layers.push(layer);
+            }
+        }
+        let ranges = context.graphics(|graphics| {
+            layers
+                .into_iter()
+                .filter_map(|layer| {
+                    let end = graphics.get(layer)?.next_idx().0;
+                    let start = self
+                        .starts
+                        .iter()
+                        .find_map(|&(seen, start)| (seen == layer).then_some(start))
+                        .unwrap_or(0);
+                    (start < end).then_some((layer, start..end))
+                })
+                .collect()
+        });
+        PaintRanges(ranges)
+    }
+}
+
+impl PaintRanges {
+    fn clip(self, context: &egui::Context, canvas: egui::Rect) {
+        let ranges: Vec<_> = self
+            .0
+            .into_iter()
+            .map(|(layer, range)| {
+                let canvas = context
+                    .layer_transform_from_global(layer)
+                    .map_or(canvas, |transform| transform * canvas);
+                (layer, range, canvas)
+            })
+            .collect();
+        context.graphics_mut(|graphics| {
+            for (layer, range, canvas) in ranges {
+                let Some(list) = graphics.get_mut(layer) else {
+                    continue;
+                };
+                for i in range {
+                    list.mutate_shape(egui::layers::ShapeIdx(i), |shape| {
+                        shape.clip_rect = shape.clip_rect.intersect(canvas);
+                    });
+                }
+            }
+        });
+    }
+}
+
+fn paint_layers(context: &egui::Context, root: egui::LayerId) -> Vec<egui::LayerId> {
+    let mut layers = vec![root];
+    context.memory(|memory| {
+        for layer in memory.layer_ids() {
+            if !layers.contains(&layer) {
+                layers.push(layer);
+            }
+        }
+    });
+    context.viewport(|viewport| {
+        for layer in viewport.this_pass.widgets.layer_ids() {
+            if !layers.contains(&layer) {
+                layers.push(layer);
+            }
+        }
+    });
+    layers
+}
+
 pub(crate) fn render_canvas_at(
     ui: &mut egui::Ui,
     scene: &SceneEntry,
@@ -1098,6 +1200,7 @@ pub(crate) fn render_canvas_at(
     globals: Option<(GlobalEntry, &[u8])>,
 ) -> egui::Vec2 {
     ui.push_id(scene_key(scene), |ui| {
+        let prepared = PaintScope::begin(ui);
         let _preview_style = globals
             .is_some()
             .then(|| PreviewContextStyleGuard::new(ui.ctx()));
@@ -1106,36 +1209,42 @@ pub(crate) fn render_canvas_at(
             entry
                 .prepare(bytes, ui)
                 .expect("gallery validated catalog globals before rendering");
-            if !Arc::ptr_eq(&inherited_style, ui.style()) {
-                ui.painter().rect_filled(
-                    ui.available_rect_before_wrap(),
-                    0.0,
-                    ui.visuals().panel_fill,
-                );
-            }
         }
+        let content_style = ui.style().clone();
+        ui.set_style(inherited_style.clone());
+        let prepared = prepared.finish(ui.ctx());
 
-        egui::ScrollArea::both()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                let declared = egui::Frame::new()
-                    .inner_margin(egui::Margin::same(16))
-                    .show(ui, |ui| {
-                        let mut ctx = SceneCtx::with_globals(
-                            store,
-                            gl_deps,
-                            wgpu,
-                            revision,
-                            globals.map(|(_, bytes)| bytes),
-                        );
-                        (scene.render)(&mut ctx, ui);
-                        ctx.declared()
-                    })
-                    .inner;
-                // Drop knobs the scene stopped declaring this frame.
-                store.truncate(declared);
-            })
-            .content_size
+        let scene_fade = ui.spacing().scroll.fade;
+        ui.spacing_mut().scroll.fade.strength = 0.0;
+        let output = egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+            // The canvas edge abuts shell panels, so only nested scene scrollers need a fade.
+            ui.spacing_mut().scroll.fade = scene_fade;
+            let scope = PaintScope::begin(ui);
+            let declared = egui::Frame::new()
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    let mut ctx = SceneCtx::with_globals(
+                        store,
+                        gl_deps,
+                        wgpu,
+                        revision,
+                        globals.map(|(_, bytes)| bytes),
+                        Some(context::StageStyles::new(
+                            inherited_style.clone(),
+                            content_style.clone(),
+                        )),
+                    );
+                    (scene.render)(&mut ctx, ui);
+                    ctx.declared()
+                })
+                .inner;
+            // Drop knobs the scene stopped declaring this frame.
+            store.truncate(declared);
+            scope.finish(ui.ctx())
+        });
+        prepared.clip(ui.ctx(), output.inner_rect);
+        output.inner.clip(ui.ctx(), output.inner_rect);
+        output.content_size
     })
     .inner
 }
@@ -1181,6 +1290,7 @@ struct Sidebar<'a> {
     icons: &'a Icons,
     filter: &'a str,
     collapsed: &'a Collapsed,
+    reveal: Option<&'a str>,
 }
 
 /// Render a tree node, honouring the filter: a group stays if its name
@@ -1201,6 +1311,7 @@ fn render_node(
         icons,
         filter,
         collapsed,
+        reveal,
     } = *sidebar;
     let filtering = !filter.is_empty();
     for (name, child) in &node.children {
@@ -1219,7 +1330,9 @@ fn render_node(
             leaf(ui, name, &scenes[child.scenes[0]], selected, icons);
         } else {
             let mut header = egui::CollapsingHeader::new(name);
-            header = if filtering {
+            let forced_open =
+                filtering || reveal.is_some_and(|key| tree_contains(child, scenes, key));
+            header = if forced_open {
                 header.open(Some(true))
             } else {
                 header.default_open(!collapsed.folds(name, at_root))
@@ -1244,6 +1357,14 @@ fn render_node(
         let label = scenes[i].name.from_case(Case::Lower).to_case(Case::Title);
         leaf(ui, &label, &scenes[i], selected, icons);
     }
+}
+
+fn tree_contains(node: &TreeNode, scenes: &[SceneEntry], key: &str) -> bool {
+    node.scenes.iter().any(|&i| scene_key(&scenes[i]) == key)
+        || node
+            .children
+            .values()
+            .any(|child| tree_contains(child, scenes, key))
 }
 
 /// The egui id of the sidebar filter box, so Cmd+F can focus it.
@@ -1391,10 +1512,9 @@ fn render_source_view(ui: &mut egui::Ui, source: &str) {
 /// so transparency and bounds read against the shell.
 /// Shapes rather than paint: a fitted stage learns its rect
 /// only after drawing, and fills in a slot reserved before it.
-pub(crate) fn checkerboard(rect: egui::Rect) -> Vec<egui::Shape> {
+pub(crate) fn checkerboard(rect: egui::Rect, checkerboard: Checkerboard) -> Vec<egui::Shape> {
     const SIZE: f32 = 12.0;
-    const DARK: egui::Color32 = egui::Color32::from_rgb(0x25, 0x25, 0x25);
-    const LIGHT: egui::Color32 = egui::Color32::from_rgb(0x35, 0x35, 0x35);
+    let colors = checkerboard_colors(checkerboard);
 
     let cols = (rect.width() / SIZE + 1.0) as usize;
     let rows = (rect.height() / SIZE + 1.0) as usize;
@@ -1407,11 +1527,24 @@ pub(crate) fn checkerboard(rect: egui::Rect) -> Vec<egui::Shape> {
             );
             // Clamp, so the last row and column stop at the edge instead of overhanging it.
             let tile = egui::Rect::from_min_size(corner, egui::Vec2::splat(SIZE)).intersect(rect);
-            let color = if (row + col) % 2 == 0 { DARK } else { LIGHT };
+            let color = colors[(row + col) % 2];
             tiles.push(egui::Shape::rect_filled(tile, 0.0, color));
         }
     }
     tiles
+}
+
+fn checkerboard_colors(checkerboard: Checkerboard) -> [egui::Color32; 2] {
+    match checkerboard {
+        Checkerboard::Light => [
+            egui::Color32::from_rgb(0xC8, 0xC8, 0xC8),
+            egui::Color32::from_rgb(0xDE, 0xDE, 0xDE),
+        ],
+        Checkerboard::Dark => [
+            egui::Color32::from_rgb(0x25, 0x25, 0x25),
+            egui::Color32::from_rgb(0x35, 0x35, 0x35),
+        ],
+    }
 }
 
 // --- Panel chrome ---
@@ -1501,17 +1634,17 @@ fn collapsed_panel(
         });
 }
 
-/// Which way a collapse [`caret`] points
-/// — toward where a click sends the panel.
+/// Which way a collapse [`caret`] points.
 #[derive(Clone, Copy)]
-enum Caret {
+pub(crate) enum Caret {
     Left,
     Right,
+    Down,
 }
 
 /// A small collapse/expand caret pointing in `dir`, muted until hovered.
 /// Returns its click response so the caller owns the toggle.
-fn caret(ui: &mut egui::Ui, dir: Caret) -> egui::Response {
+pub(crate) fn caret(ui: &mut egui::Ui, dir: Caret) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click());
     let c = rect.center();
     let pts = match dir {
@@ -1524,6 +1657,11 @@ fn caret(ui: &mut egui::Ui, dir: Caret) -> egui::Response {
             egui::pos2(c.x + 2.0, c.y - 3.0),
             egui::pos2(c.x + 2.0, c.y + 3.0),
             egui::pos2(c.x - 3.0, c.y),
+        ],
+        Caret::Down => vec![
+            egui::pos2(c.x - 3.0, c.y - 2.0),
+            egui::pos2(c.x + 3.0, c.y - 2.0),
+            egui::pos2(c.x, c.y + 3.0),
         ],
     };
     let color = if resp.hovered() {
@@ -1810,12 +1948,45 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_request_closes_the_viewport_on_the_event_loop() {
+    fn shutdown_request_wakes_and_closes_the_root_viewport() {
         let shutdown = Shutdown::default();
         let context = egui::Context::default();
-        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+        let mut initial = context.run_ui(egui::RawInput::default(), |ui| {
             assert!(!shutdown.begin_frame(ui.ctx()));
-            shutdown.request();
+        });
+        initial.textures_delta.clear();
+        for _ in 0..8 {
+            if !context.has_requested_repaint_for(&egui::ViewportId::ROOT) {
+                break;
+            }
+            let mut output = context.run_ui(egui::RawInput::default(), |_| {});
+            output.textures_delta.clear();
+        }
+        assert!(!context.has_requested_repaint_for(&egui::ViewportId::ROOT));
+
+        let child = egui::ViewportId::from_hash_of("shutdown-child");
+        let mut child_input = egui::RawInput {
+            viewport_id: child,
+            ..Default::default()
+        };
+        child_input.viewports.insert(child, Default::default());
+        let mut child_output = context.run_ui(child_input, |_| {});
+        child_output.textures_delta.clear();
+
+        let (repaints, wakeup) = std::sync::mpsc::channel();
+        context.set_request_repaint_callback(move |info| {
+            _ = repaints.send(info.viewport_id);
+        });
+        let signal = shutdown.clone();
+        std::thread::spawn(move || signal.request())
+            .join()
+            .expect("signal handler thread");
+        assert_eq!(
+            wakeup.recv_timeout(Duration::from_secs(1)),
+            Ok(egui::ViewportId::ROOT)
+        );
+
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
             assert!(shutdown.begin_frame(ui.ctx()));
         });
 
@@ -2184,6 +2355,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn initial_scene_follows_sidebar_order_instead_of_manifest_order() {
+        let scenes = vec![scene("last", "z", true), scene("first", "a", true)];
+        let expected = scene_key(&scenes[1]);
+        let gallery = Gallery::new(
+            Fixed(
+                scenes,
+                vec![group("z", "Zed / Last"), group("a", "Alpha / First")],
+            ),
+            Settings::new(Renderer::Wgpu).collapsed(true),
+            None,
+            None,
+        );
+
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_| gallery);
+        harness.run_steps(1);
+
+        assert_eq!(
+            harness.state().state.selected.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
     /// Rendered a frame apart, as switching scenes does — within one frame
     /// the parent's own counter would tell them apart and prove nothing.
     #[test]
@@ -2254,8 +2448,109 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scene_paint_cannot_widen_the_canvas_clip() {
+        const ESCAPE: egui::Color32 = egui::Color32::from_rgb(255, 0, 255);
+        const AREA_ESCAPE: egui::Color32 = egui::Color32::from_rgb(0, 255, 0);
+        thread_local! {
+            static CANVAS_CLIP: std::cell::Cell<Option<egui::Rect>> = const {
+                std::cell::Cell::new(None)
+            };
+        }
+
+        fn escape(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+            let canvas = ui.clip_rect();
+            CANVAS_CLIP.set(Some(canvas));
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(canvas.right() - 8.0, canvas.top()),
+                egui::vec2(80.0, 32.0),
+            );
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            child.set_clip_rect(rect);
+            child.painter().rect_filled(rect, 0.0, ESCAPE);
+            egui::Area::new(egui::Id::new("scene-escape-area"))
+                .fixed_pos(rect.min)
+                .show(ui.ctx(), |ui| {
+                    ui.set_clip_rect(rect);
+                    ui.painter().rect_filled(rect, 0.0, AREA_ESCAPE);
+                });
+        }
+
+        let shown = SceneEntry {
+            render: escape,
+            ..scene("escape", "clip", true)
+        };
+        let mut knobs = Vec::new();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            render_canvas(ui, &shown, &mut knobs, None, None);
+        });
+        harness.run();
+
+        let canvas = CANVAS_CLIP
+            .take()
+            .expect("the scene records its inherited clip");
+        for color in [ESCAPE, AREA_ESCAPE] {
+            let escaped = harness
+                .output()
+                .shapes
+                .iter()
+                .find(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == color))
+                .expect("the scene paints its sentinel");
+            assert_eq!(
+                escaped.clip_rect.max.x, canvas.max.x,
+                "gallery restores the canvas boundary across scene layers"
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_overflow_has_no_shell_edge_fade() {
+        const FADE_STRENGTH: f32 = 0.73;
+        thread_local! {
+            static SCENE_FADE: std::cell::Cell<Option<f32>> = const {
+                std::cell::Cell::new(None)
+            };
+        }
+
+        fn oversized(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+            SCENE_FADE.set(Some(ui.spacing().scroll.fade.strength));
+            ui.allocate_space(egui::vec2(960.0, 600.0));
+        }
+
+        let shown = SceneEntry {
+            render: oversized,
+            ..scene("oversized", "canvas", true)
+        };
+        let mut knobs = Vec::new();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 240.0))
+            .build_ui(move |ui| {
+                ui.spacing_mut().scroll.fade.strength = FADE_STRENGTH;
+                render_canvas(ui, &shown, &mut knobs, None, None);
+            });
+        harness.run();
+
+        assert_eq!(
+            SCENE_FADE.get(),
+            Some(FADE_STRENGTH),
+            "nested scene scroll areas retain the configured fade"
+        );
+        assert!(
+            harness.output().shapes.iter().all(|shape| {
+                !matches!(
+                    &shape.shape,
+                    egui::Shape::Mesh(mesh)
+                        if mesh.vertices.iter().any(|vertex| vertex.color == egui::Color32::TRANSPARENT)
+                            && mesh.vertices.iter().any(|vertex| vertex.color != egui::Color32::TRANSPARENT)
+                )
+            }),
+            "the outer canvas scroll area paints no overflow gradient"
+        );
+    }
+
     thread_local! {
         static PREVIEW_DARK_MODE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+        static CANVAS_DARK_MODE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     }
 
     #[derive(Default, serde::Deserialize, serde::Serialize)]
@@ -2275,20 +2570,33 @@ mod tests {
         }
     }
 
-    fn observes_preview_theme(_ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
-        PREVIEW_DARK_MODE.set(Some(ui.visuals().dark_mode));
+    fn observes_staged_preview_theme(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        CANVAS_DARK_MODE.set(Some(ui.visuals().dark_mode));
+        ctx.stage(
+            ui,
+            Stage::Fixed(egui::vec2(120.0, 40.0)).checkerboard(Checkerboard::Light),
+            |ui| {
+                PREVIEW_DARK_MODE.set(Some(ui.visuals().dark_mode));
+                ui.label("staged content");
+            },
+        );
+    }
+
+    fn uses_default_checkerboard(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ctx.stage(ui, (120, 40), |_| {});
     }
 
     #[test]
     fn catalog_theme_styles_the_story_without_changing_the_gallery_context() {
         PREVIEW_DARK_MODE.set(None);
+        CANVAS_DARK_MODE.set(None);
         let context = egui::Context::default();
         context.set_theme(egui::Theme::Dark);
         let original_dark = context.style_of(egui::Theme::Dark);
         let globals = GlobalState::new(GlobalEntry::of::<LightPreview>(), SceneRevision::INITIAL)
             .expect("serializable globals");
         let shown = SceneEntry {
-            render: observes_preview_theme,
+            render: observes_staged_preview_theme,
             ..scene("themed", "preview", true)
         };
         let mut knobs = Vec::new();
@@ -2304,11 +2612,17 @@ mod tests {
                 Some(globals.parts()),
             );
         });
+        output.textures_delta.clear();
 
         assert_eq!(
             PREVIEW_DARK_MODE.get(),
             Some(false),
-            "the selected light style reaches the story Ui"
+            "the selected light style reaches staged story content"
+        );
+        assert_eq!(
+            CANVAS_DARK_MODE.get(),
+            Some(true),
+            "the canvas retains the gallery style"
         );
         assert_eq!(
             context.options(|options| options.theme_preference),
@@ -2319,7 +2633,142 @@ mod tests {
             Arc::ptr_eq(&context.style_of(egui::Theme::Dark), &original_dark),
             "preview setup must not replace a shell style"
         );
+    }
+
+    #[test]
+    fn catalog_theme_reaches_stage_content_but_not_its_chrome() {
+        PREVIEW_DARK_MODE.set(None);
+        CANVAS_DARK_MODE.set(None);
+        let context = egui::Context::default();
+        context.set_theme(egui::Theme::Dark);
+        let chrome_color = context
+            .style_of(egui::Theme::Dark)
+            .visuals
+            .weak_text_color();
+        let globals = GlobalState::new(GlobalEntry::of::<LightPreview>(), SceneRevision::INITIAL)
+            .expect("serializable globals");
+        let shown = SceneEntry {
+            render: observes_staged_preview_theme,
+            ..scene("themed-stage", "preview", true)
+        };
+        let mut knobs = Vec::new();
+
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            render_canvas_at(
+                ui,
+                &shown,
+                &mut knobs,
+                None,
+                None,
+                SceneRevision::INITIAL,
+                Some(globals.parts()),
+            );
+        });
         output.textures_delta.clear();
+
+        assert_eq!(
+            PREVIEW_DARK_MODE.get(),
+            Some(false),
+            "the light consumer style reaches the staged content"
+        );
+        let caption = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "120×40" => Some(text),
+                _ => None,
+            })
+            .expect("the stage paints its size caption");
+        assert_eq!(
+            caption.fallback_color, chrome_color,
+            "the caption retains the gallery color"
+        );
+        assert!(
+            output.shapes.iter().all(|shape| {
+                !matches!(&shape.shape, egui::Shape::Text(text) if matches!(text.galley.text(), "▾" | "▸"))
+            }),
+            "the fold control is not a font glyph"
+        );
+        let caret = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Path(path) if path.fill == MUTED => Some(path),
+                _ => None,
+            })
+            .expect("the fold control is painted with the gallery icon color");
+        let center_delta = (caption.visual_bounding_rect().center().y
+            - caret.visual_bounding_rect().center().y)
+            .abs();
+        assert!(
+            center_delta <= 1.0,
+            "caption and fold icon centers differ by {center_delta} points"
+        );
+        let caption_gap =
+            caption.visual_bounding_rect().left() - caret.visual_bounding_rect().right();
+        assert!(
+            (0.0..=4.0).contains(&caption_gap),
+            "caption starts {caption_gap} points after the fold icon"
+        );
+        let light_tiles = checkerboard_colors(Checkerboard::Light);
+        let checkerboard = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Vec(tiles)
+                    if light_tiles.iter().all(|color| {
+                        tiles.iter().any(
+                            |tile| matches!(tile, egui::Shape::Rect(rect) if rect.fill == *color),
+                        )
+                    }) =>
+                {
+                    Some(tiles)
+                }
+                _ => None,
+            })
+            .expect("a light checkerboard backs light preview content");
+        assert!(
+            checkerboard.len() > 2,
+            "the backdrop contains alternating tiles"
+        );
+    }
+
+    #[test]
+    fn catalog_theme_does_not_choose_a_stage_checkerboard() {
+        let context = egui::Context::default();
+        context.set_theme(egui::Theme::Dark);
+        let globals = GlobalState::new(GlobalEntry::of::<LightPreview>(), SceneRevision::INITIAL)
+            .expect("serializable globals");
+        let shown = SceneEntry {
+            render: uses_default_checkerboard,
+            ..scene("default-checkerboard", "preview", true)
+        };
+        let mut knobs = Vec::new();
+
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            render_canvas_at(
+                ui,
+                &shown,
+                &mut knobs,
+                None,
+                None,
+                SceneRevision::INITIAL,
+                Some(globals.parts()),
+            );
+        });
+        output.textures_delta.clear();
+
+        let dark_tiles = checkerboard_colors(Checkerboard::Dark);
+        assert!(
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Vec(tiles) if dark_tiles.iter().all(|color| {
+                    tiles.iter().any(
+                        |tile| matches!(tile, egui::Shape::Rect(rect) if rect.fill == *color),
+                    )
+                }))
+            }),
+            "a light consumer theme leaves the stage's dark default alone"
+        );
     }
 
     #[test]
@@ -2417,6 +2866,7 @@ mod tests {
             icons,
             filter: "",
             collapsed: &Collapsed::Nothing,
+            reveal: None,
         }
     }
 
@@ -2499,6 +2949,7 @@ mod tests {
                 icons: &icons,
                 filter,
                 collapsed: &collapsed,
+                reveal: None,
             };
             render_node(ui, &tree, &sidebar, &mut selected, false, true);
         });
@@ -2520,6 +2971,31 @@ mod tests {
             labels_under(Collapsed::Nothing, ""),
             [true, true],
             "and the default leaves both open"
+        );
+    }
+
+    #[test]
+    fn a_selected_scene_is_revealed_inside_folded_ancestors() {
+        let (scenes, tree) = two_roots();
+        let reveal = scene_key(&scenes[0]);
+        let icons = crate::svg::Icons::load();
+        let mut selected = Some(reveal.clone());
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            let sidebar = Sidebar {
+                scenes: &scenes,
+                icons: &icons,
+                filter: "",
+                collapsed: &Collapsed::Everything,
+                reveal: Some(&reveal),
+            };
+            render_node(ui, &tree, &sidebar, &mut selected, false, true);
+        });
+        harness.run();
+
+        assert!(harness.query_by_label("Grid").is_some());
+        assert!(
+            harness.query_by_label("Spin").is_none(),
+            "unselected folders retain their configured state"
         );
     }
 
@@ -2586,6 +3062,8 @@ mod scaffold_scenes {
     mod animation;
     #[path = "badge.scene.rs"]
     mod badge;
+    #[path = "canvas_clip.scene.rs"]
+    mod canvas_clip;
     #[path = "example.scene.rs"]
     mod example;
     #[path = "globals.scene.rs"]

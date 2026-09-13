@@ -40,6 +40,7 @@ fn tree(ctx: &mut SceneCtx, ui: &mut Ui) {
             } else {
                 &Collapsed::Nothing
             },
+            reveal: None,
         };
         ctx.stage(ui, egui::vec2(260.0, 240.0), |ui| {
             render_node(ui, &tree, &sidebar, &mut chosen, false, true);

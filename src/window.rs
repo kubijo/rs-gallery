@@ -376,10 +376,6 @@ pub(crate) fn resize(ctx: &egui::Context) {
         return;
     };
     let bounds = ctx.viewport_rect();
-    // The top-right corner belongs to Close, as it does in conventional desktop chrome.
-    if controls_rect(bounds).contains(pointer) {
-        return;
-    }
     let Some((direction, cursor)) = resize_target(bounds, pointer) else {
         return;
     };
@@ -407,6 +403,17 @@ fn controls_rect(bounds: egui::Rect) -> egui::Rect {
 }
 
 fn resize_target(
+    bounds: egui::Rect,
+    pointer: egui::Pos2,
+) -> Option<(egui::ResizeDirection, egui::CursorIcon)> {
+    let target = edge_resize_target(bounds, pointer)?;
+    if controls_rect(bounds).contains(pointer) && target.0 != egui::ResizeDirection::NorthEast {
+        return None;
+    }
+    Some(target)
+}
+
+fn edge_resize_target(
     bounds: egui::Rect,
     pointer: egui::Pos2,
 ) -> Option<(egui::ResizeDirection, egui::CursorIcon)> {
@@ -470,6 +477,19 @@ mod tests {
                 egui::CursorIcon::ResizeSouthEast
             ))
         );
+    }
+
+    #[test]
+    fn top_right_corner_resizes_without_turning_close_into_an_edge() {
+        assert_eq!(
+            resize_target(BOUNDS, egui::pos2(196.0, 8.0)),
+            Some((
+                egui::ResizeDirection::NorthEast,
+                egui::CursorIcon::ResizeNorthEast
+            ))
+        );
+        assert_eq!(resize_target(BOUNDS, egui::pos2(196.0, 20.0)), None);
+        assert_eq!(resize_target(BOUNDS, egui::pos2(180.0, 4.0)), None);
     }
 
     #[test]
