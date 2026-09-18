@@ -204,7 +204,11 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             // The label belongs on the button itself; the empty first cell keeps it aligned with
             // the widgets of value-carrying knobs without repeating the label beside it.
             ui.label("");
-            if ui.button(label.as_str()).clicked() {
+            if ui
+                .button(label.as_str())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
                 *clicked = true;
                 true
             } else {
@@ -239,12 +243,27 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             ui.add(widget).changed()
         }
         Knob::Toggle { label, value } => {
-            ui.label(label.as_str());
-            ui.checkbox(value, "").changed()
+            let label = ui
+                .add(
+                    egui::Label::new(label.as_str())
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let checkbox = ui
+                .checkbox(value, "")
+                .labelled_by(label.id)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if label.clicked() {
+                *value = !*value;
+            }
+            label.clicked() || checkbox.changed()
         }
         Knob::Color { label, value } => {
             ui.label(label.as_str());
-            ui.color_edit_button_srgba(value).changed()
+            ui.color_edit_button_srgba(value)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .changed()
         }
         Knob::Select {
             label,
@@ -258,7 +277,10 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
                 ChoiceStyle::Radio => {
                     ui.vertical(|ui| {
                         for (i, opt) in options.iter().enumerate() {
-                            changed |= ui.radio_value(value, i, opt.as_str()).changed();
+                            changed |= ui
+                                .radio_value(value, i, opt.as_str())
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .changed();
                         }
                     });
                 }
@@ -272,6 +294,7 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
                                 let active = *value == i;
                                 if ui
                                     .add(egui::Button::new(opt.as_str()).selected(active))
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
                                     .clicked()
                                     && !active
                                 {
@@ -288,9 +311,14 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
                         .selected_text(selected)
                         .show_ui(ui, |ui| {
                             for (i, opt) in options.iter().enumerate() {
-                                changed |= ui.selectable_value(value, i, opt.as_str()).changed();
+                                changed |= ui
+                                    .selectable_value(value, i, opt.as_str())
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .changed();
                             }
-                        });
+                        })
+                        .response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                 }
             }
             changed
@@ -356,7 +384,9 @@ fn render_icon_option(
     };
     let rendered = button.selected(active).atom_ui(ui);
     let icon_rect = rendered.rect(icon_id);
-    let mut response = rendered.response;
+    let mut response = rendered
+        .response
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     if !show_caption {
         let tooltip = format!("{group}: {option}");
         response.widget_info(|| {
@@ -476,6 +506,142 @@ fn render_pad2d(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coloured_icon_buttons_keep_colours_across_interaction_states() {
+        use egui_kittest::kittest::Queryable;
+        let icon = Icon::from_svg_colored(include_bytes!("../tests/fixtures/two-colour.svg"));
+        let knobs = vec![Knob::IconButtons {
+            label: "Language".into(),
+            value: 0,
+            options: vec!["First".into(), "Second".into()],
+            icons: vec![icon.clone(), icon],
+        }];
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, knobs| {
+                render_global_toolbar(ui, knobs);
+            },
+            knobs,
+        );
+        harness.run();
+        let first = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Language: First")
+            .rect();
+        let second = harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Language: Second")
+            .rect();
+        let before = harness.render().unwrap();
+        for rect in [first, second] {
+            let y = rect.center().y as u32;
+            let x = rect.center().x as u32;
+            assert_eq!(before.get_pixel(x - 4, y).0, [255, 0, 0, 255]);
+            assert_eq!(before.get_pixel(x + 4, y).0, [0, 0, 255, 255]);
+        }
+        let chrome = |image: &image::RgbaImage, rect: egui::Rect| {
+            image
+                .get_pixel((rect.left() + 1.0) as u32, rect.center().y as u32)
+                .0
+        };
+        assert_ne!(chrome(&before, first), chrome(&before, second));
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Language: Second")
+            .hover();
+        harness.run();
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        let hovered = harness.render().unwrap();
+        assert_ne!(chrome(&before, second), chrome(&hovered, second));
+        assert_eq!(
+            hovered
+                .get_pixel(second.center().x as u32 - 4, second.center().y as u32)
+                .0,
+            [255, 0, 0, 255]
+        );
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Language: Second")
+            .click();
+        harness.run();
+        assert!(matches!(
+            harness.state()[0],
+            Knob::IconButtons { value: 1, .. }
+        ));
+        let selected = harness.render().unwrap();
+        assert_eq!(
+            selected
+                .get_pixel(second.center().x as u32 + 4, second.center().y as u32)
+                .0,
+            [0, 0, 255, 255]
+        );
+    }
+
+    #[test]
+    fn toggle_label_and_checkbox_each_toggle_once_and_show_pointer() {
+        use egui_kittest::kittest::Queryable;
+        let state = (
+            vec![Knob::Toggle {
+                label: "Alternate colour".into(),
+                value: false,
+            }],
+            0,
+            true,
+        );
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, (knobs, changes, enabled)| {
+                ui.add_enabled_ui(*enabled, |ui| {
+                    if render_knobs(ui, knobs) {
+                        *changes += 1;
+                    }
+                });
+            },
+            state,
+        );
+        harness.run();
+        let label = harness.get_by_role(egui::accesskit::Role::Label).rect();
+        let checkbox = harness.get_by_role(egui::accesskit::Role::CheckBox).rect();
+        for (at, rect) in [label, checkbox].into_iter().enumerate() {
+            harness.hover_at(rect.center());
+            harness.step();
+            assert_eq!(
+                harness.output().platform_output.cursor_icon,
+                egui::CursorIcon::PointingHand
+            );
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: rect.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run();
+            assert_eq!(harness.state().1, at + 1);
+            assert!(
+                matches!(harness.state().0[0], Knob::Toggle { value, .. } if value == (at == 0))
+            );
+        }
+        harness.state_mut().2 = false;
+        harness.run();
+        harness.hover_at(label.center());
+        harness.step();
+        assert_ne!(
+            harness.output().platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        for rect in [label, checkbox] {
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: rect.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run();
+        }
+        assert_eq!(harness.state().1, 2);
+    }
 
     #[test]
     fn wrapped_buttons_reserve_their_height_so_the_next_knob_sits_below_them() {

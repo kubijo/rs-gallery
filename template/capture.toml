@@ -55,6 +55,15 @@ scene = "knobs::color"
 knobs = { tint = "#E8A33D" }
 
 [[shot]]
+name = "writeback-light"
+scene = "knobs::writeback"
+
+[[shot]]
+name = "writeback-dark"
+scene = "knobs::writeback"
+globals = { Theme = "Dark" }
+
+[[shot]]
 name = "knobs-everything"
 scene = "knobs::group"
 size = "480x240"
