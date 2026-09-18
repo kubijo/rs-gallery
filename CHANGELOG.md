@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-18
+
 - **Colour SVG icons.** Icon controls can preserve solid SVG fill colours and opacity, with an optional circular crop.
   Existing monochrome icons are unchanged:
 
