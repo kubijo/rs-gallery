@@ -219,7 +219,8 @@ impl<'a> GlobalControls<'a> {
     /// A typed SVG icon choice in the window bar.
     ///
     /// Each option is `(stable label, icon, value)`. Labels identify captures and reloads and
-    /// provide tooltips and accessibility names. Reuse icons built with [`Icon::from_svg`].
+    /// provide tooltips and accessibility names. Reuse tinted icons from [`Icon::from_svg`] or
+    /// original-colour icons from [`Icon::from_svg_colored`], optionally cropped with [`Icon::rounded`].
     pub fn icon_buttons<T: Clone + PartialEq>(
         &mut self,
         label: &str,

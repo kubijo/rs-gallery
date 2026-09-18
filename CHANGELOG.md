@@ -5,6 +5,22 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Colour SVG icons.** Icon controls can preserve solid SVG fill colours and opacity, with an optional circular crop.
+  Existing monochrome icons are unchanged:
+
+  ```rust
+  let flag = Icon::from_svg_colored(include_bytes!("flag.svg")).rounded();
+  ```
+
+- **Larger click targets.** Sidebar rows are clickable across their width; checkbox labels and panel headers toggle
+  their controls. Clickable gallery controls show a pointer cursor.
+
+- **Keyboard navigation reveals scenes.** Tab and Shift+Tab expand the selected scene's parent folders.
+
+- **Readable demo themes.** Theme-dependent text examples use matching checkerboards.
+
+- **Dependency fixes.** Update rustls past RUSTSEC-2026-0285 and refresh compatible camino, clap, and ureq releases.
+
 ## [0.11.0] - 2026-09-13
 
 - **Canvas containment.** Scene paint remains inside the preview. The generated demo carries the clipping regression

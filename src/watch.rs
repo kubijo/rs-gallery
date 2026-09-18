@@ -844,7 +844,11 @@ pub(crate) fn render_build_report(ui: &mut egui::Ui, failure: &BuildFailure) {
                 .strong(),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Close").clicked() {
+            if ui
+                .button("Close")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
                 ui.close();
             }
         });

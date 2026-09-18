@@ -202,9 +202,13 @@ fn translated(ctx: &mut SceneCtx, ui: &mut Ui, globals: &crate::Globals) {
 
 `prepare` styles content inside stages, including stages in two-argument scenes. Gallery keeps its canvas and stage
 chrome on the host style. With `Linked`, register the type using `gallery::catalog_globals!(Globals)`. `icon_buttons`
-places monochrome SVG choices in the window bar; each option's label identifies captures and reloads and supplies its
-tooltip and accessibility name. Other controls stay in the controls panel. Apply themes with `Ui::set_style` so they
-remain inside staged content.
+places SVG choices in the window bar; each option's label identifies captures and reloads and supplies its tooltip and
+accessibility name. Other controls stay in the controls panel. Apply themes with `Ui::set_style` so they remain inside
+staged content.
+
+Use `Icon::from_svg_colored(include_bytes!("flag.svg"))` to preserve solid fill colours and opacity; append `.rounded()`
+for a circular crop. `Icon::from_svg` keeps the existing tinted monochrome rendering. Gradients and patterns in coloured
+icons fall back to the supplied tint.
 
 `CatalogGlobals` requires `Default + Serialize + DeserializeOwned`. Gallery validates and stores postcard bytes after
 every change. A reload starts with the new type's default and restores compatible controls by label, so new code never

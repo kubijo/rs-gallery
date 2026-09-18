@@ -14,8 +14,8 @@ struct GlobalIcons {
 static ICONS: LazyLock<GlobalIcons> = LazyLock::new(|| GlobalIcons {
     light: Icon::from_svg(include_bytes!("assets/theme-light.svg")),
     dark: Icon::from_svg(include_bytes!("assets/theme-dark.svg")),
-    english: Icon::from_svg(include_bytes!("assets/language-english.svg")),
-    finnish: Icon::from_svg(include_bytes!("assets/language-finnish.svg")),
+    english: Icon::from_svg_colored(include_bytes!("assets/language-english.svg")).rounded(),
+    finnish: Icon::from_svg_colored(include_bytes!("assets/language-finnish.svg")).rounded(),
 });
 
 #[derive(Clone, Copy, Default, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -39,6 +39,11 @@ pub(crate) struct Globals {
 }
 
 impl Globals {
+    /// Match a transparent stage's backdrop to the content theme.
+    pub(crate) fn stage(&self, stage: impl Into<StageSpec>) -> StageSpec {
+        stage.into().checkerboard(self.checkerboard())
+    }
+
     fn checkerboard(&self) -> Checkerboard {
         match self.theme {
             Theme::Light => Checkerboard::Light,
@@ -92,15 +97,11 @@ fn theme_and_language(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
         ),
     };
 
-    ctx.stage(
-        ui,
-        Stage::Fixed(egui::vec2(440.0, 150.0)).checkerboard(globals.checkerboard()),
-        |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading(heading);
-                ui.add_space(8.0);
-                ui.label(description);
-            });
-        },
-    );
+    ctx.stage(ui, globals.stage((440.0, 150.0)), |ui| {
+        ui.vertical_centered(|ui| {
+            ui.heading(heading);
+            ui.add_space(8.0);
+            ui.label(description);
+        });
+    });
 }

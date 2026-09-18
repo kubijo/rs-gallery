@@ -513,6 +513,8 @@ pub struct Gallery<S: SceneSource> {
     /// A `--scene` request: a whole key, already matched by the launcher,
     /// and selected on the first frame once the tree exists.
     scene_request: Option<String>,
+    /// Reveal a changed selection when the sidebar next draws.
+    reveal_pending: bool,
     /// The rebuild cycle to show, `Some` under `--hot`: a run with no watcher says nothing.
     hot: Option<HotStatus>,
     /// The hot watcher is stopped before eframe starts tearing its renderers down.
@@ -554,6 +556,7 @@ impl<S: SceneSource> Gallery<S> {
             perf_pos: None,
             frames_left: None,
             scene_request: None,
+            reveal_pending: false,
             hot: None,
             watcher: None,
             shutdown: None,
@@ -689,9 +692,9 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             self.state.show_perf = false;
         }
         let manifest = self.source.manifest();
-        let mut reveal_selected = self.scene_request.take();
-        if let Some(key) = &reveal_selected {
-            self.state.selected = Some(key.clone());
+        if let Some(key) = self.scene_request.take() {
+            self.state.selected = Some(key);
+            self.reveal_pending = true;
         }
         let tree = build_tree(&manifest);
 
@@ -705,7 +708,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             let mut order = Vec::new();
             visible_scenes(&tree, &manifest.scenes, "", false, &mut order);
             self.state.selected = order.first().map(|&i| scene_key(&manifest.scenes[i]));
-            reveal_selected.clone_from(&self.state.selected);
+            self.reveal_pending = true;
         }
 
         handle_shortcuts(ui.ctx(), &mut self.state);
@@ -777,24 +780,19 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
 
         let icons = self.icons.as_ref();
         if self.state.show_scenes {
+            let reveal_selected = self
+                .reveal_pending
+                .then(|| self.state.selected.clone())
+                .flatten();
+            self.reveal_pending = false;
             egui::Panel::left("gallery-scenes")
                 .frame(egui::Frame::NONE.fill(PANEL_BG))
                 .show(ui, |ui| {
+                    if panel_toggle(ui, "Scenes", Caret::Left, true)
+                        .on_hover_text("Collapse scenes (Cmd+Shift+L)")
+                        .clicked()
                     {
-                        let mut header = header_bar(ui);
-                        header.label(header_title("Scenes"));
-                        // Collapse caret hugs the panel's canvas-facing (right) edge.
-                        header.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if caret(ui, Caret::Left)
-                                    .on_hover_text("Collapse scenes (Cmd+Shift+L)")
-                                    .clicked()
-                                {
-                                    self.state.show_scenes = false;
-                                }
-                            },
-                        );
+                        self.state.show_scenes = false;
                     }
                     egui::Frame::NONE
                         .inner_margin(egui::Margin::same(8))
@@ -857,17 +855,11 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 controls = controls.default_size(width);
             }
             controls.show(ui, |ui| {
+                if panel_toggle(ui, "Controls", Caret::Right, false)
+                    .on_hover_text("Collapse controls (Cmd+Shift+R)")
+                    .clicked()
                 {
-                    let mut header = header_bar(ui);
-                    // Collapse caret hugs the panel's canvas-facing (left) edge.
-                    if caret(&mut header, Caret::Right)
-                        .on_hover_text("Collapse controls (Cmd+Shift+R)")
-                        .clicked()
-                    {
-                        self.state.show_controls = false;
-                    }
-                    header.add_space(2.0);
-                    header.label(header_title("Controls"));
+                    self.state.show_controls = false;
                 }
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::same(8))
@@ -927,7 +919,11 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
                                 ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
-                                if ui.button("Clear").clicked() {
+                                if ui
+                                    .button("Clear")
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                                {
                                     self.state.actions.clear();
                                 }
                             },
@@ -955,16 +951,21 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         if scene.is_none() {
                             return;
                         }
-                        ui.selectable_value(&mut self.state.show_source, true, "Source");
-                        ui.selectable_value(&mut self.state.show_source, false, "Preview");
+                        ui.selectable_value(&mut self.state.show_source, true, "Source")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        ui.selectable_value(&mut self.state.show_source, false, "Preview")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
                         #[cfg(debug_assertions)]
-                        ui.checkbox(&mut self.state.debug, "Debug");
+                        ui.checkbox(&mut self.state.debug, "Debug")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
                         #[cfg(not(debug_assertions))]
                         ui.add_enabled(false, egui::Checkbox::new(&mut self.state.debug, "Debug"))
                             .on_disabled_hover_text("egui's debug overlay is a dev-build feature");
                         ui.checkbox(&mut self.state.show_perf, "Perf")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .on_hover_text("Performance window (⌘B)");
                         ui.checkbox(&mut self.state.show_actions, "Actions")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .on_hover_text("What the scene reports happening");
                     });
                 }
@@ -1012,6 +1013,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                 }
             });
 
+        let previous_selection = self.state.selected.clone();
         handle_navigation(
             ui.ctx(),
             &mut self.state,
@@ -1019,6 +1021,7 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
             &manifest.scenes,
             text_edit_focus,
         );
+        self.reveal_pending |= self.state.selected != previous_selection;
         window::resize(ui.ctx());
 
         // Timed here, not read from `frame.info().cpu_usage`: eframe reports
@@ -1337,10 +1340,29 @@ fn render_node(
             } else {
                 header.default_open(!collapsed.folds(name, at_root))
             };
+            let style = ui.style().clone();
+            // egui ties full-width headers to frames; keep the hit area without the paint.
+            let visuals = ui.visuals_mut();
+            visuals.collapsing_header_frame = true;
+            for widget in [
+                &mut visuals.widgets.noninteractive,
+                &mut visuals.widgets.inactive,
+                &mut visuals.widgets.hovered,
+                &mut visuals.widgets.active,
+                &mut visuals.widgets.open,
+            ] {
+                widget.weak_bg_fill = egui::Color32::TRANSPARENT;
+                widget.bg_stroke = egui::Stroke::NONE;
+            }
             let resp = header.show(ui, |ui| {
+                ui.set_style(style.clone());
                 render_node(ui, child, sidebar, selected, descend, false);
             });
-            let hr = resp.header_response.rect;
+            ui.set_style(style);
+            let hr = resp
+                .header_response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .rect;
             let rect = egui::Rect::from_center_size(
                 egui::pos2(hr.left() + ICON_SIZE / 2.0, hr.center().y),
                 egui::Vec2::splat(ICON_SIZE),
@@ -1466,17 +1488,29 @@ fn leaf(
 ) {
     let key = scene_key(scene);
     let is_selected = selected.as_deref() == Some(key.as_str());
-    let clicked = ui
-        .horizontal(|ui| {
-            // Snug the icon ↔ label gap: trim the item spacing and the label's own left inset.
-            // Leave `button_padding.y` alone so the row height (vertical spacing) is unchanged.
-            let spacing = ui.spacing_mut();
-            spacing.item_spacing.x = 4.0;
-            spacing.button_padding.x = 2.0;
-            icons.app.show(ui, ICON_SIZE, SCENE_TINT);
-            ui.selectable_label(is_selected, label)
+    let icon_id = ui.make_persistent_id(("scene-icon", &key));
+    let button = egui::Button::selectable(
+        is_selected,
+        (
+            egui::Atom::custom(icon_id, egui::Vec2::splat(ICON_SIZE)),
+            label,
+        ),
+    )
+    .gap(4.0);
+    let rendered = ui
+        .push_id(&key, |ui| {
+            ui.spacing_mut().button_padding.x = 2.0;
+            button
+                .min_size(egui::vec2(ui.available_width(), 0.0))
+                .atom_ui(ui)
         })
-        .inner
+        .inner;
+    if let Some(rect) = rendered.rect(icon_id) {
+        icons.app.paint(ui.painter(), rect, SCENE_TINT);
+    }
+    let clicked = rendered
+        .response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked();
     if clicked {
         *selected = Some(key);
@@ -1610,28 +1644,60 @@ fn collapsed_panel(
     } else {
         egui::Panel::right(id)
     };
-    let (dir, layout) = if on_left {
-        (
-            Caret::Right,
-            egui::Layout::right_to_left(egui::Align::Center),
-        )
-    } else {
-        (
-            Caret::Left,
-            egui::Layout::left_to_right(egui::Align::Center),
-        )
-    };
+    let dir = if on_left { Caret::Right } else { Caret::Left };
     panel
         .resizable(false)
         .exact_size(RAIL_W)
         .frame(egui::Frame::NONE.fill(PANEL_BG))
         .show(ui, |ui| {
-            header_bar(ui).with_layout(layout, |ui| {
-                if caret(ui, dir).on_hover_text(tooltip).clicked() {
-                    *open = true;
-                }
-            });
+            if panel_toggle(ui, tooltip, dir, on_left)
+                .on_hover_text(tooltip)
+                .clicked()
+            {
+                *open = true;
+            }
         });
+}
+
+/// One hit target for a panel header's caret, title, and remaining width.
+fn panel_toggle(ui: &mut egui::Ui, label: &str, dir: Caret, caret_right: bool) -> egui::Response {
+    let bounds = egui::Rect::from_min_size(
+        ui.max_rect().min,
+        egui::vec2(ui.max_rect().width(), HEADER_H),
+    );
+    let header = header_bar(ui);
+    let response = header
+        .interact(
+            bounds,
+            header.id().with("panel-toggle"),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    let x = if caret_right {
+        bounds.right() - 14.0
+    } else {
+        bounds.left() + 14.0
+    };
+    paint_caret(
+        header.painter(),
+        egui::pos2(x, bounds.center().y),
+        dir,
+        response.hovered(),
+    );
+    if bounds.width() > RAIL_W {
+        let x = bounds.left() + if caret_right { 8.0 } else { 28.0 };
+        header.painter().text(
+            egui::pos2(x, bounds.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(11.0),
+            egui::Color32::WHITE,
+        );
+    }
+    response
 }
 
 /// Which way a collapse [`caret`] points.
@@ -1646,7 +1712,11 @@ pub(crate) enum Caret {
 /// Returns its click response so the caller owns the toggle.
 pub(crate) fn caret(ui: &mut egui::Ui, dir: Caret) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click());
-    let c = rect.center();
+    paint_caret(ui.painter(), rect.center(), dir, resp.hovered());
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn paint_caret(painter: &egui::Painter, c: egui::Pos2, dir: Caret, hovered: bool) {
     let pts = match dir {
         Caret::Right => vec![
             egui::pos2(c.x - 2.0, c.y - 3.0),
@@ -1664,14 +1734,8 @@ pub(crate) fn caret(ui: &mut egui::Ui, dir: Caret) -> egui::Response {
             egui::pos2(c.x, c.y + 3.0),
         ],
     };
-    let color = if resp.hovered() {
-        egui::Color32::WHITE
-    } else {
-        MUTED
-    };
-    ui.painter()
-        .add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let color = if hovered { egui::Color32::WHITE } else { MUTED };
+    painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
 }
 
 /// Apply the gallery's style tweaks onto `style`, in place:
@@ -2378,6 +2442,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tab_reveals_parent_folders_without_holding_them_open() {
+        let gallery = Gallery::new(
+            Fixed(
+                vec![scene("first", "a", false), scene("second", "b", false)],
+                vec![group("a", "Alpha / Nested"), group("b", "Beta / Inner")],
+            ),
+            Settings::new(Renderer::Wgpu).collapsed(true),
+            None,
+            None,
+        );
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_| gallery);
+        harness.run();
+        assert!(harness.query_by_label("First").is_some());
+        assert!(harness.query_by_label("Second").is_none());
+
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        assert!(harness.query_by_label("Second").is_some());
+        assert_eq!(harness.state().state.selected.as_deref(), Some("b::second"));
+
+        harness.get_by_label("Beta").click();
+        harness.get_by_label("Alpha").click();
+        harness.run();
+        assert!(harness.query_by_label("Second").is_none());
+        assert!(harness.query_by_label("First").is_none());
+
+        harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        harness.run();
+        assert!(harness.query_by_label("First").is_some());
+        assert_eq!(harness.state().state.selected.as_deref(), Some("a::first"));
+
+        harness.state_mut().state.show_scenes = false;
+        harness.key_press(egui::Key::Tab);
+        harness.run();
+        assert_eq!(harness.state().state.selected.as_deref(), Some("b::second"));
+        harness.state_mut().state.show_scenes = true;
+        harness.run();
+        assert!(harness.query_by_label("Second").is_some());
+    }
+
     /// Rendered a frame apart, as switching scenes does — within one frame
     /// the parent's own counter would tell them apart and prove nothing.
     #[test]
@@ -2868,6 +2973,133 @@ mod tests {
             collapsed: &Collapsed::Nothing,
             reveal: None,
         }
+    }
+
+    #[test]
+    fn sidebar_rows_include_icons_labels_and_trailing_space() {
+        let scenes = vec![scene("first", "m", false), scene("second", "m", false)];
+        let expected = scene_key(&scenes[1]);
+        let tree = build_tree(&Manifest {
+            scenes: scenes.clone(),
+            groups: vec![group("m", "Components / Nested")],
+        });
+        let icons = Icons::load();
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            move |ui, (selected, filter)| {
+                ui.set_width(240.0);
+                let mut sidebar = sidebar(&scenes, &icons);
+                sidebar.filter = filter;
+                render_node(ui, &tree, &sidebar, selected, false, true);
+            },
+            (None, String::new()),
+        );
+        harness.run();
+        for offset in [6.0, 45.0, 220.0] {
+            harness.state_mut().0 = None;
+            let row = harness.get_by_label("Second").rect();
+            assert!(row.width() > 180.0);
+            let pos = egui::pos2((row.left() + offset).min(row.right() - 2.0), row.center().y);
+            harness.hover_at(pos);
+            harness.step();
+            assert_eq!(
+                harness.output().platform_output.cursor_icon,
+                egui::CursorIcon::PointingHand
+            );
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run();
+            assert_eq!(harness.state().0.as_deref(), Some(expected.as_str()));
+        }
+        let folder = harness.get_by_label("Nested").rect();
+        let pos = egui::pos2(folder.right() - 2.0, folder.center().y);
+        harness.hover_at(pos);
+        harness.step();
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.run();
+        assert!(harness.query_by_label("Second").is_none());
+        harness.state_mut().1 = "second".into();
+        harness.state_mut().0 = None;
+        harness.run();
+        assert!(harness.query_by_label("First").is_none());
+        let row = harness.get_by_label("Second").rect();
+        let pos = egui::pos2(row.right() - 2.0, row.center().y);
+        harness.hover_at(pos);
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        harness.run();
+        assert_eq!(harness.state().0.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn panel_headers_toggle_from_caret_title_and_empty_space() {
+        for (label, dir, right) in [
+            ("Scenes", Caret::Left, true),
+            ("Controls", Caret::Right, false),
+        ] {
+            for x in [14.0, 40.0, 180.0] {
+                let mut harness = egui_kittest::Harness::new_ui_state(
+                    move |ui, changes| {
+                        ui.set_width(240.0);
+                        if panel_toggle(ui, label, dir, right).clicked() {
+                            *changes += 1;
+                        }
+                    },
+                    0,
+                );
+                harness.run();
+                let row = harness.get_by_label(label).rect();
+                let pos = egui::pos2(row.left() + x, row.center().y);
+                harness.hover_at(pos);
+                harness.step();
+                assert_eq!(
+                    harness.output().platform_output.cursor_icon,
+                    egui::CursorIcon::PointingHand
+                );
+                for pressed in [true, false] {
+                    harness.event(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                harness.run();
+                assert_eq!(*harness.state(), 1);
+            }
+        }
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, open| {
+                collapsed_panel(ui, "test-cap", false, "Expand controls", open);
+            },
+            false,
+        );
+        harness.run();
+        harness.get_by_label("Expand controls").click();
+        harness.run();
+        assert!(*harness.state());
     }
 
     #[test]
