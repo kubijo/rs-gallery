@@ -43,12 +43,10 @@ pub(crate) struct Packed {
     cells: Vec<Cell>,
 }
 
-/// A valid sheet and the one uniform scale applied to its panel copies.
 #[derive(Debug)]
 struct Layout {
     packed: Packed,
     panel_sizes: Vec<Size>,
-    scale: f64,
 }
 
 /// The room a panel takes: the caption band above it, and the gutter off its right and bottom
@@ -95,12 +93,10 @@ fn layout(panels: &[Size], limit: u32) -> Result<Layout, Diagnostic> {
         return Ok(Layout {
             packed,
             panel_sizes: panels.to_vec(),
-            scale: 1.0,
         });
     }
 
-    // Find any fit first, then keep the largest known fit. Dimensions are rounded at every probe,
-    // so what is proved to fit here is exactly what will be resized and uploaded later.
+    // Find a fit, then keep the largest scale whose rounded panel sizes still fit.
     let mut upper = 1.0;
     let mut scale = 0.5;
     let (mut lower, mut scaled, mut packed) = loop {
@@ -136,7 +132,6 @@ fn layout(panels: &[Size], limit: u32) -> Result<Layout, Diagnostic> {
     Ok(Layout {
         packed,
         panel_sizes: scaled,
-        scale: lower,
     })
 }
 
@@ -351,7 +346,7 @@ fn place(cells: &[Size], width: u32, height: u32, rule: Heuristic) -> Option<Vec
 /// # Errors
 /// If the panels can't be packed, or the sheet can't be drawn on this renderer.
 pub(crate) fn compose(
-    mut panels: Vec<Panel>,
+    panels: Vec<Panel>,
     session: &crate::render::Session,
     setup: &impl Fn(&egui::Context),
 ) -> Result<image::RgbaImage, Diagnostic> {
@@ -359,27 +354,14 @@ pub(crate) fn compose(
     let Layout {
         packed,
         panel_sizes,
-        scale,
     } = layout(&panel_sizes(&panels), limit)?;
-    if scale < 1.0 {
-        for (panel, size) in panels.iter_mut().zip(panel_sizes) {
-            panel.image = image::imageops::resize(
-                &panel.image,
-                size.width,
-                size.height,
-                image::imageops::FilterType::Lanczos3,
-            );
-        }
-    }
     let packed_size = Size {
         width: packed.width,
         height: packed.height,
     };
     let size = egui::vec2(packed.width as f32, packed.height as f32);
-    // One for one: the packer measured the panels in pixels, so the sheet lays out
-    // in as many points and each capture lands on it at the size it was taken.
     let mut harness = open(size, 1.0, session, setup, |cc, _| {
-        Sheet::new(cc, panels, packed)
+        Sheet::new(cc, panels, packed, panel_sizes, limit)
     })?;
     let wgpu = harness.state().wgpu.clone();
     render_with_backend_errors(wgpu.as_ref(), packed_size, limit, || {
@@ -434,24 +416,46 @@ fn render_with_backend_errors<T>(
 
 /// The sheet as the entire app: every panel where the packer put it, and nothing else.
 struct Sheet {
-    panels: Vec<(String, egui::TextureHandle, Cell)>,
+    panels: Vec<(String, egui::TextureHandle, Cell, Size)>,
     wgpu: Option<eframe::egui_wgpu::RenderState>,
 }
 
 impl Sheet {
-    fn new(cc: &eframe::CreationContext<'_>, panels: Vec<Panel>, packed: Packed) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        panels: Vec<Panel>,
+        packed: Packed,
+        panel_sizes: Vec<Size>,
+        backend_limit: u32,
+    ) -> Self {
+        // egui's upload limit can be smaller than the backend's render-target limit.
+        let limit = cc
+            .egui_ctx
+            .input(|input| input.max_texture_side)
+            .min(backend_limit as usize) as u32;
         let panels = panels
             .into_iter()
             .zip(packed.cells)
-            .map(|(panel, cell)| {
+            .zip(panel_sizes)
+            .map(|((mut panel, cell), display)| {
+                let upload = upload_size(display, limit);
+                if panel.image.width() != upload.width || panel.image.height() != upload.height {
+                    panel.image = image::imageops::resize(
+                        &panel.image,
+                        upload.width,
+                        upload.height,
+                        image::imageops::FilterType::Lanczos3,
+                    );
+                }
                 let size = [panel.image.width() as usize, panel.image.height() as usize];
                 let pixels = egui::ColorImage::from_rgba_unmultiplied(size, panel.image.as_raw());
-                // Scaling, when needed, happened once in image-space above. Drawing the resulting
-                // copy one-for-one keeps the renderer from applying another filter.
-                let texture =
-                    cc.egui_ctx
-                        .load_texture(&panel.name, pixels, egui::TextureOptions::NEAREST);
-                (panel.name, texture, cell)
+                let options = if upload == display {
+                    egui::TextureOptions::NEAREST
+                } else {
+                    egui::TextureOptions::LINEAR
+                };
+                let texture = cc.egui_ctx.load_texture(&panel.name, pixels, options);
+                (panel.name, texture, cell, display)
             })
             .collect();
         Self {
@@ -468,7 +472,7 @@ impl eframe::App for Sheet {
             .show(ui, |ui| {
                 let caption = ui.visuals().weak_text_color();
                 let painter = ui.painter();
-                for (name, texture, cell) in &self.panels {
+                for (name, texture, cell, display) in &self.panels {
                     let left = (cell.x + GUTTER) as f32;
                     let top = (cell.y + GUTTER) as f32;
                     painter.text(
@@ -480,7 +484,7 @@ impl eframe::App for Sheet {
                     );
                     let panel = egui::Rect::from_min_size(
                         egui::pos2(left, top + CAPTION as f32),
-                        texture.size_vec2(),
+                        egui::vec2(display.width as f32, display.height as f32),
                     );
                     // The panels carry their own background, so this only guards against a capture
                     // with transparency letting the sheet show through it.
@@ -496,9 +500,31 @@ impl eframe::App for Sheet {
     }
 }
 
+fn upload_size(size: Size, limit: u32) -> Size {
+    let scale = (f64::from(limit) / f64::from(size.width.max(size.height))).min(1.0);
+    Size {
+        width: (f64::from(size.width) * scale).round().max(1.0) as u32,
+        height: (f64::from(size.height) * scale).round().max(1.0) as u32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_uploads_fit_both_axes_and_keep_small_images_unchanged() {
+        for (width, height, expected) in [
+            (100, 3000, (68, 2048)),
+            (3000, 100, (2048, 68)),
+            (4096, 4096, (2048, 2048)),
+            (100, 100, (100, 100)),
+            (1, 10000, (1, 2048)),
+        ] {
+            let size = upload_size(Size { width, height }, 2048);
+            assert_eq!((size.width, size.height), expected);
+        }
+    }
 
     /// Panels of `sizes`, named by their place in the list.
     fn panels(sizes: &[(u32, u32)]) -> Vec<Panel> {
@@ -690,7 +716,10 @@ mod tests {
             27
         ];
         let layout = layout(&sizes, 8192).expect("27 full-HD panels fit unscaled");
-        assert_eq!(layout.scale, 1.0, "the sheet should not need scaling");
+        assert_eq!(
+            layout.panel_sizes, sizes,
+            "the sheet should not need scaling"
+        );
         assert!(layout.packed.width <= 8192 && layout.packed.height <= 8192);
         assert!(
             layout.packed.width >= 4 * (1920 + GUTTER),
@@ -709,7 +738,7 @@ mod tests {
             4
         ];
         let layout = layout(&sizes, 2048).expect("scaled panel copies fit");
-        assert!(layout.scale < 1.0);
+        assert_ne!(layout.panel_sizes, sizes);
         assert!(layout.packed.width <= 2048 && layout.packed.height <= 2048);
         for (source, scaled) in sizes.iter().zip(&layout.panel_sizes) {
             let width_scale = f64::from(scaled.width) / f64::from(source.width);
@@ -787,6 +816,40 @@ mod tests {
         )
         .expect("the sheet renders through wgpu");
         assert!(image.width() <= limit && image.height() <= limit);
+    }
+
+    #[test]
+    fn smaller_uploads_still_fill_their_sheet_cells_on_wgpu() {
+        let session = crate::render::Session::open(crate::Renderer::Wgpu).unwrap();
+        let colors = [image::Rgba([255, 0, 0, 255]), image::Rgba([0, 0, 255, 255])];
+        let panels: Vec<_> = [(1200, 80), (80, 1200)]
+            .into_iter()
+            .zip(colors)
+            .map(|((width, height), color)| Panel {
+                name: format!("{width}x{height}"),
+                image: image::RgbaImage::from_pixel(width, height, color),
+            })
+            .collect();
+        let layout = layout(&panel_sizes(&panels), session.max_texture_dimension_2d()).unwrap();
+        let image = compose(panels, &session, &|ctx| {
+            ctx.input_mut(|input| input.max_texture_side = 1024);
+        })
+        .expect("panels fit egui's smaller upload limit");
+        for ((cell, size), color) in layout
+            .packed
+            .cells
+            .iter()
+            .zip(layout.panel_sizes)
+            .zip(colors)
+        {
+            assert_eq!(
+                *image.get_pixel(
+                    cell.x + GUTTER + size.width - 10,
+                    cell.y + GUTTER + CAPTION + size.height - 10
+                ),
+                color
+            );
+        }
     }
 
     #[test]

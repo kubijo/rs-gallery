@@ -473,6 +473,93 @@ mod tests {
 
     use super::*;
 
+    // Exercise process exits without rebuilding a consumer crate.
+    #[test]
+    fn headless_cli_fixture() {
+        let Ok(args) = std::env::var("GALLERY_TEST_CLI_ARGS") else {
+            return;
+        };
+        let args: Vec<String> = serde_json::from_str(&args).expect("fixture arguments");
+        let cli = Cli::parse_from(args);
+        let capture = shots(&cli, Utf8Path::new("gallery.toml")).expect("headless fixture");
+        let manifest = crate::Linked.manifest();
+        render::render_with_globals(
+            &manifest,
+            Some(crate::GlobalEntry::of::<
+                crate::scaffold_scenes::globals::Globals,
+            >()),
+            crate::Renderer::Wgpu,
+            &|_| {},
+            &capture,
+        )
+        .unwrap_or_else(|reason| fail(&reason));
+    }
+
+    fn run_cli(args: &[&str]) -> std::process::Output {
+        Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "launcher::tests::headless_cli_fixture",
+                "--nocapture",
+            ])
+            .env(
+                "GALLERY_TEST_CLI_ARGS",
+                serde_json::to_string(args).unwrap(),
+            )
+            .output()
+            .expect("run the CLI fixture")
+    }
+
+    fn succeeds(args: &[&str]) -> std::process::Output {
+        let output = run_cli(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[test]
+    fn combined_headless_modes_keep_generated_recipes_on_stdout() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8Path::from_path(temp.path()).unwrap();
+        let original = dir.join("original.png");
+        let output = succeeds(&[
+            "gallery",
+            "--scene",
+            "scaffold_scenes::knobs::text",
+            "--render",
+            original.as_str(),
+            "--init-capture",
+            "--list-knobs",
+        ]);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!stdout.contains("Gallery wrote"), "{stdout}");
+        assert!(!stdout.contains("Global controls:"), "{stdout}");
+        assert!(stderr.contains("Gallery wrote"), "{stderr}");
+        assert!(stderr.contains("Global controls:"), "{stderr}");
+        let start = stdout.find("# Generated").unwrap();
+        let end = stdout
+            .find("\ntest launcher::tests::headless_cli_fixture")
+            .unwrap();
+        let generated = &stdout[start..end];
+        let recipe: toml::Value = toml::from_str(generated).expect("stdout contains valid TOML");
+        assert_eq!(
+            recipe["shot"][0]["knobs"]["label"].as_str(),
+            Some("edit me")
+        );
+        assert_eq!(recipe["globals"]["Language"].as_str(), Some("English"));
+        let path = dir.join("capture.toml");
+        fs::write(&path, generated).unwrap();
+        succeeds(&["gallery", "--capture", path.as_str()]);
+        assert_eq!(
+            fs::read(original).unwrap(),
+            fs::read(dir.join("renders/text.png")).unwrap()
+        );
+    }
+
     #[test]
     fn the_running_version_is_visible_in_the_terminal_and_window_title() {
         assert_eq!(version_banner(), format!("gallery {VERSION}"));
