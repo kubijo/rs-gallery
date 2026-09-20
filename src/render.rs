@@ -2,9 +2,8 @@
 //! through the same [`render_canvas`] the shell draws with, so a picture holds still
 //! as the chrome around it changes.
 //!
-//! `--render` takes a scene at its defaults; setting knobs takes a [`Recipe`],
-//! which keeps labels containing spaces out of argv and makes a set of states
-//! reviewable and re-runnable.
+//! `--render` accepts knob and global overrides; a [`Recipe`] keeps a set of states
+//! reviewable and re-runnable. Command-line globals override every recipe shot.
 //!
 //! Knobs are declarative-by-use, so an override cannot be seeded up front
 //! — hence the frame protocol in [`draw`]: declare, apply, redraw, capture.
@@ -77,6 +76,32 @@ pub(crate) struct Shot {
 pub(crate) struct KnobOverride {
     pub(crate) key: String,
     pub(crate) value: String,
+}
+
+pub(crate) fn parse_assignment(assignment: &str) -> Result<KnobOverride, String> {
+    let (key, raw) = assignment
+        .split_once('=')
+        .ok_or_else(|| "an override takes LABEL=VALUE".to_owned())?;
+    let value = raw
+        .parse::<toml::Value>()
+        .unwrap_or_else(|_| toml::Value::String(raw.to_owned()));
+    Ok(KnobOverride {
+        key: key.to_owned(),
+        value: scalar(key, &value)?,
+    })
+}
+
+pub(crate) fn merge_overrides(base: &mut Vec<KnobOverride>, overrides: &[KnobOverride]) {
+    for over in overrides {
+        base.retain(|before| before.key != over.key);
+        base.push(over.clone());
+    }
+}
+
+pub(crate) fn merged_overrides(overrides: &[KnobOverride]) -> Vec<KnobOverride> {
+    let mut merged = Vec::new();
+    merge_overrides(&mut merged, overrides);
+    merged
 }
 
 /// The window's own inner size (see `run_with`),
@@ -243,6 +268,7 @@ pub(crate) fn render_with_globals(
                     bytes: file.bytes,
                     settled: file.frames.motion == Motion::Settled,
                     frames: file.frames.drawn,
+                    globals: &file.globals,
                 })
                 .collect(),
             sheet: gathered.as_deref(),
@@ -305,6 +331,7 @@ fn gather(
         },
         // The panels land at the size they were taken, whatever scale took them.
         scale: DEFAULT_SCALE,
+        globals: BTreeMap::new(),
         bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
         // A sheet is drawn once from images already taken; there is nothing for it to settle.
         frames: Frames {
@@ -322,6 +349,7 @@ struct OutputFile {
     scale: f32,
     bytes: u64,
     frames: Frames,
+    globals: BTreeMap<String, ControlValue>,
 }
 
 /// A run's outcome as JSON, for a loop nobody is watching.
@@ -365,6 +393,8 @@ struct ShotReport<'a> {
     settled: bool,
     /// Frames drawn, which for a settled shot is where it went quiet.
     frames: u32,
+    /// Resolved stateful globals, including defaults, keyed by their exact labels.
+    globals: &'a BTreeMap<String, ControlValue>,
 }
 
 /// Dimensions in pixels — a written PNG's, a sheet cell's.
@@ -870,6 +900,11 @@ fn shoot_with_globals(
             scale: shot.scale,
             bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
             frames,
+            globals: harness
+                .state()
+                .globals
+                .as_ref()
+                .map_or_else(BTreeMap::new, |global| control_values(global.knobs())),
         };
         return Ok(Some(ShotOutput { written, image }));
     }
@@ -1159,7 +1194,7 @@ fn choice(options: &[String], raw: &str, label: &str) -> Result<usize, String> {
     match raw.parse::<usize>() {
         Ok(index) if index < options.len() => Ok(index),
         _ => Err(format!(
-            "knob `{label}` has no option `{raw}`. Options: {}",
+            "knob `{label}` has no option `{raw}`. Options: {}. Use --list-knobs to list the controls",
             options.join(" | ")
         )),
     }
@@ -1549,6 +1584,13 @@ enum ControlValue {
     Slider(f32),
 }
 
+fn control_values(knobs: &[Knob]) -> BTreeMap<String, ControlValue> {
+    knobs
+        .iter()
+        .filter_map(|knob| control_value(knob).map(|value| (label(knob).to_owned(), value)))
+        .collect()
+}
+
 fn control_value(knob: &Knob) -> Option<ControlValue> {
     Some(match knob {
         Knob::Button { .. } | Knob::Group { .. } => return None,
@@ -1639,6 +1681,7 @@ mod tests {
                 },
                 scale: DEFAULT_SCALE,
                 bytes: 1,
+                globals: BTreeMap::new(),
                 frames: Frames {
                     drawn: 1,
                     motion: Motion::Settled,
@@ -1652,6 +1695,7 @@ mod tests {
                 },
                 scale: DEFAULT_SCALE,
                 bytes: 1,
+                globals: BTreeMap::new(),
                 frames: Frames {
                     drawn: 1,
                     motion: Motion::Settled,
@@ -1766,6 +1810,30 @@ mod tests {
         );
         assert!(matches!(store[4], Knob::Select { value: 1, .. }));
         assert!(matches!(store[5], Knob::Pad2D { x, y, .. } if x == 0.25 && y == -0.5));
+
+        store.extend([
+            Knob::Group {
+                label: "group".to_owned(),
+            },
+            Knob::Button {
+                label: "action".to_owned(),
+                clicked: true,
+            },
+            Knob::IconButtons {
+                label: "Language".to_owned(),
+                value: 1,
+                options: vec!["English".to_owned(), "Finnish".to_owned()],
+                icons: Vec::new(),
+            },
+        ]);
+        let report = serde_json::to_value(control_values(&store)).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({
+                "caption": "hi", "night": true, "speed": 1.5, "tint": "#ff8800ff",
+                "body": "suv", "offset": "0.25,-0.5", "Language": "Finnish",
+            })
+        );
     }
 
     #[test]
