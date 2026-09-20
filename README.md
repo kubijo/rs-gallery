@@ -332,6 +332,8 @@ frames = 40 # an animated scene draws a different frame each time; pick one
 knobs = { dots = 96, accent = "#6C9CD8" }
 ```
 
+With `--init-capture`, listings and image summaries go to stderr so stdout stays TOML.
+
 A knob or global-control key is its label, or a regex over the labels — the exact label wins, so punctuation like
 `width (chars)` needs no escaping. Choices take an option label, colours a hex string. `just knobs <scene>` prints
 global controls first when the catalog declares them, followed by scene knobs, ready to paste:
