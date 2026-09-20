@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-20
+
 - **Command-line control overrides.** Repeat `--global LABEL=VALUE` with `--render` or `--capture`, and
   `--knob LABEL=VALUE` with `--render`. CLI globals override both root and per-shot recipe globals; capture reports
   record the resolved globals for each shot. Values parse as TOML scalars or fall back to bare strings; quote
