@@ -161,9 +161,12 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
     if let Some(recipe) = &cli.capture {
         // Relative to the config, like the scene globs: both describe the instance, not the shell.
         let recipe = config.parent().unwrap_or(Utf8Path::new(".")).join(recipe);
-        return Some(
-            render::read_recipe(&recipe, cli.out.as_deref()).unwrap_or_else(|reason| fail(&reason)),
-        );
+        let mut capture =
+            render::read_recipe(&recipe, cli.out.as_deref()).unwrap_or_else(|reason| fail(&reason));
+        for shot in &mut capture.shots {
+            render::merge_overrides(&mut shot.globals, &cli.global);
+        }
+        return Some(capture);
     }
     let scene = cli.scene.clone().expect("clap requires --scene for these");
     // `--frames` also drives a windowed profiling run, where any count is meaningful,
@@ -181,8 +184,8 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
                 .map_or(Ok(render::DEFAULT_SIZE), render::parse_size)
                 .unwrap_or_else(|reason| fail(&reason.into())),
             scale,
-            knobs: Vec::new(),
-            globals: Vec::new(),
+            knobs: render::merged_overrides(&cli.knob),
+            globals: render::merged_overrides(&cli.global),
             frames: cli.frames,
             trim: !cli.no_trim,
             // A recipe option: one shot on the command line is drawn as asked.
@@ -196,14 +199,13 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
     })
 }
 
-// This doc comment is the `--help` text, so it reads as instructions rather than as rationale; why
-// knobs are set in a file instead of in flags is in the `render` module's own docs.
 /// An egui component gallery: browse scenes in a window, or render them to PNGs headlessly.
 ///
-/// Knob values are set in a `--capture` recipe rather than in flags.
-/// `--list-knobs` prints the labels a scene declares; `--render` captures one scene as it stands.
+/// `--render` takes `--knob`; `--capture` sets knobs in its recipe. Both take `--global`.
+/// `--list-knobs` prints the control labels and their current values.
 #[derive(Parser)]
 #[command(version)]
+#[command(group(clap::ArgGroup::new("headless").args(["render", "capture", "list_knobs", "init_capture"]).multiple(true)))]
 struct Cli {
     /// Config to read scene globs from [default: <manifest-dir>/gallery.toml]
     #[arg(long, value_name = "PATH")]
@@ -225,9 +227,17 @@ struct Cli {
     #[arg(long, value_name = "N")]
     frames: Option<u32>,
 
-    /// Render one scene's canvas to a PNG, at its default knobs, and exit
+    /// Render one scene's canvas to a PNG and exit
     #[arg(long, value_name = "PATH", requires = "scene")]
     render: Option<Utf8PathBuf>,
+
+    /// Set a catalog global; repeat for more controls (overrides recipe globals)
+    #[arg(long, value_name = "LABEL=VALUE", value_parser = render::parse_assignment, requires = "headless")]
+    global: Vec<render::KnobOverride>,
+
+    /// Set a scene knob; repeat for more controls (capture knobs belong in the recipe)
+    #[arg(long, value_name = "LABEL=VALUE", value_parser = render::parse_assignment, requires = "headless", conflicts_with = "capture")]
+    knob: Vec<render::KnobOverride>,
 
     /// Canvas size to render at [default: 1280x720]
     #[arg(long, value_name = "WxH")]
@@ -473,6 +483,79 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn assignments_parse_like_recipe_scalars() {
+        for (assignment, key, value) in [
+            ("Language=zh-Hans", "Language", "zh-Hans"),
+            ("Enabled=true", "Enabled", "true"),
+            ("Scale=2", "Scale", "2"),
+            ("Scale=1.5", "Scale", "1.5"),
+            ("Text=\"quoted\"", "Text", "quoted"),
+            ("Flat backdrop=true", "Flat backdrop", "true"),
+            (r#"Text="\u0007""#, "Text", "\u{7}"),
+            ("Text=one=two", "Text", "one=two"),
+            ("Text=\"one=two\"", "Text", "one=two"),
+        ] {
+            let parsed = render::parse_assignment(assignment).expect("an assignment");
+            assert_eq!(parsed.key, key);
+            assert_eq!(parsed.value, value);
+        }
+        assert!(
+            render::parse_assignment("Language")
+                .unwrap_err()
+                .contains("LABEL=VALUE")
+        );
+        for assignment in ["Value=[1, 2]", "Value={ x = 1 }", "Value=2026-09-20"] {
+            assert!(
+                render::parse_assignment(assignment)
+                    .unwrap_err()
+                    .contains("takes a string, number or boolean")
+            );
+        }
+    }
+
+    #[test]
+    fn override_flags_require_headless_modes_and_preserve_capture_conflicts() {
+        for args in [
+            vec!["gallery", "--global", "Language=Finnish"],
+            vec!["gallery", "--scene", "orbit", "--knob", "Scale=2"],
+            vec!["gallery", "--capture", "capture.toml", "--knob", "Scale=2"],
+            vec!["gallery", "--capture", "capture.toml", "--size", "100x100"],
+            vec!["gallery", "--capture", "capture.toml", "--scale", "2"],
+            vec!["gallery", "--capture", "capture.toml", "--no-trim"],
+            vec!["gallery", "--capture", "capture.toml", "--scene", "orbit"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+        let error = Cli::try_parse_from([
+            "gallery", "--scene", "orbit", "--render", "o.png", "--global", "Language",
+        ])
+        .err()
+        .expect("a malformed assignment")
+        .to_string();
+        assert!(error.contains("LABEL=VALUE"), "{error}");
+        let shot = one_shot(&[
+            "gallery",
+            "--scene",
+            "orbit",
+            "--init-capture",
+            "--knob",
+            "Scale=bad",
+            "--knob",
+            "Scale=2",
+            "--global",
+            "Language=Finnish",
+        ]);
+        assert_eq!(
+            shot.knobs,
+            vec![render::parse_assignment("Scale=2").unwrap()]
+        );
+        assert_eq!(
+            shot.globals,
+            vec![render::parse_assignment("Language=Finnish").unwrap()]
+        );
+    }
+
     // Exercise process exits without rebuilding a consumer crate.
     #[test]
     fn headless_cli_fixture() {
@@ -521,6 +604,145 @@ mod tests {
     }
 
     #[test]
+    fn cli_globals_reach_render_capture_reports_and_generated_recipes() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8Path::from_path(temp.path()).unwrap();
+        let english = dir.join("english.png");
+        let finnish = dir.join("finnish.png");
+        let scene = "scaffold_scenes::globals";
+        succeeds(&["gallery", "--scene", scene, "--render", english.as_str()]);
+        succeeds(&[
+            "gallery",
+            "--scene",
+            scene,
+            "--render",
+            finnish.as_str(),
+            "--global",
+            "Language=Finnish",
+        ]);
+        let pixels = |path: &Utf8Path| image::open(path).unwrap().to_rgba8();
+        assert_ne!(pixels(&english), pixels(&finnish));
+        for (assignment, message) in [
+            ("Language=Klingon", "--list-knobs"),
+            ("Missing=true", "--list-knobs"),
+            ("Language=true", "has no option"),
+        ] {
+            let output = run_cli(&[
+                "gallery",
+                "--scene",
+                scene,
+                "--render",
+                finnish.as_str(),
+                "--global",
+                assignment,
+            ]);
+            assert!(!output.status.success());
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains(message), "{error}");
+        }
+        let recipe = dir.join("capture.toml");
+        fs::write(
+            &recipe,
+            format!(
+                r#"
+out = "captures"
+size = "1280x720"
+report = "capture.json"
+[globals]
+Language = "English"
+[[shot]]
+name = "inherited"
+scene = "{scene}"
+[[shot]]
+name = "pinned"
+scene = "{scene}"
+[shot.globals]
+Language = "English"
+"#
+            ),
+        )
+        .unwrap();
+        succeeds(&[
+            "gallery",
+            "--capture",
+            recipe.as_str(),
+            "--global",
+            "Language=Klingon",
+            "--global",
+            "Language=Finnish",
+        ]);
+        for name in ["inherited", "pinned"] {
+            assert_eq!(
+                pixels(&dir.join(format!("captures/{name}.png"))),
+                pixels(&finnish)
+            );
+        }
+        let report: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("captures/capture.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["complete"], true);
+        for shot in report["shots"].as_array().unwrap() {
+            assert_eq!(shot["globals"]["Language"], "Finnish");
+            assert_eq!(
+                shot["globals"]["Theme"], "Light",
+                "defaults are recorded too"
+            );
+        }
+        let mut broken_recipe = fs::read_to_string(&recipe).unwrap();
+        broken_recipe.push_str("\n[[shot]]\nname = \"bad\"\nscene = \"no-such-scene\"\n");
+        fs::write(&recipe, broken_recipe).unwrap();
+        let output = run_cli(&[
+            "gallery",
+            "--capture",
+            recipe.as_str(),
+            "--global",
+            "Language=Finnish",
+        ]);
+        assert!(!output.status.success());
+        let report: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("captures/capture.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["complete"], false);
+        assert_eq!(report["requested"], 3);
+        assert_eq!(report["shots"].as_array().unwrap().len(), 2);
+        for shot in report["shots"].as_array().unwrap() {
+            assert_eq!(shot["globals"]["Language"], "Finnish");
+        }
+        let output = succeeds(&[
+            "gallery",
+            "--scene",
+            scene,
+            "--init-capture",
+            "--global",
+            "Language=Finnish",
+        ]);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Language = \"Finnish\""));
+        let output = succeeds(&[
+            "gallery",
+            "--scene",
+            "scaffold_scenes::knobs::toggle",
+            "--init-capture",
+            "--knob",
+            "enabled=false",
+            "--global",
+            "Language=Finnish",
+        ]);
+        let generated = String::from_utf8_lossy(&output.stdout);
+        assert!(generated.contains("enabled = false"), "{generated}");
+        assert!(generated.contains("Language = \"Finnish\""), "{generated}");
+        let output = run_cli(&[
+            "gallery",
+            "--scene",
+            "scaffold_scenes::knobs::toggle",
+            "--list-knobs",
+            "--knob",
+            "enabled=wrong",
+        ]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("is a toggle"));
+    }
+
+    #[test]
     fn combined_headless_modes_keep_generated_recipes_on_stdout() {
         let temp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(temp.path()).unwrap();
@@ -533,6 +755,10 @@ mod tests {
             original.as_str(),
             "--init-capture",
             "--list-knobs",
+            "--knob",
+            "label=a=b",
+            "--global",
+            "Language=Finnish",
         ]);
         let stdout = String::from_utf8(output.stdout).unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
@@ -546,11 +772,8 @@ mod tests {
             .unwrap();
         let generated = &stdout[start..end];
         let recipe: toml::Value = toml::from_str(generated).expect("stdout contains valid TOML");
-        assert_eq!(
-            recipe["shot"][0]["knobs"]["label"].as_str(),
-            Some("edit me")
-        );
-        assert_eq!(recipe["globals"]["Language"].as_str(), Some("English"));
+        assert_eq!(recipe["shot"][0]["knobs"]["label"].as_str(), Some("a=b"));
+        assert_eq!(recipe["globals"]["Language"].as_str(), Some("Finnish"));
         let path = dir.join("capture.toml");
         fs::write(&path, generated).unwrap();
         succeeds(&["gallery", "--capture", path.as_str()]);

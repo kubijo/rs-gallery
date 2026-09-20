@@ -302,7 +302,7 @@ matters for anything a scene measures in device pixels rather than points — a 
 its size while the rest of the picture grows — which is the one thing a window and a capture would otherwise silently
 disagree about.
 
-That uses the scene's default knobs, rarely the state worth seeing. Other states go in a capture recipe;
+That uses the scene's default knobs. Pass `--knob` to render another state, or keep states in a capture recipe;
 `just capture-init <scene>` writes one with the knobs already filled in, and `just capture` renders every shot in it:
 
 ```toml
@@ -332,7 +332,20 @@ frames = 40 # an animated scene draws a different frame each time; pick one
 knobs = { dots = 96, accent = "#6C9CD8" }
 ```
 
-With `--init-capture`, listings and image summaries go to stderr so stdout stays TOML.
+The CLI accepts repeatable `--knob LABEL=VALUE` for `--render` and `--global LABEL=VALUE` for both `--render` and
+`--capture`; capture knobs belong to the recipe because each shot can differ:
+
+```bash
+cargo run -- --scene vehicle --render /tmp/vehicle.png --knob 'sunroof open=true' --global Language=Finnish
+cargo run -- --capture capture.toml --global Language=Finnish
+cargo run -- --scene vehicle --init-capture --knob 'sunroof open=true' --global Language=Finnish
+```
+
+Globals layer from root `[globals]`, through `[shot.globals]`, to command-line `--global` for every shot; repeated
+assignments to the same label use the last value. Assignments split at the first `=`, parsing the value as TOML when
+possible and otherwise as a bare string, so `Scale=2`, `Enabled=true`, `Text='"quoted"'` and `Language=Finnish` need no
+recipe edits. Quote the whole assignment when its label contains spaces. `--init-capture` and `--list-knobs` show the
+overridden values too. With `--init-capture`, listings and image summaries go to stderr so stdout stays TOML.
 
 A knob or global-control key is its label, or a regex over the labels — the exact label wins, so punctuation like
 `width (chars)` needs no escaping. Choices take an option label, colours a hex string. `just knobs <scene>` prints
@@ -353,9 +366,9 @@ scene is shot once it stops asking egui to redraw it, and `frames` is only the c
 never settles: it is captured at the ceiling and marked **still moving** in the run's report, so an unattended loop
 neither hangs nor quietly diffs one arbitrary frame against another.
 
-`report` writes that same outcome as JSON — a record per shot with its name, path, size, `settled` and the frames it
-drew, plus the sheet's path if one was gathered. A loop that renders a set and inspects the results reads that instead
-of scraping the text meant for a person.
+`report` writes that same outcome as JSON — a record per shot with its name, path, size, `settled`, the frames it drew
+and resolved `globals` (including defaults and command-line overrides), plus the sheet's path if one was gathered. A
+loop that renders a set and inspects the results reads that instead of scraping the text meant for a person.
 
 `sheet` gathers the run onto one image beside the shots, so a change across a whole set is one thing to look at rather
 than a directory to click through. The shots still write their own PNGs, and each panel is captioned with the shot that
