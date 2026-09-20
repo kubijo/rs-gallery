@@ -5,6 +5,21 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Command-line control overrides.** Repeat `--global LABEL=VALUE` with `--render` or `--capture`, and
+  `--knob LABEL=VALUE` with `--render`. CLI globals override both root and per-shot recipe globals; capture reports
+  record the resolved globals for each shot. Values parse as TOML scalars or fall back to bare strings; quote
+  assignments whose labels contain spaces.
+
+- **Recipes at the selected state.** `--init-capture` and `--list-knobs` reflect command-line overrides. Generated
+  recipes escape labels and values correctly, and keep multiline group headings as comments. When combined with
+  `--init-capture`, listings and image summaries go to stderr so stdout remains valid TOML.
+
+- **Tall captures keep their full resolution.** Sheet panel textures are downsampled before upload when they exceed
+  egui's texture limit. Individual PNGs and report dimensions stay whole; the sheet retains its packed layout within the
+  backend's limit, so tall catalogues can still produce large sheets.
+
+- **Dependency updates.** Refresh the Rust dependency locks and Nix inputs.
+
 ## [0.12.0] - 2026-09-18
 
 - **Colour SVG icons.** Icon controls can preserve solid SVG fill colours and opacity, with an optional circular crop.
