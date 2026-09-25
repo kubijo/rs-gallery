@@ -97,6 +97,131 @@ pub fn discover_from_env() {
     println!("cargo:rerun-if-env-changed=GALLERY_CONFIG");
     println!("cargo:rerun-if-env-changed=GALLERY_SCENE_GLOBS");
     discover(env_globs());
+    warn_on_shared_rlibs();
+}
+
+/// Warns when historical builds suggest a `cdylib` path dependency's rlib may be shared.
+///
+/// Cargo leaves the hash out of linked output names of a crate that is also a `cdylib`,
+/// so each build of it in one target directory writes the same rlib, whatever its features.
+/// Another workspace building it there without the features the scenes enable overwrites it,
+/// and cargo, trusting its fingerprints, links the scenes against that copy:
+/// the error names an item "configured out" of a crate that plainly has it.
+/// This is best effort: Cargo's artifact layout is internal, the dependency may not have
+/// finished building when this script runs, and old fingerprints don't prove a bad overwrite.
+fn warn_on_shared_rlibs() {
+    let (Ok(manifest_dir), Ok(out_dir)) = (env::var("CARGO_MANIFEST_DIR"), env::var("OUT_DIR"))
+    else {
+        return;
+    };
+    // `OUT_DIR` is `<profile>/build/<unit>/out`, and `deps/` and `.fingerprint/` sit in `<profile>`.
+    let Some(profile) = Utf8Path::new(&out_dir).ancestors().nth(3) else {
+        return;
+    };
+    if !profile.join("deps").is_dir() {
+        return;
+    }
+    for dep in cdylib_path_deps(&Utf8Path::new(&manifest_dir).join("Cargo.toml")) {
+        let rlib = profile.join("deps").join(format!("lib{}.rlib", dep.lib));
+        // Checks and not-yet-built dependencies have no rlib. Watching a missing file
+        // would make every subsequent invocation dirty, even when nothing changed.
+        if !rlib.is_file() {
+            continue;
+        }
+        // If the rlib is already present, an overwrite reruns this diagnostic.
+        println!("cargo:rerun-if-changed={rlib}");
+        let builds = rlib_builds(profile, &dep);
+        if builds > 1 {
+            println!(
+                "cargo:warning=`{}` is also a cdylib, so its rlib has no hash in its name: \
+                 found fingerprints for {builds} library builds that may share `{rlib}`. \
+                 Another build may overwrite it with different features. \
+                 Use a separate Cargo build directory for the scenes \
+                 (normally selected with --target-dir).",
+                dep.package
+            );
+        }
+    }
+}
+
+/// A path dependency built as a `cdylib` as well as a library.
+#[derive(Debug, PartialEq, Eq)]
+struct Cdylib {
+    /// The package name, which its fingerprint directories are named after.
+    package: String,
+    /// The crate name, which its outputs are named after.
+    lib: String,
+}
+
+/// Direct, nonoptional `path` dependencies declaring both a `cdylib` and a Rust library.
+/// Optional dependencies are skipped rather than guessing whether features activate them.
+/// A manifest that doesn't read or parse is skipped: this only ever feeds a warning.
+fn cdylib_path_deps(manifest: &Utf8Path) -> Vec<Cdylib> {
+    let Some(table) = read_toml(manifest) else {
+        return Vec::new();
+    };
+    let dir = manifest.parent().unwrap_or(Utf8Path::new("."));
+    table
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter(|(_, spec)| spec.get("optional").and_then(toml::Value::as_bool) != Some(true))
+        .filter_map(|(_, spec)| spec.get("path")?.as_str())
+        .filter_map(|path| cdylib_at(&dir.join(path).join("Cargo.toml")))
+        .collect()
+}
+
+fn cdylib_at(manifest: &Utf8Path) -> Option<Cdylib> {
+    let table = read_toml(manifest)?;
+    let package = table.get("package")?.get("name")?.as_str()?.to_owned();
+    let lib = table.get("lib")?;
+    let crate_types = lib.get("crate-type")?.as_array()?;
+    let has_cdylib = crate_types
+        .iter()
+        .any(|kind| kind.as_str() == Some("cdylib"));
+    let has_rlib = crate_types
+        .iter()
+        .any(|kind| matches!(kind.as_str(), Some("lib" | "rlib")));
+    if !has_cdylib || !has_rlib {
+        return None;
+    }
+    let lib = lib
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .map_or_else(|| package.replace('-', "_"), str::to_owned);
+    Some(Cdylib { package, lib })
+}
+
+fn read_toml(path: &Utf8Path) -> Option<toml::Table> {
+    toml::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+/// Count historical library fingerprints that appear to be linked builds of `dep`.
+///
+/// Each leaves a fingerprint directory named after the package and its build's hash.
+/// A check-only build leaves one too, but writes a hashed `.rmeta` rather than the rlib,
+/// so those don't count.
+fn rlib_builds(profile: &Utf8Path, dep: &Cdylib) -> usize {
+    let Ok(entries) = profile.join(".fingerprint").read_dir_utf8() else {
+        return 0;
+    };
+    let prefix = format!("{}-", dep.package);
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let Some(hash) = entry.file_name().strip_prefix(&prefix) else {
+                return false;
+            };
+            hash.len() == 16
+                && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && entry.path().join(format!("lib-{}", dep.lib)).is_file()
+                && !profile
+                    .join("deps")
+                    .join(format!("lib{}-{hash}.rmeta", dep.lib))
+                    .is_file()
+        })
+        .count()
 }
 
 fn env_globs() -> Vec<String> {
@@ -507,5 +632,100 @@ mod tests {
             modules.contains("mod good;"),
             "the readable scene still arrives: {modules}"
         );
+    }
+
+    fn ticker_list() -> Cdylib {
+        Cdylib {
+            package: "ticker-list".to_owned(),
+            lib: "ticker_list".to_owned(),
+        }
+    }
+
+    /// Only a crate that is also a `cdylib` loses the hash from its rlib's name,
+    /// and its outputs go by the crate name — `[lib] name` where one is set.
+    #[test]
+    fn only_cdylib_path_dependencies_are_checked() {
+        let root = tree("cdylib-deps", &[]);
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().expect("a parent")).expect("scratch dir");
+            fs::write(path, text).expect("write a manifest");
+        };
+        write(
+            "scenes/Cargo.toml",
+            "[package]\nname = \"scenes\"\n\n[dependencies]\n\
+             widget = { path = \"../widget\", features = [\"scene\"] }\n\
+             renamed = { path = \"../renamed\" }\n\
+             plain = { path = \"../plain\" }\n\
+             optional = { path = \"../optional\", optional = true }\n\
+             cdylib_only = { path = \"../cdylib-only\" }\n\
+             serde = \"1\"\n",
+        );
+        write(
+            "widget/Cargo.toml",
+            "[package]\nname = \"ticker-list\"\n\n[lib]\ncrate-type = [\"cdylib\", \"lib\"]\n",
+        );
+        write(
+            "renamed/Cargo.toml",
+            "[package]\nname = \"clock\"\n\n[lib]\nname = \"deck_clock\"\ncrate-type = [\"cdylib\", \"rlib\"]\n",
+        );
+        write("plain/Cargo.toml", "[package]\nname = \"plain\"\n");
+        write(
+            "optional/Cargo.toml",
+            "[package]\nname = \"optional\"\n\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n",
+        );
+        write(
+            "cdylib-only/Cargo.toml",
+            "[package]\nname = \"cdylib-only\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n",
+        );
+
+        let mut found = cdylib_path_deps(&root.join("scenes/Cargo.toml"));
+        found.sort_by(|a, b| a.package.cmp(&b.package));
+
+        assert_eq!(
+            found,
+            [
+                Cdylib {
+                    package: "clock".to_owned(),
+                    lib: "deck_clock".to_owned(),
+                },
+                ticker_list(),
+            ]
+        );
+    }
+
+    /// The reported failure's target directory: the scenes and another workspace both built
+    /// the widget there, with different features, beside a check and a test build of it.
+    #[test]
+    fn two_builds_writing_one_rlib_are_both_counted() {
+        let root = tree(
+            "contested",
+            &[
+                ".fingerprint/ticker-list-1ef796bcbdaff7c6/lib-ticker_list",
+                ".fingerprint/ticker-list-5b919031d9cb3c55/lib-ticker_list",
+                ".fingerprint/ticker-list-2a11dd0765db6c71/lib-ticker_list",
+                "deps/libticker_list-2a11dd0765db6c71.rmeta",
+                ".fingerprint/ticker-list-2e2051a169a52476/test-lib-ticker_list",
+                ".fingerprint/ticker-list-extra-0123456789abcdef/lib-ticker_list_extra",
+            ],
+        );
+
+        assert_eq!(rlib_builds(&root, &ticker_list()), 2);
+    }
+
+    /// An editor checks the widget constantly, but a check writes a hashed `.rmeta`,
+    /// so a target directory of the scenes' own still holds a single build of the rlib.
+    #[test]
+    fn a_check_beside_the_one_build_is_no_contest() {
+        let root = tree(
+            "dedicated",
+            &[
+                ".fingerprint/ticker-list-1ef796bcbdaff7c6/lib-ticker_list",
+                ".fingerprint/ticker-list-2a11dd0765db6c71/lib-ticker_list",
+                "deps/libticker_list-2a11dd0765db6c71.rmeta",
+            ],
+        );
+
+        assert_eq!(rlib_builds(&root, &ticker_list()), 1);
     }
 }
