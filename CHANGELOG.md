@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-25
+
 - **A warning about potentially shared scene dependency rlibs.** A dependency built as both a Rust library and a
   `cdylib` has an unhashed rlib name, so builds sharing a Cargo build directory can overwrite it with other features.
   `discover_from_env()` now warns when an existing rlib has evidence of multiple builds, naming the crate and file.
