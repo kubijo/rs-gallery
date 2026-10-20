@@ -33,7 +33,7 @@ profile SCENE="" REPORT="00-latest" FRAMES="600":
 
 # Reformat the whole repo.
 format *args:
-    @just in-shell repofmt {{ args }}
+    @nix run .#format -- {{ args }}
 
 # Validate the crate: formatting, repo lint, clippy, and tests under coverage.
 validate:
@@ -51,9 +51,9 @@ tag LEVEL:
 release-check TAG:
     @just in-shell gallery-release check {{ TAG }}
 
-# Report direct dependencies with a newer version available.
+# Report direct dependency updates against the documented exceptions in outdated.toml.
 outdated:
-    @just in-shell cargo outdated --root-deps-only --ignore glow --exit-code 1
+    @just in-shell gallery-outdated
 
 # Upgrade every dependency lock.
 upgrade:

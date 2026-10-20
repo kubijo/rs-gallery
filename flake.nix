@@ -71,9 +71,29 @@
         let
           pkgs = import nixpkgs {
             inherit system;
-            overlays = [ rust-overlay.overlays.default ];
+            overlays = [
+              rust-overlay.overlays.default
+              (final: prev: {
+                # Keep the fixture compiler and coverage tools on the same pinned toolchain.
+                cargo-llvm-cov =
+                  (prev.cargo-llvm-cov.override {
+                    rustPlatform = final.makeRustPlatform {
+                      cargo = rustToolchain;
+                      rustc = rustToolchain;
+                    };
+                  }).overrideAttrs
+                    (old: {
+                      env = (old.env or { }) // {
+                        LLVM_COV = "${rustLlvmTools}/llvm-cov";
+                        LLVM_PROFDATA = "${rustLlvmTools}/llvm-profdata";
+                      };
+                    });
+              })
+            ];
           };
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustLlvmTools = "${rustToolchain}/lib/rustlib/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/bin";
+          softwareVulkanIcd = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json";
           pythonTools = pythonToolsFor pkgs;
           test = import ./nix/test.nix { inherit pkgs; };
 
@@ -118,7 +138,7 @@
                 rustToolchain
                 pkgs.cargo-llvm-cov
                 pkgs.cargo-nextest
-                pkgs.ty
+                pkgs.basedpyright
                 test
                 pythonTools
               ];
@@ -131,7 +151,7 @@
                 "cargo clippy --workspace --all-targets --all-features -- -D warnings"
                 # tools/ is its own uv project and both resolve imports from its root —
                 # something repochk's file-by-file lint never sees.
-                "(cd tools && ty check --python ${pythonTools} . && pytest -q)"
+                "(cd tools && basedpyright --pythonpath ${pythonTools}/bin/python && pytest -q)"
                 {
                   name = "tests under coverage";
                   # One step: the gate keeps going after a failure, and a report built
@@ -171,7 +191,7 @@
               pkgs.uv
               # The pinned one, so what a shell or an editor reports is what the gate enforces.
               (nix-tools.lib.toolPkgsFor system).ruff
-              pkgs.ty
+              pkgs.basedpyright
               pkgs.samply
               pkgs.binutils
               pkgs.pkg-config
@@ -187,6 +207,8 @@
               pkgs.libxi
               pkgs.libxrandr
             ];
+            # Make headless Vulkan available alongside the host's GPU drivers.
+            VK_ADD_DRIVER_FILES = lib.optionalString pkgs.stdenv.hostPlatform.isLinux softwareVulkanIcd;
           };
         }
       );

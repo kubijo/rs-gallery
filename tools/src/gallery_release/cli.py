@@ -61,7 +61,9 @@ def verify(tag: str) -> str:
 
 
 @app.command()
-def check(tag: Annotated[str, typer.Argument(help="the tag to hold the repo to, e.g. v0.1.0")]):
+def check(
+    tag: Annotated[str, typer.Argument(help="the tag to hold the repo to, e.g. v0.1.0")],
+) -> None:
     """Does this tag name what the manifests and the CHANGELOG say?"""
     try:
         verify(tag)
@@ -74,7 +76,7 @@ def check(tag: Annotated[str, typer.Argument(help="the tag to hold the repo to, 
 
 
 @app.command()
-def tag(level: Annotated[Level, typer.Argument(help="which part of the version moves")]):
+def tag(level: Annotated[Level, typer.Argument(help="which part of the version moves")]) -> None:
     """Bump, show what that comes to, and — on confirmation — commit and tag."""
     try:
         _cut(level)
@@ -115,7 +117,7 @@ def _cut(level: Level) -> None:
 
     out.rule("[bold]checking the release it came to")
     verify(f"v{version}")
-    _run_release_checks(here)
+    run_release_checks(here)
 
     run("git", "add", "-A", cwd=here)
     run("git", "commit", "-q", "-m", f"release: v{version}", cwd=here)
@@ -131,7 +133,7 @@ def _cut(level: Level) -> None:
     )
 
 
-def _run_release_checks(here: Path) -> None:
+def run_release_checks(here: Path) -> None:
     for recipe in ("validate", "audit", "outdated"):
         out.rule(f"[bold]{recipe}")
         run("just", recipe, cwd=here)

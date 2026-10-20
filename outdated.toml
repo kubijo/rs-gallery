@@ -1,0 +1,10 @@
+# Exact upgrades accepted by `just outdated`. New findings and unused exceptions are errors.
+# Compatible updates are always checked, including for the packages listed here.
+[[exceptions]]
+packages = ["eframe", "egui", "egui_extras", "egui_kittest"]
+project = "0.36.2"
+latest = "0.37.0"
+reason = """
+The current egui_ltreeview and egui-elegance releases require the existing egui generation.
+Upgrade the shell and test helpers together when those scene dependencies support the newer one.
+"""

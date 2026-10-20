@@ -4,6 +4,7 @@ The shape mirrors what samply saves: library-relative addresses as frame names, 
 through `funcTable.resource` → `resourceTable.lib` → `libs`.
 """
 
+from gallery_perf.profile import Profile
 from gallery_perf.symbolicate import (
     addresses_by_lib,
     apply_symbols,
@@ -15,7 +16,7 @@ LIBC = "/lib/libc.so.6"
 APP = "/app/gallery"
 
 
-def _profile() -> dict:
+def _profile() -> Profile:
     """Two libraries whose frames sit at the same offset, plus one already-named func.
 
     Offset `0x10` exists in both, which is the whole reason addresses are kept per library: the
@@ -28,6 +29,9 @@ def _profile() -> dict:
                 "stringArray": ["0x10", "already::named", "0x7ffd0000"],
                 "funcTable": {"name": [0, 0, 1, 2], "resource": [0, 1, 1, -1]},
                 "resourceTable": {"lib": [0, 1]},
+                "frameTable": {"func": []},
+                "stackTable": {"prefix": [], "frame": []},
+                "samples": {"stack": [], "length": 0},
             }
         ],
     }

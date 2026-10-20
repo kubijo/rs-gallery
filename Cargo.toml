@@ -15,10 +15,11 @@ categories = ["gui", "development-tools"]
 camino = { version = "1", features = ["serde1"] }
 cargo_metadata = "0.23"
 egui = { version = "0.36", features = ["serde"] }
+# Native accessibility belongs to the shell, even if egui_kittest stops enabling it for captures.
 eframe = {
    version = "0.36",
    default-features = false,
-   features = ["wgpu", "glow", "default_fonts", "wayland", "x11"]
+   features = ["accesskit", "wgpu", "glow", "default_fonts", "wayland", "x11"]
 }
 winit = { version = "0.30", default-features = false }
 inventory = "0.3"

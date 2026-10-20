@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from gallery_release import cli
@@ -29,11 +31,16 @@ CHANGELOG = f"""# Changelog
 """
 
 
-def test_release_runs_every_gate(monkeypatch, tmp_path):
-    calls = []
-    monkeypatch.setattr(cli, "run", lambda *command, cwd: calls.append((command, cwd)))
+def test_release_runs_every_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[tuple[tuple[str, ...], Path]] = []
 
-    cli._run_release_checks(tmp_path)
+    def run(*command: str, cwd: Path) -> str:
+        calls.append((command, cwd))
+        return ""
+
+    monkeypatch.setattr(cli, "run", run)
+
+    cli.run_release_checks(tmp_path)
 
     assert calls == [
         (("just", "validate"), tmp_path),
@@ -68,7 +75,7 @@ def test_a_version_counts_as_documented_only_with_a_dated_heading_of_its_own():
     assert not documented(CHANGELOG, "2026-08-14")
 
 
-def test_a_rewrite_that_matched_once_lands(tmp_path):
+def test_a_rewrite_that_matched_once_lands(tmp_path: Path) -> None:
     manifest = tmp_path / "Cargo.toml"
     manifest.write_text('[workspace.package]\nversion = "0.1.0"\nedition = "2024"\n')
 
@@ -85,7 +92,9 @@ def test_a_rewrite_that_matched_once_lands(tmp_path):
     ],
     ids=["missing", "twice"],
 )
-def test_a_rewrite_that_did_not_match_exactly_once_is_a_fault(tmp_path, manifest):
+def test_a_rewrite_that_did_not_match_exactly_once_is_a_fault(
+    tmp_path: Path, manifest: str
+) -> None:
     path = tmp_path / "Cargo.toml"
     path.write_text(manifest)
 
@@ -93,7 +102,7 @@ def test_a_rewrite_that_did_not_match_exactly_once_is_a_fault(tmp_path, manifest
         rewrite(path, VERSION_LINE, 'version = "0.2.0"')
 
 
-def test_dating_unreleased_keeps_a_fresh_section_for_the_next_release(tmp_path):
+def test_dating_unreleased_keeps_a_fresh_section_for_the_next_release(tmp_path: Path) -> None:
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text(CHANGELOG)
 
