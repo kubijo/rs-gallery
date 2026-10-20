@@ -6,6 +6,34 @@ all-features = true
 
 [advisories]
 version = 2
+unused-ignored-advisory = "deny"
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0370"
+reason = """
+The native AccessKit/AT-SPI stack requires zvariant through accesskit_atspi_common,
+atspi-common and zbus. No compatible migration preserves accessibility yet.
+Remove this exception when that stack adopts zbus 6's wire types.
+Upstream: https://github.com/z-galaxy/zbus/issues/2043
+"""
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0371"
+reason = """
+AT-SPI and zbus require zbus_names. Its standalone releases are all unmaintained,
+and the compatible accessibility stack has not migrated to zbus 6's names module.
+Remove this exception when the AccessKit/AT-SPI dependency chain has migrated.
+Upstream: https://github.com/z-galaxy/zbus/issues/2043
+"""
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0372"
+reason = """
+The accessibility stack's zvariant dependency requires zvariant_derive. Updating
+the standalone derive crate cannot resolve this unmaintained-package advisory.
+Remove this exception with the AccessKit/AT-SPI migration to zbus 6's derives.
+Upstream: https://github.com/z-galaxy/zbus/issues/2043
+"""
 
 [licenses]
 version = 2

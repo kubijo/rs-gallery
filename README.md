@@ -394,6 +394,14 @@ dylib is what `--hot` swaps without restarting — still one crate.
 Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` proc-macro), `gallery-build` (the
 `build.rs` helper).
 
+## Dependency compatibility and accessibility advisories
+
+Gallery and scenes use compatible egui 0.36 dependencies. Native accessibility uses `eframe/accesskit`, and runtime
+capture uses `egui_kittest`. `gallery-build` has no accessibility stack.
+
+The unresolved RUSTSEC-2026-0370, RUSTSEC-2026-0371 and RUSTSEC-2026-0372 have documented exceptions in `deny.toml`,
+pending an upstream AccessKit/AT-SPI migration to zbus 6. Accessibility and checks for other findings remain enabled.
+
 ## Cutting a release
 
 Write the notes under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) as the work lands, then, from a clean `main`:

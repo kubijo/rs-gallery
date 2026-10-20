@@ -11,6 +11,7 @@ dependencies = ["typer>=0.12", "rich>=13"]
 [project.scripts]
 gallery-perf = "gallery_perf.cli:main"
 gallery-release = "gallery_release.cli:main"
+gallery-outdated = "gallery_release.outdated:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -21,6 +22,11 @@ packages = ["src/gallery_perf", "src/gallery_release"]
 
 [dependency-groups]
 dev = ["pytest>=8"]
+
+[tool.basedpyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.14"
+include = ["src", "tests"]
 
 [tool.ruff]
 line-length = 100

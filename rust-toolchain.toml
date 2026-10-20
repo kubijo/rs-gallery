@@ -4,7 +4,7 @@
 [toolchain]
 # A version rather than `stable`, so a release lands
 # as a deliberate bump, not on the day it ships.
-channel = "1.97.1"
+channel = "1.99.1"
 profile = "minimal"
 # llvm-tools-preview carries the llvm-profdata
 # that cargo-llvm-cov reports coverage with.

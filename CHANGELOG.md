@@ -5,6 +5,27 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Rust toolchain.** Update the shared rustup/Nix toolchain pin to Rust 1.99.1.
+
+- **Formatting and coverage tooling.** `just format` runs the formatter app without constructing the full dev shell.
+  Build and test `cargo-llvm-cov` with the repository's pinned Rust toolchain so its coverage profile format matches its
+  bundled LLVM tools; package tests remain enabled.
+
+- **Headless Vulkan in the Linux dev shell.** Expose Mesa's software Vulkan driver alongside the host's drivers so wgpu
+  captures can find an adapter without a window.
+
+- **Explicit native accessibility.** Enable `eframe/accesskit` directly instead of relying only on the runtime capture
+  helper's feature forwarding. Existing behavior and egui 0.36 compatibility are preserved. Document the
+  AccessKit/AT-SPI migration required to remove the deprecated zbus 5 dependencies. RUSTSEC-2026-0370, RUSTSEC-2026-0371
+  and RUSTSEC-2026-0372 remain unresolved, with documented per-advisory exceptions for their upstream blockers. Other
+  findings still fail the audit, and obsolete exceptions are errors.
+
+- **Dependency update policy.** Document the deferred egui upgrade in `outdated.toml`. `just outdated` accepts only that
+  exact upgrade; compatible updates, other findings and obsolete exceptions still fail locally and in CI.
+
+- **Strict Python type checking.** Replace `ty` with `basedpyright` in the dev shell and validation, check the Python
+  tools and tests in strict mode, and run those checks in CI.
+
 ## [0.13.1] - 2026-09-25
 
 - **A warning about potentially shared scene dependency rlibs.** A dependency built as both a Rust library and a

@@ -6,16 +6,19 @@ instead: three frames stacked gallery → component → egui, sampled at two dep
 
 import gzip
 import json
+from pathlib import Path
 
 from gallery_perf.analyze import breakdown, busiest_thread, crate_of, is_waiting, load
+from gallery_perf.profile import Profile, Thread
 
 
-def _thread(name: str, stacks: list[int]) -> dict:
+def _thread(name: str, stacks: list[int | None]) -> Thread:
     """One thread whose stack 0 → 1 → 2 is gallery → component → egui."""
     return {
         "name": name,
         "stringArray": ["gallery::shell", "app_gallery::animation::orbit", "egui::paint"],
-        "funcTable": {"name": [0, 1, 2]},
+        "funcTable": {"name": [0, 1, 2], "resource": [-1, -1, -1]},
+        "resourceTable": {"lib": []},
         "frameTable": {"func": [0, 1, 2]},
         "stackTable": {"prefix": [None, 0, 1], "frame": [0, 1, 2]},
         "samples": {"stack": stacks, "length": len(stacks)},
@@ -30,26 +33,30 @@ def test_crate_of_reads_the_leading_path_segment():
 
 
 def test_busiest_thread_wins_on_sample_count():
-    profile = {"threads": [_thread("idle", [0]), _thread("main", [2, 2, 1])]}
+    profile: Profile = {"threads": [_thread("idle", [0]), _thread("main", [2, 2, 1])]}
     busiest = busiest_thread(profile)
     assert busiest is not None
-    assert busiest["name"] == "main"
+    assert busiest.get("name") == "main"
 
 
 def test_busiest_thread_stays_inside_the_recorded_process():
     # A run that rebuilt while recording put rustc's threads in the profile, out-sampling the app.
-    compiler = _thread("rustc", [2, 2, 2, 1, 1]) | {"processName": "rustc"}
-    app = _thread("gallery", [2, 1]) | {"processName": "gallery"}
+    compiler = _thread("rustc", [2, 2, 2, 1, 1])
+    compiler["processName"] = "rustc"
+    app = _thread("gallery", [2, 1])
+    app["processName"] = "gallery"
     busiest = busiest_thread({"meta": {"product": "gallery"}, "threads": [compiler, app]})
     assert busiest is not None
-    assert busiest["name"] == "gallery"
+    assert busiest.get("name") == "gallery"
 
 
 def test_busiest_thread_falls_back_when_no_thread_matches_the_process():
-    threads = [_thread("worker", [1]) | {"processName": "other"}]
+    worker = _thread("worker", [1])
+    worker["processName"] = "other"
+    threads = [worker]
     busiest = busiest_thread({"meta": {"product": "gallery"}, "threads": threads})
     assert busiest is not None
-    assert busiest["name"] == "worker"
+    assert busiest.get("name") == "worker"
 
 
 def test_busiest_thread_is_none_without_samples():
@@ -78,20 +85,16 @@ def test_samples_parked_on_the_event_loop_are_counted_apart():
 def test_a_c_symbol_is_charged_to_the_library_it_came_from():
     # `__memcpy_avx512` names no crate; without this it lands in one anonymous `[system]` bucket
     # alongside every driver and libc frame, which was 45% of a real recording.
-    thread = _thread("main", [0]) | {
-        "funcTable": {"name": [0, 1, 2], "resource": [0, -1, -1]},
-        "resourceTable": {"lib": [0]},
-    }
+    thread = _thread("main", [0])
+    thread["funcTable"]["resource"] = [0, -1, -1]
+    thread["resourceTable"] = {"lib": [0]}
     thread["stringArray"] = ["__memcpy_avx512", "app_gallery::orbit", "egui::paint"]
     report = breakdown(thread, [{"name": "libc.so.6"}])
     assert report.crates == {"lib:libc.so.6": 1}
 
 
 def test_a_frame_samply_could_not_place_keeps_its_bucket():
-    thread = _thread("main", [0]) | {
-        "funcTable": {"name": [0, 1, 2], "resource": [-1, -1, -1]},
-        "resourceTable": {"lib": []},
-    }
+    thread = _thread("main", [0])
     thread["stringArray"] = ["__memcpy_avx512", "app_gallery::orbit", "egui::paint"]
     report = breakdown(thread, [{"name": "libc.so.6"}])
     assert report.crates == {"[system]": 1}
@@ -119,8 +122,8 @@ def test_self_time_lands_only_on_the_leaf():
     assert "gallery::shell" not in report.own
 
 
-def test_load_reads_gzipped_and_plain(tmp_path):
-    profile = {"threads": [_thread("main", [1])]}
+def test_load_reads_gzipped_and_plain(tmp_path: Path) -> None:
+    profile: Profile = {"threads": [_thread("main", [1])]}
     plain = tmp_path / "profile.json"
     plain.write_text(json.dumps(profile))
     gzipped = tmp_path / "profile.json.gz"

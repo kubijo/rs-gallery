@@ -14,18 +14,21 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
+from typing import cast
+
+from .profile import Library, Profile, Thread
 
 
-def load(path: Path) -> dict:
+def load(path: Path) -> Profile:
     """Read a profile, gzipped or not."""
     if path.suffix == ".gz":
         with gzip.open(path, "rt") as f:
-            return json.load(f)
+            return cast(Profile, json.load(f))
     with path.open() as f:
-        return json.load(f)
+        return cast(Profile, json.load(f))
 
 
-def busiest_thread(profile: dict, process: str | None = None) -> dict | None:
+def busiest_thread(profile: Profile, process: str | None = None) -> Thread | None:
     """The busiest thread of the recorded process — gallery renders on one thread.
 
     Restricted to one process because a recording holds every process the run spawned. Picking the
@@ -100,7 +103,7 @@ class Breakdown:
         own: Counter[str],
         total: int,
         waiting: int = 0,
-    ):
+    ) -> None:
         self.crates = crates
         self.inclusive = inclusive
         self.own = own
@@ -108,7 +111,7 @@ class Breakdown:
         self.waiting = waiting
 
 
-def breakdown(thread: dict, libs: list[dict] | None = None) -> Breakdown:
+def breakdown(thread: Thread, libs: list[Library] | None = None) -> Breakdown:
     """Attribute every sample in `thread`, deduplicating per stack.
 
     A crate or function recursing through one stack counts once for that stack, so an
@@ -128,7 +131,7 @@ def breakdown(thread: dict, libs: list[dict] | None = None) -> Breakdown:
         # Names the missing key, so format drift reads as a diagnosis rather than a traceback.
         raise SystemExit(f"unexpected profile shape: missing {e}") from e
 
-    func_resources: list[int] = thread["funcTable"].get("resource", [])
+    func_resources = thread["funcTable"].get("resource", [])
     resource_libs: list[int | None] = thread.get("resourceTable", {}).get("lib", [])
 
     def symbol(stack_index: int) -> str:

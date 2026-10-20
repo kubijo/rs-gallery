@@ -16,8 +16,10 @@ alike, and the wrong name comes back looking entirely plausible.
 import subprocess
 from collections import defaultdict
 
+from .profile import Profile
 
-def addresses_by_lib(profile: dict) -> dict[str, set[str]]:
+
+def addresses_by_lib(profile: Profile) -> dict[str, set[str]]:
     """Every unresolved `0x…` name in the profile, grouped by the path of the library owning it.
 
     Frames samply could not place in a library carry `resource == -1` and are dropped: with no
@@ -28,7 +30,7 @@ def addresses_by_lib(profile: dict) -> dict[str, set[str]]:
     for thread in profile.get("threads", []):
         strings: list[str] = thread["stringArray"]
         func_names: list[int] = thread["funcTable"]["name"]
-        func_resources: list[int] = thread["funcTable"]["resource"]
+        func_resources = thread["funcTable"]["resource"]
         resource_libs: list[int | None] = thread["resourceTable"]["lib"]
         for func, name_index in enumerate(func_names):
             name = strings[name_index]
@@ -101,7 +103,7 @@ def resolve(lib_path: str, addresses: list[str]) -> dict[str, str]:
     return parse_blocks(proc.stdout, addresses)
 
 
-def symbolicate(profile: dict) -> dict[str, dict[str, str]]:
+def symbolicate(profile: Profile) -> dict[str, dict[str, str]]:
     """Resolve the whole profile, as `{library path: {address: symbol}}`.
 
     Libraries that no longer exist on disk are skipped rather than failing the run — a profile spans
@@ -115,7 +117,7 @@ def symbolicate(profile: dict) -> dict[str, dict[str, str]]:
     return symbols
 
 
-def apply_symbols(profile: dict, symbols: dict[str, dict[str, str]]) -> int:
+def apply_symbols(profile: Profile, symbols: dict[str, dict[str, str]]) -> int:
     """Point every resolved func at its symbol, returning how many were rewritten.
 
     The name is appended to the thread's `stringArray` and the func re-pointed at it,
@@ -128,7 +130,7 @@ def apply_symbols(profile: dict, symbols: dict[str, dict[str, str]]) -> int:
     for thread in profile.get("threads", []):
         strings: list[str] = thread["stringArray"]
         func_names: list[int] = thread["funcTable"]["name"]
-        func_resources: list[int] = thread["funcTable"]["resource"]
+        func_resources = thread["funcTable"]["resource"]
         resource_libs: list[int | None] = thread["resourceTable"]["lib"]
         for func, name_index in enumerate(func_names):
             name = strings[name_index]
