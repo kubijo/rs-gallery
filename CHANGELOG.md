@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-20
+
 - **Rust toolchain.** Update the shared rustup/Nix toolchain pin to Rust 1.99.1.
 
 - **Formatting and coverage tooling.** `just format` runs the formatter app without constructing the full dev shell.

@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "gallery"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "gallery-build"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "camino",
  "glob",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "gallery-macros"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "heck",
  "prettyplease",
