@@ -2,6 +2,8 @@
 
 use std::{
     collections::hash_map::DefaultHasher,
+    error::Error,
+    fmt,
     hash::{Hash as _, Hasher as _},
     sync::Arc,
 };
@@ -19,6 +21,24 @@ pub struct Icon {
     svg: Arc<Svg>,
     colored: bool,
     rounded: bool,
+}
+
+/// Bytes that [`Icon::try_from_svg`] or [`Icon::try_from_svg_colored`] could not parse as an SVG.
+///
+/// The parser's own error is available through [`Error::source`].
+#[derive(Debug)]
+pub struct IconError(usvg::Error);
+
+impl fmt::Display for IconError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid icon SVG")
+    }
+}
+
+impl Error for IconError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.0)
+    }
 }
 
 struct Svg {
@@ -40,15 +60,23 @@ impl Icon {
     /// Parse filled SVG paths. Fill colours are ignored.
     ///
     /// # Panics
-    /// If the supplied bytes are not a valid SVG.
+    /// If the supplied bytes are not a valid SVG; [`Self::try_from_svg`] returns the error instead.
     #[must_use]
     pub fn from_svg(bytes: &[u8]) -> Self {
-        let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).expect("parse icon SVG");
+        Self::try_from_svg(bytes).expect("parse icon SVG")
+    }
+
+    /// Parse filled SVG paths like [`Self::from_svg`], for bytes that may not be a valid SVG.
+    ///
+    /// # Errors
+    /// If the supplied bytes are not a valid SVG.
+    pub fn try_from_svg(bytes: &[u8]) -> Result<Self, IconError> {
+        let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).map_err(IconError)?;
         let size = tree.size();
         let mut hasher = DefaultHasher::new();
         bytes.hash(&mut hasher);
 
-        Self {
+        Ok(Self {
             colored: false,
             rounded: false,
             svg: Arc::new(Svg {
@@ -57,7 +85,7 @@ impl Icon {
                 height: size.height(),
                 paths: paths(tree.root()),
             }),
-        }
+        })
     }
 
     /// Parse filled SVG paths with their colours and fill opacity.
@@ -65,13 +93,22 @@ impl Icon {
     /// Gradients and patterns use the paint call's tint instead.
     ///
     /// # Panics
-    /// If the supplied bytes are not a valid SVG.
+    /// If the supplied bytes are not a valid SVG; [`Self::try_from_svg_colored`] returns the error instead.
     #[must_use]
     pub fn from_svg_colored(bytes: &[u8]) -> Self {
-        Self {
+        Self::try_from_svg_colored(bytes).expect("parse icon SVG")
+    }
+
+    /// Parse filled SVG paths with their colours like [`Self::from_svg_colored`],
+    /// for bytes that may not be a valid SVG.
+    ///
+    /// # Errors
+    /// If the supplied bytes are not a valid SVG.
+    pub fn try_from_svg_colored(bytes: &[u8]) -> Result<Self, IconError> {
+        Ok(Self {
             colored: true,
-            ..Self::from_svg(bytes)
-        }
+            ..Self::try_from_svg(bytes)?
+        })
     }
 
     /// Crop to an inscribed circle, preserving the icon's colour mode.
@@ -341,6 +378,46 @@ mod tests {
             square.texture_hash(egui::Color32::RED),
             rounded.texture_hash(egui::Color32::RED)
         );
+    }
+
+    #[test]
+    fn fallible_constructors_match_the_panicking_ones() {
+        let tint = egui::Color32::GREEN;
+        for (fallible, panicking, colored) in [
+            (
+                Icon::try_from_svg(TWO_COLOUR),
+                Icon::from_svg(TWO_COLOUR),
+                false,
+            ),
+            (
+                Icon::try_from_svg_colored(TWO_COLOUR),
+                Icon::from_svg_colored(TWO_COLOUR),
+                true,
+            ),
+        ] {
+            let fallible = fallible.expect("valid SVG parses");
+            assert_eq!(fallible.colored, colored);
+            assert_eq!(fallible.texture_hash(tint), panicking.texture_hash(tint));
+            assert_eq!(
+                fallible.svg.rasterize([24, 24], colored, false, tint),
+                panicking.svg.rasterize([24, 24], colored, false, tint)
+            );
+        }
+    }
+
+    #[test]
+    fn fallible_constructors_reject_invalid_svg() {
+        fn assert_error<E: std::error::Error + Send + Sync + 'static>(_: &E) {}
+        for bytes in [b"\x00\xffnot an svg <<".as_slice(), b""] {
+            for result in [Icon::try_from_svg(bytes), Icon::try_from_svg_colored(bytes)] {
+                let Err(error) = result else {
+                    panic!("{bytes:?} parsed as an icon");
+                };
+                assert_error(&error);
+                assert_eq!(error.to_string(), "invalid icon SVG");
+                assert!(std::error::Error::source(&error).is_some());
+            }
+        }
     }
 
     #[test]
