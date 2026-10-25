@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-25
+
 - **Fallible SVG icon constructors.** `Icon::try_from_svg` and `Icon::try_from_svg_colored` return an `IconError` for
   bytes that are not a valid SVG, so icons read at run time can fall back instead of panicking. The parser's error is
   the `IconError`'s source. `Icon::from_svg` and `Icon::from_svg_colored` still panic on invalid input.
