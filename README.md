@@ -208,7 +208,8 @@ staged content.
 
 Use `Icon::from_svg_colored(include_bytes!("flag.svg"))` to preserve solid fill colours and opacity; append `.rounded()`
 for a circular crop. `Icon::from_svg` keeps the existing tinted monochrome rendering. Gradients and patterns in coloured
-icons fall back to the supplied tint.
+icons fall back to the supplied tint. Both constructors panic on invalid SVG; for bytes read at run time, use
+`Icon::try_from_svg` or `Icon::try_from_svg_colored`, which return an `IconError` instead.
 
 `CatalogGlobals` requires `Default + Serialize + DeserializeOwned`. Gallery validates and stores postcard bytes after
 every change. A reload starts with the new type's default and restores compatible controls by label, so new code never

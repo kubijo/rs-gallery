@@ -5,6 +5,13 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Fallible SVG icon constructors.** `Icon::try_from_svg` and `Icon::try_from_svg_colored` return an `IconError` for
+  bytes that are not a valid SVG, so icons read at run time can fall back instead of panicking. The parser's error is
+  the `IconError`'s source. `Icon::from_svg` and `Icon::from_svg_colored` still panic on invalid input.
+
+- **Dependency updates.** Update usvg to 0.49 and refresh the Rust dependency locks and Nix inputs. The lock moves tokio
+  to 1.54.1 for RUSTSEC-2026-0384 and replaces the yanked clipboard-win 5.4.1.
+
 ## [0.14.0] - 2026-10-20
 
 - **Rust toolchain.** Update the shared rustup/Nix toolchain pin to Rust 1.99.1.

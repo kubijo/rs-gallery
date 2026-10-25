@@ -92,8 +92,8 @@ pub use offscreen::{ImageInput, Offscreen, Pointer, StageTexture};
 pub use pass::ScenePass;
 use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
-pub use svg::Icon;
 use svg::Icons;
+pub use svg::{Icon, IconError};
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
 use watch::{HotStatus, SceneWatcher, render_build_bar, render_hot_chip};
 
