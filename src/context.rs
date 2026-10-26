@@ -8,10 +8,12 @@
 //! exception: it runs a callback once instead of carrying a value. Under the glow renderer the context
 //! also exposes offscreen GL rendering (see [`SceneCtx::offscreen`]).
 
-use std::sync::Arc;
+use std::{any::TypeId, sync::Arc};
 
 use eframe::{egui_wgpu, glow};
 
+use crate::GlobalKey;
+use crate::globals::{GlobalState, GlobalWrite, Writable};
 use crate::knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
 use crate::offscreen::{GlDeps, ImageInput, Offscreen, StageTexture};
 use crate::pass::{ScenePass, WgpuDeps};
@@ -42,6 +44,8 @@ impl SceneRevision {
 pub struct SceneCtx<'a> {
     knobs: &'a mut Vec<Knob>,
     globals: Option<&'a [u8]>,
+    global_writable: &'a [Writable],
+    global_writes: Vec<GlobalWrite>,
     revision: SceneRevision,
     cursor: usize,
     stages: usize,
@@ -276,12 +280,14 @@ impl<'a> SceneCtx<'a> {
         gl: Option<GlDeps<'a>>,
         wgpu: Option<WgpuDeps<'a>>,
         revision: SceneRevision,
-        globals: Option<&'a [u8]>,
+        globals: Option<&'a GlobalState>,
         stage_styles: Option<StageStyles>,
     ) -> Self {
         Self {
             knobs,
-            globals,
+            globals: globals.map(|globals| globals.parts().1),
+            global_writable: globals.map_or(&[], GlobalState::writable),
+            global_writes: Vec::new(),
             revision,
             cursor: 0,
             stages: 0,
@@ -905,6 +911,10 @@ impl<'a> SceneCtx<'a> {
         self.cursor
     }
 
+    pub(crate) fn take_global_writes(&mut self) -> Vec<GlobalWrite> {
+        std::mem::take(&mut self.global_writes)
+    }
+
     /// The knob at the current cursor, created (or replaced, if its kind/label changed) from `fresh`.
     fn slot(
         &mut self,
@@ -1242,11 +1252,105 @@ impl<'a> SceneCtx<'a> {
         *sy = y.clamp(min_y.min(max_y), min_y.max(max_y));
         true
     }
+
+    /// Write a catalog global through the [`GlobalKey`] its control was declared with.
+    ///
+    /// ```ignore
+    /// ctx.set_global(LANGUAGE, Language::Finnish);
+    /// ```
+    ///
+    /// Lands after the scene returns, so the next frame renders it; the last write per label wins.
+    /// Returns `false` when no control has the key's label and type.
+    /// A value the control can't take is dropped and reported in the Actions panel.
+    /// Captures reapply recipe globals over it, so a scene writing one the recipe sets
+    /// keeps a `settle` capture from going quiet.
+    pub fn set_global<T: 'static>(&mut self, key: GlobalKey<T>, value: T) -> bool {
+        let label = key.label();
+        if !self
+            .global_writable
+            .iter()
+            .any(|writable| writable.label == label && writable.value == TypeId::of::<T>())
+        {
+            return false;
+        }
+        self.global_writes.retain(|write| write.label != label);
+        self.global_writes.push(GlobalWrite {
+            label: label.to_owned(),
+            value: Box::new(value),
+        });
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MODE: GlobalKey<u8> = GlobalKey::new("mode");
+
+    #[derive(Default, serde::Deserialize, serde::Serialize)]
+    struct ModeAndName {
+        mode: u8,
+        name: String,
+    }
+
+    impl crate::CatalogGlobals for ModeAndName {
+        fn controls(&mut self, controls: &mut crate::GlobalControls<'_>) {
+            self.mode = controls.buttons(MODE, &[("one", 1), ("two", 2)], self.mode);
+            self.name = controls.text("name", &self.name);
+        }
+    }
+
+    #[test]
+    fn set_global_accepts_only_a_declared_label_with_its_accessor_type() {
+        let state = GlobalState::new(
+            crate::GlobalEntry::of::<ModeAndName>(),
+            SceneRevision::INITIAL,
+        )
+        .expect("global state");
+        let mut knobs = Vec::new();
+        let mut ctx = SceneCtx::with_globals(
+            &mut knobs,
+            None,
+            None,
+            SceneRevision::INITIAL,
+            Some(&state),
+            None,
+        );
+
+        assert!(
+            !ctx.set_global(GlobalKey::new("missing"), 1),
+            "an unknown label"
+        );
+        assert!(
+            !ctx.set_global(GlobalKey::<i32>::new("name"), 1),
+            "a key typed apart from a string-labelled control"
+        );
+        assert!(ctx.set_global(MODE, 1));
+        assert!(ctx.set_global(MODE, 2));
+        assert!(ctx.set_global(GlobalKey::new("name"), "text".to_owned()));
+
+        let writes = ctx.take_global_writes();
+        let written: Vec<&str> = writes.iter().map(|write| write.label.as_str()).collect();
+        assert_eq!(
+            written,
+            ["mode", "name"],
+            "the last write to a label replaces earlier ones"
+        );
+        assert_eq!(writes[0].value.downcast_ref::<u8>(), Some(&2));
+        assert_eq!(
+            writes[1].value.downcast_ref::<String>().map(String::as_str),
+            Some("text")
+        );
+    }
+
+    #[test]
+    fn set_global_misses_without_catalog_globals() {
+        let mut knobs = Vec::new();
+        let mut ctx = SceneCtx::new(&mut knobs, None, None);
+        assert!(!ctx.set_global(MODE, 1));
+        assert!(ctx.take_global_writes().is_empty());
+    }
 
     #[test]
     fn scene_revision_is_a_stable_opaque_value() {

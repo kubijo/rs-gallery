@@ -704,6 +704,7 @@ fn draw_with_globals(
             wgpu,
             passes: Vec::new(),
             wanted: egui::Vec2::ZERO,
+            global_write_error: None,
         }
     })?;
     let frames = settle(&mut harness, shot)?;
@@ -769,6 +770,9 @@ fn settle(
                 break;
             }
         }
+    }
+    if let Some(error) = harness.state_mut().global_write_error.take() {
+        return Err(Diagnostic::new(error));
     }
     // The loop ends on a draw, so a scene's own writes would outlive the last apply.
     // One more settles the store on the recipe, which is what `--list-knobs` then reports.
@@ -960,6 +964,8 @@ struct Canvas {
     passes: Vec<crate::PassTarget>,
     /// What the last frame's canvas came to — the size a shot has to be at least as big as.
     wanted: egui::Vec2,
+    /// The first scene write to a catalog global that could not land, failing the shot.
+    global_write_error: Option<String>,
 }
 
 impl eframe::App for Canvas {
@@ -976,6 +982,7 @@ impl eframe::App for Canvas {
             wgpu,
             passes,
             wanted,
+            global_write_error,
         } = self;
         let gl_deps = match (loader.clone(), gl.as_deref(), painter.as_ref()) {
             (Some(loader), Some(gl), Some(painter)) => Some(GlDeps {
@@ -996,16 +1003,32 @@ impl eframe::App for Canvas {
                     state,
                     targets: passes,
                 });
-                let globals = globals.as_ref().map(GlobalState::parts);
-                *wanted = render_canvas_at(
+                let rendered = render_canvas_at(
                     ui,
                     scene,
                     knobs,
                     gl_deps,
                     wgpu_deps,
                     crate::SceneRevision::INITIAL,
-                    globals,
+                    globals.as_ref(),
                 );
+                *wanted = rendered.size;
+                if let Some(globals) = globals
+                    && !rendered.global_writes.is_empty()
+                {
+                    let failed = match globals.write(rendered.global_writes) {
+                        Ok(written) => {
+                            if written.changed {
+                                ui.ctx().request_repaint();
+                            }
+                            written.missed.into_iter().next()
+                        }
+                        Err(error) => Some(error),
+                    };
+                    if global_write_error.is_none() {
+                        *global_write_error = failed;
+                    }
+                }
             });
     }
 }
@@ -3320,6 +3343,7 @@ mod tests {
             wgpu: None,
             passes: Vec::new(),
             wanted: egui::Vec2::ZERO,
+            global_write_error: None,
         };
         let overrides = knobs(&[("first", "true"), ("second", "true"), ("third", "true")]);
         let mut unmatched: Vec<&KnobOverride> = overrides.iter().collect();
@@ -3330,6 +3354,102 @@ mod tests {
         let (_, bytes) = canvas.globals.as_ref().expect("globals").parts();
         let value: Conditional = postcard::from_bytes(bytes).expect("typed state");
         assert!(value.first && value.second && value.third);
+    }
+
+    fn writes_finnish(ctx: &mut crate::SceneCtx<'_>, _: &mut egui::Ui) {
+        use crate::scaffold_scenes::globals::{LANGUAGE, Language};
+
+        assert!(ctx.set_global(LANGUAGE, Language::Finnish));
+    }
+
+    fn global_shot(globals: Vec<KnobOverride>) -> Shot {
+        Shot {
+            scene: "writer".to_owned(),
+            out: None,
+            size: egui::vec2(320.0, 160.0),
+            knobs: Vec::new(),
+            globals,
+            frames: None,
+            trim: true,
+            settle: false,
+            scale: DEFAULT_SCALE,
+            list: false,
+            template: false,
+        }
+    }
+
+    #[test]
+    fn a_recipe_global_wins_over_a_scene_writing_it_every_frame() {
+        use crate::scaffold_scenes::globals;
+
+        let session = Session::open(Renderer::Wgpu).expect("headless wgpu session");
+        let shot = global_shot(knobs(&[("Language", "English")]));
+        let drawn = draw_with_globals(
+            crate::SceneEntry {
+                render: writes_finnish,
+                ..crate::test_support::scene("writer", "globals", true)
+            },
+            Some(crate::GlobalEntry::of::<globals::Globals>()),
+            &session,
+            &|_: &egui::Context| {},
+            &shot,
+            shot.size,
+        )
+        .expect("the scene's writes do not fail the shot");
+
+        let (_, bytes) = drawn
+            .harness
+            .state()
+            .globals
+            .as_ref()
+            .expect("global state")
+            .parts();
+        let value: globals::Globals = postcard::from_bytes(bytes).expect("postcard globals");
+        assert!(matches!(value.language, globals::Language::English));
+    }
+
+    const SCALE: crate::GlobalKey<f32> = crate::GlobalKey::new("Scale");
+
+    #[derive(Default, serde::Deserialize, serde::Serialize)]
+    struct Scaled {
+        scale: f32,
+    }
+
+    impl crate::CatalogGlobals for Scaled {
+        fn controls(&mut self, controls: &mut crate::GlobalControls<'_>) {
+            self.scale = controls.slider(SCALE, 1.0, 0.0, 2.0, 0.0);
+        }
+    }
+
+    fn writes_a_non_finite_scale(ctx: &mut crate::SceneCtx<'_>, _: &mut egui::Ui) {
+        assert!(ctx.set_global(SCALE, f32::NAN));
+    }
+
+    #[test]
+    fn a_scene_write_that_cannot_land_fails_the_shot() {
+        let session = Session::open(Renderer::Wgpu).expect("headless wgpu session");
+        let shot = global_shot(Vec::new());
+        let Err(error) = draw_with_globals(
+            crate::SceneEntry {
+                render: writes_a_non_finite_scale,
+                ..crate::test_support::scene("writer", "globals", true)
+            },
+            Some(crate::GlobalEntry::of::<Scaled>()),
+            &session,
+            &|_: &egui::Context| {},
+            &shot,
+            shot.size,
+        ) else {
+            panic!("a dropped write fails the shot");
+        };
+
+        assert!(
+            error
+                .plain()
+                .contains("set_global(\"Scale\"): the written value is not finite"),
+            "{}",
+            error.plain()
+        );
     }
 
     #[test]
@@ -3378,6 +3498,7 @@ mod tests {
             wgpu: None,
             passes: Vec::new(),
             wanted: egui::Vec2::ZERO,
+            global_write_error: None,
         };
         let overrides = knobs(&[("choice", "Target"), ("expanded", "true")]);
         let mut unmatched: Vec<&KnobOverride> = overrides.iter().collect();

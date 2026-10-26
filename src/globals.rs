@@ -1,4 +1,8 @@
-use std::collections::HashSet;
+use std::{
+    any::{Any, TypeId},
+    collections::HashSet,
+    marker::PhantomData,
+};
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -22,30 +26,191 @@ pub trait CatalogGlobals: Default + Serialize + DeserializeOwned + 'static {
     fn prepare(&self, _ui: &mut egui::Ui) {}
 }
 
+/// A global control's label, typed with its value.
+/// Use one key in [`CatalogGlobals::controls`] and [`SceneCtx::set_global`](crate::SceneCtx::set_global).
+///
+/// ```ignore
+/// const LANGUAGE: GlobalKey<Language> = GlobalKey::new("Language");
+/// ```
+///
+/// A key of the wrong type doesn't compile:
+///
+/// ```compile_fail,E0277
+/// # use gallery::{GlobalControls, GlobalKey};
+/// const SCALE: GlobalKey<bool> = GlobalKey::new("Scale");
+/// fn controls(controls: &mut GlobalControls<'_>) {
+///     controls.slider(SCALE, 1.0, 0.0, 2.0, 0.0);
+/// }
+/// ```
+pub struct GlobalKey<T> {
+    label: &'static str,
+    value: PhantomData<fn() -> T>,
+}
+
+impl<T> GlobalKey<T> {
+    #[must_use]
+    pub const fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            value: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        self.label
+    }
+}
+
+// By hand: derived, they would require `T: Clone` of a key that holds no `T`.
+impl<T> Clone for GlobalKey<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for GlobalKey<T> {}
+
+impl<T> std::fmt::Debug for GlobalKey<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GlobalKey").field(&self.label).finish()
+    }
+}
+
+/// What a [`GlobalControls`] accessor returning `R` takes as its label:
+/// a string, or a [`GlobalKey<R>`].
+pub trait GlobalLabel<R>: sealed::Label<R> {}
+
+impl<R, L: sealed::Label<R>> GlobalLabel<R> for L {}
+
+mod sealed {
+    pub trait Label<R> {
+        fn text(&self) -> &str;
+    }
+
+    impl<R, S: AsRef<str>> Label<R> for S {
+        fn text(&self) -> &str {
+            self.as_ref()
+        }
+    }
+
+    impl<R> Label<R> for super::GlobalKey<R> {
+        fn text(&self) -> &str {
+            self.label
+        }
+    }
+}
+
+/// A scene's [`set_global`](crate::SceneCtx::set_global), carried to the next sync.
+///
+/// The value is boxed by scene code and unboxed by the catalog's `controls`,
+/// both in the scenes library, within the frame that wrote it.
+pub(crate) struct GlobalWrite {
+    pub(crate) label: String,
+    pub(crate) value: Box<dyn Any>,
+}
+
+/// A global control a scene may write, and the type its accessor returns.
+pub(crate) struct Writable {
+    pub(crate) label: String,
+    pub(crate) value: TypeId,
+}
+
+/// What one sync pass learned besides the bytes.
+pub(crate) struct Synced {
+    writable: Vec<Writable>,
+    missed: Vec<String>,
+}
+
 /// Declares catalog controls and maps stable choice labels to typed values.
 pub struct GlobalControls<'a> {
     knobs: &'a mut Vec<Knob>,
     cursor: usize,
     labels: HashSet<String>,
     error: Option<String>,
+    writes: Vec<GlobalWrite>,
+    writable: Vec<Writable>,
+    missed: Vec<String>,
 }
 
 impl<'a> GlobalControls<'a> {
-    fn new(knobs: &'a mut Vec<Knob>) -> Self {
+    fn new(knobs: &'a mut Vec<Knob>, writes: Vec<GlobalWrite>) -> Self {
         Self {
             knobs,
             cursor: 0,
             labels: HashSet::new(),
             error: None,
+            writes,
+            writable: Vec::new(),
+            missed: Vec::new(),
         }
     }
 
-    fn finish(self) -> Result<(), String> {
+    fn finish(mut self) -> Result<Synced, String> {
         self.knobs.truncate(self.cursor);
+        for write in self.writes.drain(..) {
+            self.missed.push(format!(
+                "set_global({:?}): the control is no longer declared",
+                write.label
+            ));
+        }
         match self.error {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => Ok(Synced {
+                writable: self.writable,
+                missed: self.missed,
+            }),
         }
+    }
+
+    /// Register `label` as writable with `R`, and take a scene's pending write to it.
+    fn written<R: 'static>(&mut self, label: &str) -> Option<R> {
+        self.writable.push(Writable {
+            label: label.to_owned(),
+            value: TypeId::of::<R>(),
+        });
+        let at = self.writes.iter().position(|write| write.label == label)?;
+        match self.writes.swap_remove(at).value.downcast() {
+            Ok(value) => Some(*value),
+            Err(_) => {
+                self.miss(label, "the written value has another type");
+                None
+            }
+        }
+    }
+
+    fn miss(&mut self, label: &str, why: &str) {
+        self.missed.push(format!("set_global({label:?}): {why}"));
+    }
+
+    /// A finite write, or a miss for one that is not.
+    fn finite<R>(
+        &mut self,
+        label: &str,
+        written: Option<R>,
+        finite: impl Fn(&R) -> bool,
+    ) -> Option<R> {
+        let written = written?;
+        if finite(&written) {
+            Some(written)
+        } else {
+            self.miss(label, "the written value is not finite");
+            None
+        }
+    }
+
+    /// Which option a written choice value selects, or a miss for one no option carries.
+    fn written_option<'v, T: PartialEq + 'static>(
+        &mut self,
+        label: &str,
+        mut values: impl Iterator<Item = &'v T>,
+    ) -> Option<usize> {
+        let written = self.written::<T>(label)?;
+        let at = values.position(|value| value == &written);
+        if at.is_none() {
+            self.miss(label, "no option of the control holds the written value");
+        }
+        at
     }
 
     fn reject(&mut self, error: impl Into<String>) {
@@ -107,7 +272,9 @@ impl<'a> GlobalControls<'a> {
         clicked
     }
 
-    pub fn text(&mut self, label: &str, default: &str) -> String {
+    pub fn text(&mut self, label: impl GlobalLabel<String>, default: &str) -> String {
+        let label = label.text();
+        let written = self.written::<String>(label);
         match self.slot(
             label,
             || Knob::Text {
@@ -116,13 +283,26 @@ impl<'a> GlobalControls<'a> {
             },
             |knob| matches!(knob, Knob::Text { label: current, .. } if current == label),
         ) {
-            Knob::Text { value, .. } => value.clone(),
+            Knob::Text { value, .. } => {
+                if let Some(written) = written {
+                    *value = written;
+                }
+                value.clone()
+            }
             _ => default.to_owned(),
         }
     }
 
     /// A finite slider with order-independent bounds and a non-negative step.
-    pub fn slider(&mut self, label: &str, default: f32, min: f32, max: f32, step: f32) -> f32 {
+    pub fn slider(
+        &mut self,
+        label: impl GlobalLabel<f32>,
+        default: f32,
+        min: f32,
+        max: f32,
+        step: f32,
+    ) -> f32 {
+        let label = label.text();
         if ![default, min, max, step].into_iter().all(f32::is_finite) || step < 0.0 {
             self.reject(format!(
                 "global control {label:?} needs finite slider values and a non-negative step"
@@ -130,6 +310,8 @@ impl<'a> GlobalControls<'a> {
             return default;
         }
         let (min, max) = ordered(min, max);
+        let written = self.written::<f32>(label);
+        let written = self.finite(label, written, |value| value.is_finite());
         match self.slot(
             label,
             || Knob::Slider {
@@ -151,6 +333,9 @@ impl<'a> GlobalControls<'a> {
                 *current_min = min;
                 *current_max = max;
                 *current_step = step;
+                if let Some(written) = written {
+                    *value = written;
+                }
                 *value = (*value).clamp(min, max);
                 *value
             }
@@ -158,7 +343,9 @@ impl<'a> GlobalControls<'a> {
         }
     }
 
-    pub fn toggle(&mut self, label: &str, default: bool) -> bool {
+    pub fn toggle(&mut self, label: impl GlobalLabel<bool>, default: bool) -> bool {
+        let label = label.text();
+        let written = self.written::<bool>(label);
         match self.slot(
             label,
             || Knob::Toggle {
@@ -167,12 +354,23 @@ impl<'a> GlobalControls<'a> {
             },
             |knob| matches!(knob, Knob::Toggle { label: current, .. } if current == label),
         ) {
-            Knob::Toggle { value, .. } => *value,
+            Knob::Toggle { value, .. } => {
+                if let Some(written) = written {
+                    *value = written;
+                }
+                *value
+            }
             _ => default,
         }
     }
 
-    pub fn color(&mut self, label: &str, default: egui::Color32) -> egui::Color32 {
+    pub fn color(
+        &mut self,
+        label: impl GlobalLabel<egui::Color32>,
+        default: egui::Color32,
+    ) -> egui::Color32 {
+        let label = label.text();
+        let written = self.written::<egui::Color32>(label);
         match self.slot(
             label,
             || Knob::Color {
@@ -181,39 +379,44 @@ impl<'a> GlobalControls<'a> {
             },
             |knob| matches!(knob, Knob::Color { label: current, .. } if current == label),
         ) {
-            Knob::Color { value, .. } => *value,
+            Knob::Color { value, .. } => {
+                if let Some(written) = written {
+                    *value = written;
+                }
+                *value
+            }
             _ => default,
         }
     }
 
     /// A typed dropdown. Capture recipes select by label.
-    pub fn select<T: Clone + PartialEq>(
+    pub fn select<T: Clone + PartialEq + 'static>(
         &mut self,
-        label: &str,
+        label: impl GlobalLabel<T>,
         options: &[(&str, T)],
         default: T,
     ) -> T {
-        self.choice(label, options, default, ChoiceStyle::Dropdown)
+        self.choice(label.text(), options, default, ChoiceStyle::Dropdown)
     }
 
     /// A typed vertical radio group.
-    pub fn radio<T: Clone + PartialEq>(
+    pub fn radio<T: Clone + PartialEq + 'static>(
         &mut self,
-        label: &str,
+        label: impl GlobalLabel<T>,
         options: &[(&str, T)],
         default: T,
     ) -> T {
-        self.choice(label, options, default, ChoiceStyle::Radio)
+        self.choice(label.text(), options, default, ChoiceStyle::Radio)
     }
 
     /// A typed inline segmented row.
-    pub fn buttons<T: Clone + PartialEq>(
+    pub fn buttons<T: Clone + PartialEq + 'static>(
         &mut self,
-        label: &str,
+        label: impl GlobalLabel<T>,
         options: &[(&str, T)],
         default: T,
     ) -> T {
-        self.choice(label, options, default, ChoiceStyle::Buttons)
+        self.choice(label.text(), options, default, ChoiceStyle::Buttons)
     }
 
     /// A typed SVG icon choice in the window bar.
@@ -221,18 +424,20 @@ impl<'a> GlobalControls<'a> {
     /// Each option is `(stable label, icon, value)`. Labels identify captures and reloads and
     /// provide tooltips and accessibility names. Reuse tinted icons from [`Icon::from_svg`] or
     /// original-colour icons from [`Icon::from_svg_colored`], optionally cropped with [`Icon::rounded`].
-    pub fn icon_buttons<T: Clone + PartialEq>(
+    pub fn icon_buttons<T: Clone + PartialEq + 'static>(
         &mut self,
-        label: &str,
+        label: impl GlobalLabel<T>,
         options: &[(&str, &Icon, T)],
         default: T,
     ) -> T {
+        let label = label.text();
         let labels: Vec<String> = options
             .iter()
             .map(|(option, _, _)| (*option).to_owned())
             .collect();
         self.check_options(label, &labels);
         let icons: Vec<Icon> = options.iter().map(|(_, icon, _)| (*icon).clone()).collect();
+        let written = self.written_option(label, options.iter().map(|(_, _, value)| value));
         let default_at = options
             .iter()
             .position(|(_, _, value)| value == &default)
@@ -258,8 +463,11 @@ impl<'a> GlobalControls<'a> {
                 let former = current.get(*value).cloned();
                 *current = labels;
                 *current_icons = icons;
-                *value = former
-                    .and_then(|former| current.iter().position(|option| option == &former))
+                *value = written
+                    .or_else(|| {
+                        former
+                            .and_then(|former| current.iter().position(|option| option == &former))
+                    })
                     .unwrap_or(default_at)
                     .min(last);
                 *value
@@ -271,7 +479,7 @@ impl<'a> GlobalControls<'a> {
             .map_or(default, |(_, _, value)| value.clone())
     }
 
-    fn choice<T: Clone + PartialEq>(
+    fn choice<T: Clone + PartialEq + 'static>(
         &mut self,
         label: &str,
         options: &[(&str, T)],
@@ -283,6 +491,7 @@ impl<'a> GlobalControls<'a> {
             .map(|(option, _)| (*option).to_owned())
             .collect();
         self.check_options(label, &labels);
+        let written = self.written_option(label, options.iter().map(|(_, value)| value));
         let default_at = options
             .iter()
             .position(|(_, value)| value == &default)
@@ -306,8 +515,11 @@ impl<'a> GlobalControls<'a> {
             } => {
                 let former = current.get(*value).cloned();
                 *current = labels;
-                *value = former
-                    .and_then(|former| current.iter().position(|option| option == &former))
+                *value = written
+                    .or_else(|| {
+                        former
+                            .and_then(|former| current.iter().position(|option| option == &former))
+                    })
                     .unwrap_or(default_at)
                     .min(last);
                 *value
@@ -330,7 +542,8 @@ impl<'a> GlobalControls<'a> {
     }
 
     /// A finite two-axis pad with order-independent bounds.
-    pub fn pad2d(&mut self, label: &str, spec: Pad2DSpec) -> Pad2D {
+    pub fn pad2d(&mut self, label: impl GlobalLabel<Pad2D>, spec: Pad2DSpec) -> Pad2D {
+        let label = label.text();
         if ![
             spec.default_x,
             spec.default_y,
@@ -352,6 +565,8 @@ impl<'a> GlobalControls<'a> {
         }
         let (ordered_min_x, ordered_max_x) = ordered(spec.min_x, spec.max_x);
         let (ordered_min_y, ordered_max_y) = ordered(spec.min_y, spec.max_y);
+        let written = self.written::<Pad2D>(label);
+        let written = self.finite(label, written, |pad| pad.x.is_finite() && pad.y.is_finite());
         match self.slot(
             label,
             || Knob::Pad2D {
@@ -381,6 +596,10 @@ impl<'a> GlobalControls<'a> {
                 *min_y = ordered_min_y;
                 *max_y = ordered_max_y;
                 *invert_y = spec.invert_y;
+                if let Some(written) = written {
+                    *x = written.x;
+                    *y = written.y;
+                }
                 *x = (*x).clamp(ordered_min_x, ordered_max_x);
                 *y = (*y).clamp(ordered_min_y, ordered_max_y);
                 Pad2D { x: *x, y: *y }
@@ -435,9 +654,11 @@ pub(crate) fn control_shape(knobs: &[Knob]) -> Vec<(u8, String, Vec<String>)> {
 #[derive(Clone, Copy)]
 pub struct GlobalEntry {
     defaults: fn() -> Result<Vec<u8>, String>,
-    sync: fn(&mut Vec<u8>, &mut Vec<Knob>) -> Result<(), String>,
+    sync: SyncFn,
     prepare: fn(&[u8], &mut egui::Ui) -> Result<(), String>,
 }
+
+type SyncFn = fn(&mut Vec<u8>, &mut Vec<Knob>, Vec<GlobalWrite>) -> Result<Synced, String>;
 
 impl GlobalEntry {
     #[doc(hidden)]
@@ -453,8 +674,13 @@ impl GlobalEntry {
         (self.defaults)()
     }
 
-    fn sync(self, bytes: &mut Vec<u8>, knobs: &mut Vec<Knob>) -> Result<(), String> {
-        (self.sync)(bytes, knobs)
+    fn sync(
+        self,
+        bytes: &mut Vec<u8>,
+        knobs: &mut Vec<Knob>,
+        writes: Vec<GlobalWrite>,
+    ) -> Result<Synced, String> {
+        (self.sync)(bytes, knobs, writes)
     }
 
     pub(crate) fn prepare(self, bytes: &[u8], ui: &mut egui::Ui) -> Result<(), String> {
@@ -469,18 +695,22 @@ fn defaults<T: CatalogGlobals>() -> Result<Vec<u8>, String> {
         .map_err(|error| format!("serialize default catalog globals: {error}"))
 }
 
-fn sync<T: CatalogGlobals>(bytes: &mut Vec<u8>, knobs: &mut Vec<Knob>) -> Result<(), String> {
+fn sync<T: CatalogGlobals>(
+    bytes: &mut Vec<u8>,
+    knobs: &mut Vec<Knob>,
+    writes: Vec<GlobalWrite>,
+) -> Result<Synced, String> {
     let mut globals: T = postcard::from_bytes(bytes)
         .map_err(|error| format!("deserialize catalog globals: {error}"))?;
-    let mut controls = GlobalControls::new(knobs);
+    let mut controls = GlobalControls::new(knobs, writes);
     globals.controls(&mut controls);
-    controls.finish()?;
+    let synced = controls.finish()?;
     let encoded = postcard::to_stdvec(&globals)
         .map_err(|error| format!("serialize catalog globals: {error}"))?;
     postcard::from_bytes::<T>(&encoded)
         .map_err(|error| format!("validate serialized catalog globals: {error}"))?;
     *bytes = encoded;
-    Ok(())
+    Ok(synced)
 }
 
 fn prepare<T: CatalogGlobals>(bytes: &[u8], ui: &mut egui::Ui) -> Result<(), String> {
@@ -495,6 +725,14 @@ pub(crate) struct GlobalState {
     revision: SceneRevision,
     bytes: Vec<u8>,
     knobs: Vec<Knob>,
+    writable: Vec<Writable>,
+}
+
+/// What a scene's writes did once they were synced.
+pub(crate) struct Written {
+    pub(crate) changed: bool,
+    /// One line per write that could not land, for the scene's Actions log.
+    pub(crate) missed: Vec<String>,
 }
 
 impl GlobalState {
@@ -504,6 +742,7 @@ impl GlobalState {
             revision,
             bytes: entry.default_bytes()?,
             knobs: Vec::new(),
+            writable: Vec::new(),
         };
         state.sync()?;
         Ok(state)
@@ -519,6 +758,7 @@ impl GlobalState {
             revision,
             bytes: entry.default_bytes()?,
             knobs: self.knobs.clone(),
+            writable: Vec::new(),
         };
         next.sync()?;
         *self = next;
@@ -535,7 +775,10 @@ impl GlobalState {
         let mut stable_passes = 0;
         for _ in 0..MAX_PASSES {
             let before = control_shape(&self.knobs);
-            self.entry.sync(&mut self.bytes, &mut self.knobs)?;
+            self.writable = self
+                .entry
+                .sync(&mut self.bytes, &mut self.knobs, Vec::new())?
+                .writable;
             if control_shape(&self.knobs) == before {
                 stable_passes += 1;
                 if stable_passes == 2 {
@@ -546,6 +789,22 @@ impl GlobalState {
             }
         }
         Err("catalog global controls did not stabilize".to_owned())
+    }
+
+    /// Land a scene's writes in their controls, then settle as after a window-bar change.
+    pub(crate) fn write(&mut self, writes: Vec<GlobalWrite>) -> Result<Written, String> {
+        let before = self.bytes.clone();
+        let synced = self.entry.sync(&mut self.bytes, &mut self.knobs, writes)?;
+        self.writable = synced.writable;
+        self.sync()?;
+        Ok(Written {
+            changed: self.bytes != before,
+            missed: synced.missed,
+        })
+    }
+
+    pub(crate) fn writable(&self) -> &[Writable] {
+        &self.writable
     }
 
     pub(crate) fn knobs(&self) -> &[Knob] {
@@ -611,6 +870,152 @@ mod tests {
         assert_eq!(globals.theme, Theme::Dark);
     }
 
+    fn write<T: 'static>(label: &str, value: T) -> GlobalWrite {
+        GlobalWrite {
+            label: label.to_owned(),
+            value: Box::new(value),
+        }
+    }
+
+    #[test]
+    fn a_scene_write_selects_the_option_holding_its_value() {
+        let mut state = GlobalState::new(GlobalEntry::of::<Globals>(), SceneRevision::INITIAL)
+            .expect("global state");
+
+        let written = state
+            .write(vec![write("theme", Theme::Light), write("enabled", true)])
+            .expect("the writes sync");
+
+        assert!(written.changed);
+        assert!(written.missed.is_empty(), "{:?}", written.missed);
+        assert!(matches!(state.knobs[0], Knob::Select { value: 2, .. }));
+        let globals: Globals = postcard::from_bytes(&state.bytes).expect("typed state");
+        assert_eq!(globals.theme, Theme::Light);
+        assert!(globals.enabled);
+
+        let again = state
+            .write(vec![write("enabled", true)])
+            .expect("a repeated write syncs");
+        assert!(!again.changed, "writing the current value changes nothing");
+    }
+
+    #[test]
+    fn a_write_typed_apart_from_its_control_is_reported_not_dropped_silently() {
+        let mut state = GlobalState::new(GlobalEntry::of::<Globals>(), SceneRevision::INITIAL)
+            .expect("global state");
+
+        let written = state
+            .write(vec![write("enabled", 1_u8)])
+            .expect("the write syncs");
+
+        assert!(!written.changed);
+        assert_eq!(
+            written.missed,
+            ["set_global(\"enabled\"): the written value has another type"]
+        );
+        assert!(matches!(state.knobs[1], Knob::Toggle { value: false, .. }));
+    }
+
+    #[test]
+    fn writable_controls_carry_the_type_their_accessor_returns() {
+        #[derive(Default, serde::Deserialize, serde::Serialize)]
+        struct Mixed {
+            theme: Theme,
+            name: String,
+        }
+
+        impl CatalogGlobals for Mixed {
+            fn controls(&mut self, controls: &mut GlobalControls<'_>) {
+                controls.group("Look");
+                self.theme = controls.radio("theme", &[("auto", Theme::Auto)], self.theme);
+                self.name = controls.text("name", &self.name);
+                controls.button("reset", || {});
+            }
+        }
+
+        let state = GlobalState::new(GlobalEntry::of::<Mixed>(), SceneRevision::INITIAL)
+            .expect("global state");
+
+        let writable: Vec<(&str, TypeId)> = state
+            .writable()
+            .iter()
+            .map(|writable| (writable.label.as_str(), writable.value))
+            .collect();
+        assert_eq!(
+            writable,
+            [
+                ("theme", TypeId::of::<Theme>()),
+                ("name", TypeId::of::<String>())
+            ],
+            "groups and buttons carry no value to write"
+        );
+    }
+
+    #[test]
+    fn writes_clamp_like_their_controls_and_misses_leave_controls_alone() {
+        #[derive(Default, serde::Deserialize, serde::Serialize)]
+        struct Ranged {
+            scale: f32,
+            name: String,
+            offset: Pad2D,
+            theme: Theme,
+        }
+
+        impl CatalogGlobals for Ranged {
+            fn controls(&mut self, controls: &mut GlobalControls<'_>) {
+                self.scale = controls.slider("scale", 1.0, 0.0, 2.0, 0.0);
+                self.name = controls.text("name", "");
+                self.offset = controls.pad2d("offset", Pad2DSpec::default());
+                self.theme = controls.buttons(
+                    "theme",
+                    &[("dark", Theme::Dark), ("light", Theme::Light)],
+                    Theme::Dark,
+                );
+            }
+        }
+
+        let mut state = GlobalState::new(GlobalEntry::of::<Ranged>(), SceneRevision::INITIAL)
+            .expect("global state");
+
+        let written = state
+            .write(vec![
+                write("scale", 5.0_f32),
+                write("name", "written".to_owned()),
+                write(
+                    "offset",
+                    Pad2D {
+                        x: f32::NAN,
+                        y: 0.0,
+                    },
+                ),
+                write("theme", Theme::Auto),
+                write("gone", true),
+            ])
+            .expect("the writes sync");
+
+        let value: Ranged = postcard::from_bytes(&state.bytes).expect("typed state");
+        assert_eq!(value.scale, 2.0, "a slider write clamps to the range");
+        assert_eq!(value.name, "written");
+        assert_eq!(
+            value.offset,
+            Pad2D::default(),
+            "a non-finite pad write is dropped"
+        );
+        assert_eq!(
+            value.theme,
+            Theme::Dark,
+            "an option no control carries is dropped"
+        );
+        assert_eq!(
+            written.missed,
+            [
+                "set_global(\"offset\"): the written value is not finite",
+                "set_global(\"theme\"): no option of the control holds the written value",
+                "set_global(\"gone\"): the control is no longer declared",
+            ]
+        );
+    }
+
     #[test]
     fn defaults_settle_through_long_reverse_declared_chains() {
         const STEPS: usize = 12;
@@ -624,7 +1029,7 @@ mod tests {
             fn controls(&mut self, controls: &mut GlobalControls<'_>) {
                 for at in (1..STEPS).rev() {
                     if self.steps[at - 1] {
-                        self.steps[at] = controls.toggle(&format!("step {at}"), true);
+                        self.steps[at] = controls.toggle(format!("step {at}"), true);
                     }
                 }
                 self.steps[0] = controls.toggle("step 0", true);

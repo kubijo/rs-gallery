@@ -5,6 +5,14 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Scenes can write catalog globals.** `SceneCtx::set_global(key, value)` keeps a story's own switcher and the window
+  bar in sync. A `GlobalKey<T>` fixes the control's label and type at compile time. Unusable values are reported in the
+  Actions panel and fail captures.
+
+- **Breaking: global control signatures.** Choice accessors require `T: 'static`. Labels are generic `AsRef<str>`, so a
+  deref-coerced label like `&Rc<String>` needs `.as_str()`, and clippy's `needless_borrows_for_generic_args` flags
+  `&format!(…)` labels.
+
 ## [0.15.0] - 2026-10-25
 
 - **Fallible SVG icon constructors.** `Icon::try_from_svg` and `Icon::try_from_svg_colored` return an `IconError` for

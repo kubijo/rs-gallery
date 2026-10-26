@@ -32,6 +32,9 @@ pub(crate) enum Language {
     Finnish,
 }
 
+/// One key for the control and its write-back, so their label and value type cannot drift apart.
+pub(crate) const LANGUAGE: GlobalKey<Language> = GlobalKey::new("Language");
+
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 pub(crate) struct Globals {
     pub(crate) theme: Theme,
@@ -63,7 +66,7 @@ impl CatalogGlobals for Globals {
             Theme::Light,
         );
         self.language = controls.icon_buttons(
-            "Language",
+            LANGUAGE,
             &[
                 ("English", &ICONS.english, Language::English),
                 ("Finnish", &ICONS.finnish, Language::Finnish),
@@ -83,7 +86,8 @@ impl CatalogGlobals for Globals {
 
 scene_meta! { title: "Globals / Theme and language" }
 
-/// Theme is applied by `prepare`; this scene also reads the selected language.
+/// Theme is applied by `prepare`; this scene also reads the selected language,
+/// and its own switcher writes it back so the window bar follows.
 #[scene(default)]
 fn theme_and_language(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
     let (heading, description) = match globals.language {
@@ -97,11 +101,28 @@ fn theme_and_language(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
         ),
     };
 
-    ctx.stage(ui, globals.stage((440.0, 150.0)), |ui| {
+    let mut chosen = None;
+    ctx.stage(ui, globals.stage((440.0, 180.0)), |ui| {
         ui.vertical_centered(|ui| {
             ui.heading(heading);
             ui.add_space(8.0);
             ui.label(description);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                for (name, language) in
+                    [("English", Language::English), ("Suomi", Language::Finnish)]
+                {
+                    if ui
+                        .selectable_label(globals.language == language, name)
+                        .clicked()
+                    {
+                        chosen = Some(language);
+                    }
+                }
+            });
         });
     });
+    if let Some(language) = chosen {
+        ctx.set_global(LANGUAGE, language);
+    }
 }
