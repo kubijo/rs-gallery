@@ -5,6 +5,8 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-26
+
 - **Scenes can write catalog globals.** `SceneCtx::set_global(key, value)` keeps a story's own switcher and the window
   bar in sync. A `GlobalKey<T>` fixes the control's label and type at compile time. Unusable values are reported in the
   Actions panel and fail captures.
