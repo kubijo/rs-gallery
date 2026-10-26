@@ -79,8 +79,8 @@ mod window;
 pub use actions::action;
 use actions::{Log, collecting, render_actions};
 pub use context::{Checkerboard, PADDING, SceneCtx, SceneRevision, Stage, StageSpec};
-use globals::GlobalState;
-pub use globals::{CatalogGlobals, GlobalControls, GlobalEntry};
+pub use globals::{CatalogGlobals, GlobalControls, GlobalEntry, GlobalKey, GlobalLabel};
+use globals::{GlobalState, GlobalWrite};
 pub use hot::HotDylib;
 pub use knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
 use knobs::{
@@ -104,9 +104,9 @@ pub mod prelude {
     pub use egui::Ui;
 
     pub use crate::{
-        CatalogGlobals, Checkerboard, GlobalControls, Icon, ImageInput, MSAA_SAMPLES, Offscreen,
-        PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, ScenePass, SceneRevision, Stage,
-        StageSpec, StageTexture, action, egui, scene, scene_meta, stage,
+        CatalogGlobals, Checkerboard, GlobalControls, GlobalKey, Icon, ImageInput, MSAA_SAMPLES,
+        Offscreen, PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, ScenePass,
+        SceneRevision, Stage, StageSpec, StageTexture, action, egui, scene, scene_meta, stage,
     };
 }
 
@@ -1005,10 +1005,26 @@ impl<S: SceneSource> eframe::App for Gallery<S> {
                         }),
                         _ => None,
                     };
-                    let globals = self.globals.as_ref().map(GlobalState::parts);
-                    let reported = collecting(|| {
-                        _ = render_canvas_at(ui, scene, store, gl_deps, wgpu, revision, globals);
+                    let globals = self.globals.as_ref();
+                    let mut global_writes = Vec::new();
+                    let mut reported = collecting(|| {
+                        global_writes =
+                            render_canvas_at(ui, scene, store, gl_deps, wgpu, revision, globals)
+                                .global_writes;
                     });
+                    if let Some(globals) = &mut self.globals
+                        && !global_writes.is_empty()
+                    {
+                        match globals.write(global_writes) {
+                            Ok(written) => {
+                                if written.changed {
+                                    ui.ctx().request_repaint();
+                                }
+                                reported.extend(written.missed);
+                            }
+                            Err(error) => self.globals_error = Some(error),
+                        }
+                    }
                     self.state.actions.extend(key, reported);
                 }
             });
@@ -1094,6 +1110,7 @@ pub(crate) fn render_canvas(
         SceneRevision::INITIAL,
         None,
     )
+    .size
 }
 
 // Scene code can replace its UI clip.
@@ -1200,15 +1217,15 @@ pub(crate) fn render_canvas_at(
     gl_deps: Option<GlDeps<'_>>,
     wgpu: Option<WgpuDeps<'_>>,
     revision: SceneRevision,
-    globals: Option<(GlobalEntry, &[u8])>,
-) -> egui::Vec2 {
+    globals: Option<&GlobalState>,
+) -> Rendered {
     ui.push_id(scene_key(scene), |ui| {
         let prepared = PaintScope::begin(ui);
         let _preview_style = globals
             .is_some()
             .then(|| PreviewContextStyleGuard::new(ui.ctx()));
         let inherited_style = ui.style().clone();
-        if let Some((entry, bytes)) = globals {
+        if let Some((entry, bytes)) = globals.map(GlobalState::parts) {
             entry
                 .prepare(bytes, ui)
                 .expect("gallery validated catalog globals before rendering");
@@ -1223,7 +1240,7 @@ pub(crate) fn render_canvas_at(
             // The canvas edge abuts shell panels, so only nested scene scrollers need a fade.
             ui.spacing_mut().scroll.fade = scene_fade;
             let scope = PaintScope::begin(ui);
-            let declared = egui::Frame::new()
+            let (declared, global_writes) = egui::Frame::new()
                 .inner_margin(egui::Margin::same(16))
                 .show(ui, |ui| {
                     let mut ctx = SceneCtx::with_globals(
@@ -1231,25 +1248,35 @@ pub(crate) fn render_canvas_at(
                         gl_deps,
                         wgpu,
                         revision,
-                        globals.map(|(_, bytes)| bytes),
+                        globals,
                         Some(context::StageStyles::new(
                             inherited_style.clone(),
                             content_style.clone(),
                         )),
                     );
                     (scene.render)(&mut ctx, ui);
-                    ctx.declared()
+                    (ctx.declared(), ctx.take_global_writes())
                 })
                 .inner;
             // Drop knobs the scene stopped declaring this frame.
             store.truncate(declared);
-            scope.finish(ui.ctx())
+            (scope.finish(ui.ctx()), global_writes)
         });
+        let (painted, global_writes) = output.inner;
         prepared.clip(ui.ctx(), output.inner_rect);
-        output.inner.clip(ui.ctx(), output.inner_rect);
-        output.content_size
+        painted.clip(ui.ctx(), output.inner_rect);
+        Rendered {
+            size: output.content_size,
+            global_writes,
+        }
     })
     .inner
+}
+
+/// A rendered canvas: its content size, and the catalog globals its scene wrote.
+pub(crate) struct Rendered {
+    pub(crate) size: egui::Vec2,
+    pub(crate) global_writes: Vec<GlobalWrite>,
 }
 
 struct PreviewContextStyleGuard {
@@ -2145,6 +2172,8 @@ mod tests {
         }
     }
 
+    const DARK: GlobalKey<bool> = GlobalKey::new("Theme");
+
     #[derive(Default, serde::Deserialize, serde::Serialize)]
     struct ToolbarGlobals {
         dark: bool,
@@ -2156,7 +2185,7 @@ mod tests {
                 Icon::from_svg(include_bytes!("../template/assets/theme-light.svg"))
             });
             self.dark = controls.icon_buttons(
-                "Theme",
+                DARK,
                 &[("Light", &ICON, false), ("Dark", &ICON, true)],
                 self.dark,
             );
@@ -2215,6 +2244,117 @@ mod tests {
                 .knobs()[0],
             Knob::IconButtons { value: 1, .. }
         ));
+    }
+
+    thread_local! {
+        static SEEN_DARK: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn switches_to_dark(ctx: &mut SceneCtx<'_>, _: &mut egui::Ui) {
+        let globals: ToolbarGlobals = ctx.__gallery_globals();
+        SEEN_DARK.with_borrow_mut(|seen| seen.push(globals.dark));
+        if !globals.dark {
+            assert!(ctx.set_global(DARK, true));
+        }
+    }
+
+    #[test]
+    fn a_scene_write_moves_the_window_bar_control_and_reaches_the_next_frame() {
+        SEEN_DARK.with_borrow_mut(Vec::clear);
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_| {
+            Gallery::new(
+                FixedWithGlobals(Fixed(
+                    vec![SceneEntry {
+                        render: switches_to_dark,
+                        ..scene("switch", "toolbar", true)
+                    }],
+                    Vec::new(),
+                )),
+                Settings::new(Renderer::Wgpu),
+                None,
+                None,
+            )
+        });
+        harness.run_steps(3);
+
+        assert!(matches!(
+            &harness
+                .state()
+                .globals
+                .as_ref()
+                .expect("catalog globals")
+                .knobs()[0],
+            Knob::IconButtons { value: 1, .. }
+        ));
+        let seen = SEEN_DARK.take();
+        assert_eq!(
+            (seen.first(), seen.last()),
+            (Some(&false), Some(&true)),
+            "the writing frame still saw the old value, later frames the written one: {seen:?}"
+        );
+    }
+
+    const MODE: GlobalKey<u8> = GlobalKey::new("Mode");
+
+    #[derive(Default, serde::Deserialize, serde::Serialize)]
+    struct NarrowGlobals {
+        mode: u8,
+    }
+
+    impl CatalogGlobals for NarrowGlobals {
+        fn controls(&mut self, controls: &mut GlobalControls<'_>) {
+            self.mode = controls.buttons(MODE, &[("One", 1), ("Two", 2)], self.mode);
+        }
+    }
+
+    struct FixedWithNarrowGlobals(Fixed);
+
+    impl SceneSource for FixedWithNarrowGlobals {
+        fn manifest(&mut self) -> Manifest {
+            self.0.manifest()
+        }
+
+        fn globals(&mut self) -> Option<GlobalEntry> {
+            Some(GlobalEntry::of::<NarrowGlobals>())
+        }
+    }
+
+    fn writes_an_unknown_mode(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ctx.set_global(MODE, 3);
+        ui.label("still rendering");
+    }
+
+    #[test]
+    fn a_scene_write_that_cannot_land_is_reported_beside_the_scene() {
+        let mut gallery = Gallery::new(
+            FixedWithNarrowGlobals(Fixed(
+                vec![SceneEntry {
+                    render: writes_an_unknown_mode,
+                    ..scene("narrow", "m", true)
+                }],
+                vec![group("m", "Group")],
+            )),
+            Settings::new(Renderer::Wgpu),
+            None,
+            None,
+        );
+        gallery.state.show_actions = true;
+        let mut harness = egui_kittest::Harness::builder().build_eframe(|_| gallery);
+        harness.run_steps(3);
+
+        assert!(
+            harness
+                .query_all_by_label(
+                    "set_global(\"Mode\"): no option of the control holds the written value"
+                )
+                .next()
+                .is_some(),
+            "the miss is in the Actions panel, once for each frame that wrote it"
+        );
+        assert!(
+            harness.query_by_label("still rendering").is_some(),
+            "a miss does not replace the scene with an error"
+        );
     }
 
     #[test]
@@ -2714,7 +2854,7 @@ mod tests {
                 None,
                 None,
                 SceneRevision::INITIAL,
-                Some(globals.parts()),
+                Some(&globals),
             );
         });
         output.textures_delta.clear();
@@ -2766,7 +2906,7 @@ mod tests {
                 None,
                 None,
                 SceneRevision::INITIAL,
-                Some(globals.parts()),
+                Some(&globals),
             );
         });
         output.textures_delta.clear();
@@ -2858,7 +2998,7 @@ mod tests {
                 None,
                 None,
                 SceneRevision::INITIAL,
-                Some(globals.parts()),
+                Some(&globals),
             );
         });
         output.textures_delta.clear();

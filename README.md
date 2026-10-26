@@ -206,6 +206,10 @@ places SVG choices in the window bar; each option's label identifies captures an
 accessibility name. Other controls stay in the controls panel. Apply themes with `Ui::set_style` so they remain inside
 staged content.
 
+A scene's own switcher writes a global back with `ctx.set_global(LANGUAGE, value)`, using the key its control was
+declared with: `const LANGUAGE: GlobalKey<Language> = GlobalKey::new("Language");`. It renders on the next frame; recipe
+globals still win in captures.
+
 Use `Icon::from_svg_colored(include_bytes!("flag.svg"))` to preserve solid fill colours and opacity; append `.rounded()`
 for a circular crop. `Icon::from_svg` keeps the existing tinted monochrome rendering. Gradients and patterns in coloured
 icons fall back to the supplied tint. Both constructors panic on invalid SVG; for bytes read at run time, use
