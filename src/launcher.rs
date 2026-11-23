@@ -100,6 +100,7 @@ pub fn launch(
             settings.renderer,
             &setup,
             &capture,
+            render::LogMode::detect(cli.log).unwrap_or_else(|reason| fail(&reason.into())),
         ) {
             Ok(()) => Ok(()),
             Err(reason) => fail(&reason),
@@ -328,9 +329,16 @@ struct Cli {
     #[arg(long, value_name = "PATH", conflicts_with_all = ["render", "scene", "list_knobs", "init_capture", "size", "scale", "no_trim"])]
     capture: Option<Utf8PathBuf>,
 
-    /// List each play's steps under the summary (a single `--play` always does)
+    /// Keep each play's whole log as it ran, rather than one line
+    /// for a play that passed (a single `--play` always does)
     #[arg(long, requires = "capture")]
     steps: bool,
+
+    /// How plays are shown as they run: `live`, redrawn in place;
+    /// `linear`, each play printed once it is over;
+    /// or `off` [default: live on a terminal, linear otherwise; GALLERY_LOG too]
+    #[arg(long, value_name = "MODE")]
+    log: Option<render::LogMode>,
 
     /// Where --capture writes, overriding the recipe's own `out`
     #[arg(long, value_name = "DIR", requires = "capture")]
@@ -643,6 +651,7 @@ mod tests {
             crate::Renderer::Wgpu,
             &|_| {},
             &capture,
+            render::LogMode::Off,
         )
         .unwrap_or_else(|reason| fail(&reason));
     }

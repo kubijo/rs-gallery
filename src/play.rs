@@ -12,7 +12,6 @@
 use std::{
     cell::{Cell, RefCell},
     fmt::{self, Debug, Display},
-    ops::Range,
     panic::{self, AssertUnwindSafe, Location},
     sync::Once,
 };
@@ -23,6 +22,13 @@ use egui::{
     accesskit::{self, Role},
 };
 use kittest::{AccessKitNode, NodeT, Queryable};
+
+mod expect;
+pub(crate) mod log;
+mod shortcut;
+
+pub use expect::{Expect, Expected};
+use log::{Check, Entry, Outcome, What};
 
 /// The key of the scene a play drives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,6 +69,8 @@ pub struct PlayError {
     at: Option<SourceAt>,
     /// The labels in the tree when a widget could not be found.
     on_screen: Vec<String>,
+    /// The check that failed, when a matcher is what stopped it.
+    check: Option<Box<Check>>,
 }
 
 /// A line in a play's or a scene's source.
@@ -90,7 +98,12 @@ impl PlayError {
             step: None,
             at: None,
             on_screen: Vec::new(),
+            check: None,
         }
+    }
+
+    pub(crate) fn check(&self) -> Option<&Check> {
+        self.check.as_deref()
     }
 
     pub(crate) fn reason(&self) -> &str {
@@ -198,6 +211,28 @@ impl By {
         self
     }
 
+    /// Any button; `By::button().label("Save")` for one of them.
+    pub fn button() -> Self {
+        Self::new().role(Role::Button)
+    }
+
+    pub fn checkbox() -> Self {
+        Self::new().role(Role::CheckBox)
+    }
+
+    pub fn slider() -> Self {
+        Self::new().role(Role::Slider)
+    }
+
+    pub fn combo_box() -> Self {
+        Self::new().role(Role::ComboBox)
+    }
+
+    /// A single-line text field.
+    pub fn text_input() -> Self {
+        Self::new().role(Role::TextInput)
+    }
+
     /// The current value, exactly: a text field's contents, a slider's number.
     #[must_use]
     pub fn value(mut self, value: impl Into<String>) -> Self {
@@ -264,9 +299,33 @@ pub struct Found {
     pub value: Option<String>,
     pub focused: bool,
     pub disabled: bool,
+    /// On, off, or mixed for a checkbox standing for several;
+    /// `None` when it can't be toggled.
+    /// egui records a selected selectable label here too.
+    pub toggled: Option<accesskit::Toggled>,
+    pub selected: Option<bool>,
+    pub expanded: Option<bool>,
+    /// A slider's or a drag value's number, with its range.
+    pub numeric: Option<Numeric>,
+    pub hidden: bool,
+    pub read_only: bool,
+    pub required: bool,
+    /// What a tooltip says about it.
+    pub description: Option<String>,
+    /// What an empty text field shows in its place.
+    pub placeholder: Option<String>,
     /// In points.
     pub rect: egui::Rect,
     target: Target,
+}
+
+/// A widget's number and the range it can take.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Numeric {
+    pub value: f64,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
 }
 
 /// Where a focus request goes.
@@ -329,6 +388,9 @@ pub(crate) trait PlayDriver {
     /// # Errors
     /// When the recording has failed.
     fn end_step(&mut self) -> Result<(), String>;
+
+    /// The play's log entry `index` began, or ended as `entry` now says.
+    fn logged(&mut self, index: usize, entry: &Entry);
 }
 
 /// [`PlayDriver::query`] over a tree; host code only.
@@ -344,6 +406,20 @@ pub(crate) fn query_tree(root: AccessKitNode<'_>, pixels_per_point: f32, by: &By
                 value: node.value(),
                 focused: node.is_focused(),
                 disabled: node.is_disabled(),
+                toggled: node.toggled(),
+                selected: node.is_selected(),
+                expanded: node.data().is_expanded(),
+                numeric: node.numeric_value().map(|value| Numeric {
+                    value,
+                    min: node.min_numeric_value(),
+                    max: node.max_numeric_value(),
+                    step: node.numeric_value_step(),
+                }),
+                hidden: node.is_hidden(),
+                read_only: node.is_read_only(),
+                required: node.is_required(),
+                description: node.description(),
+                placeholder: node.placeholder().map(str::to_owned),
                 rect: points(node.bounding_box(), pixels_per_point),
                 target: Target {
                     node: node_id,
@@ -420,9 +496,11 @@ pub struct Play<'d> {
     driver: &'d mut dyn PlayDriver,
     frame: u32,
     actions: Vec<String>,
-    steps: Vec<StepRecord>,
+    log: Vec<Entry>,
     /// Labels of the steps now running, outermost first.
     open: Vec<String>,
+    /// Steps finished so far, which numbers their screenshots.
+    steps_done: usize,
     wait_frames: u32,
     knobs_set: KnobsSet,
 }
@@ -460,16 +538,9 @@ impl KnobsSet {
     }
 }
 
-/// A finished step, for the report and the trace.
-pub(crate) struct StepRecord {
-    pub(crate) label: String,
-    pub(crate) frames: Range<u32>,
-    pub(crate) trace: Option<Utf8PathBuf>,
-}
-
 /// What a play run came to.
 pub(crate) struct PlayRun {
-    pub(crate) steps: Vec<StepRecord>,
+    pub(crate) log: Vec<Entry>,
     pub(crate) frames: u32,
     pub(crate) failure: Option<PlayError>,
 }
@@ -495,8 +566,9 @@ pub(crate) fn run(entry: &PlayEntry, driver: &mut dyn PlayDriver) -> PlayRun {
         driver,
         frame: 0,
         actions: Vec::new(),
-        steps: Vec::new(),
+        log: Vec::new(),
         open: Vec::new(),
+        steps_done: 0,
         wait_frames: DEFAULT_WAIT_FRAMES,
         knobs_set: KnobsSet::default(),
     };
@@ -548,7 +620,7 @@ pub(crate) fn run(entry: &PlayEntry, driver: &mut dyn PlayDriver) -> PlayRun {
         }
     }
     PlayRun {
-        steps: play.steps,
+        log: play.log,
         frames: play.frame,
         failure,
     }
@@ -566,37 +638,109 @@ impl Play<'_> {
         label: impl Into<String>,
         body: impl FnOnce(&mut Self) -> PlayResult,
     ) -> PlayResult {
-        self.step_at(label.into(), Location::caller(), body)
+        let label = label.into();
+        let path = self
+            .open
+            .iter()
+            .chain([&label])
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" › ");
+        self.entered(What::Step { label, path }, Location::caller(), body)
     }
 
-    /// [`step`](Self::step), pointing at `at` when nothing inside it points closer.
-    fn step_at(
+    /// Log `what`, run `body` inside it, and close the entry on how it went,
+    /// pointing at `at` when nothing inside points closer.
+    ///
+    /// A step, or a gesture outside one, is what the report counts as a step:
+    /// it is screenshotted, pauses a recording, and is blamed for a failure inside it.
+    fn entered(
         &mut self,
-        label: String,
+        what: What,
         at: &Location<'_>,
         body: impl FnOnce(&mut Self) -> PlayResult,
     ) -> PlayResult {
-        self.open.push(label);
-        let start = self.frame;
-        let mut outcome = caught(|| body(self)).and_then(|outcome| outcome);
-        let label = self.open.join(" › ");
-        self.open.pop();
-        let trace = match self.driver.trace(self.steps.len(), &label) {
-            Ok(trace) => trace,
-            Err(failed) => {
-                outcome = outcome.and(Err(PlayError::new(failed)));
-                None
-            }
-        };
-        if let Err(failed) = self.driver.end_step() {
-            outcome = outcome.and(Err(PlayError::new(failed)));
+        let index = self.log.len();
+        let opens_step = matches!(what, What::Step { .. });
+        if let What::Step { label, .. } = &what {
+            self.open.push(label.clone());
         }
-        self.steps.push(StepRecord {
-            label: label.clone(),
-            frames: start..self.frame,
-            trace,
+        self.log.push(Entry {
+            depth: self.open.len() - usize::from(opens_step),
+            frames: self.frame..self.frame,
+            at: Some(at.into()),
+            outcome: None,
+            trace: None,
+            what,
         });
-        outcome.map_err(|error| error.located(at).in_step(&label))
+        self.driver.logged(index, &self.log[index]);
+        let mut outcome = caught(|| body(self)).and_then(|outcome| outcome);
+        if opens_step {
+            self.open.pop();
+        }
+        let step = self.log[index].step_path().map(str::to_owned);
+        let mut trace = None;
+        if let Some(path) = &step {
+            match self.driver.trace(self.steps_done, path) {
+                Ok(taken) => trace = taken,
+                Err(failed) => outcome = outcome.and(Err(PlayError::new(failed))),
+            }
+            self.steps_done += 1;
+            if let Err(failed) = self.driver.end_step() {
+                outcome = outcome.and(Err(PlayError::new(failed)));
+            }
+        }
+        let entry = &mut self.log[index];
+        entry.frames.end = self.frame;
+        entry.trace = trace;
+        entry.outcome = Some(if outcome.is_ok() {
+            Outcome::Passed
+        } else {
+            Outcome::Failed
+        });
+        self.driver.logged(index, &self.log[index]);
+        outcome.map_err(|error| {
+            let error = error.located(at);
+            match &step {
+                Some(path) => error.in_step(path),
+                None => error,
+            }
+        })
+    }
+
+    /// Log a finished check, and fail with it unless it `passed`.
+    /// `nothing_matched` puts the labels on screen into the failure.
+    fn checked(
+        &mut self,
+        check: Check,
+        start: u32,
+        at: &Location<'_>,
+        passed: bool,
+        nothing_matched: bool,
+    ) -> PlayResult {
+        self.log.push(Entry {
+            depth: self.open.len(),
+            frames: start..self.frame,
+            at: Some(at.into()),
+            outcome: Some(if passed {
+                Outcome::Passed
+            } else {
+                Outcome::Failed
+            }),
+            trace: None,
+            what: What::Check(Box::new(check.clone())),
+        });
+        let index = self.log.len() - 1;
+        self.driver.logged(index, &self.log[index]);
+        if passed {
+            return Ok(());
+        }
+        let mut error = PlayError::new(check.summary()).located(at);
+        if nothing_matched {
+            error = error.seeing(self.driver.labels());
+        }
+        error.check = Some(Box::new(check));
+        Err(error)
     }
 
     /// Every widget `by` matches.
@@ -668,20 +812,37 @@ impl Play<'_> {
     #[track_caller]
     pub fn wait_for(&mut self, mut ready: impl FnMut(&Self) -> bool) -> PlayResult {
         let at = Location::caller();
-        for _ in 0..self.wait_frames {
-            if ready(self) {
-                return Ok(());
+        let start = self.frame;
+        let mut waited = 0;
+        loop {
+            let held = ready(self);
+            if held || waited == self.wait_frames {
+                let check = Check {
+                    subject: "condition".to_owned(),
+                    matcher: "wait_for",
+                    negated: false,
+                    expected: "holds".to_owned(),
+                    actual: Some(if held {
+                        "held".to_owned()
+                    } else {
+                        format!("never held in {waited} frames")
+                    }),
+                    explanation: None,
+                    message: None,
+                };
+                return self
+                    .checked(check, start, at, held, true)
+                    .map_err(|mut error| {
+                        // The condition is a closure with nothing to name it by,
+                        // so the wait is what the failure reports; the log keeps the check.
+                        error.reason = format!("still waiting after {waited} frames");
+                        error.check = None;
+                        error
+                    });
             }
             self.frame(Vec::new()).map_err(|error| error.located(at))?;
+            waited += 1;
         }
-        if ready(self) {
-            return Ok(());
-        }
-        Err(
-            PlayError::new(format!("still waiting after {} frames", self.wait_frames))
-                .seeing(self.driver.labels())
-                .located(at),
-        )
     }
 
     /// How many frames gestures and [`wait_for`](Self::wait_for) wait.
@@ -768,13 +929,22 @@ impl Play<'_> {
         })
     }
 
-    /// Press and release `key`.
+    /// Press and release a key, with any modifiers held:
+    /// `"Enter"`, `"Cmd+A"`, `"Shift+Tab"`.
+    /// Key names are egui's ([`Key::name`]), modifiers `Cmd`, `Ctrl`, `Alt` and `Shift`,
+    /// all regardless of case. As on Linux and Windows, `Cmd` and `Ctrl` are the same key.
     ///
     /// # Errors
-    /// When a frame cannot be drawn.
+    /// When `shortcut` names no key, or a frame cannot be drawn.
     #[track_caller]
-    pub fn press(&mut self, key: Key) -> PlayResult {
-        self.press_with(Modifiers::NONE, key)
+    pub fn press(&mut self, shortcut: &str) -> PlayResult {
+        let at = Location::caller();
+        match shortcut::parse(shortcut) {
+            Ok((modifiers, key)) => self.pressed(modifiers, key, at),
+            Err(reason) => self.unnamed(format!("press {shortcut}"), at, |_| {
+                Err(PlayError::new(reason))
+            }),
+        }
     }
 
     /// Press and release `key` with `modifiers` held.
@@ -783,10 +953,14 @@ impl Play<'_> {
     /// When a frame cannot be drawn.
     #[track_caller]
     pub fn press_with(&mut self, modifiers: Modifiers, key: Key) -> PlayResult {
+        self.pressed(modifiers, key, Location::caller())
+    }
+
+    fn pressed(&mut self, modifiers: Modifiers, key: Key, at: &Location<'_>) -> PlayResult {
         let shortcut = egui::KeyboardShortcut::new(modifiers, key)
             // One spelling on every machine, so a play's step labels and trace names do not differ.
             .format(&egui::ModifierNames::NAMES, false);
-        self.unnamed(format!("press {shortcut}"), Location::caller(), |p| {
+        self.unnamed(format!("press {shortcut}"), at, |p| {
             p.frame(vec![
                 Event::ModifiersChanged(modifiers),
                 keyboard(key, true, modifiers),
@@ -799,12 +973,14 @@ impl Play<'_> {
         })
     }
 
-    /// Press on the widget's centre, move by `delta` points, and let go.
+    /// Press on the widget's centre, move by `delta` points, and let go;
+    /// `[x, y]` will do for `delta`.
     ///
     /// # Errors
     /// When no single widget matches `by` in time.
     #[track_caller]
-    pub fn drag(&mut self, by: impl Into<By>, delta: Vec2) -> PlayResult {
+    pub fn drag(&mut self, by: impl Into<By>, delta: impl Into<Vec2>) -> PlayResult {
+        let delta = delta.into();
         self.gesture("drag", by.into(), Location::caller(), |p, at| {
             let center = aim(&at)?;
             p.frame(vec![Event::PointerMoved(center)])?;
@@ -819,12 +995,14 @@ impl Play<'_> {
         })
     }
 
-    /// Scroll the content under the widget by `delta` points.
+    /// Scroll the content under the widget by `delta` points;
+    /// `[x, y]` will do for `delta`.
     ///
     /// # Errors
     /// When no single widget matches `by` in time.
     #[track_caller]
-    pub fn scroll(&mut self, by: impl Into<By>, delta: Vec2) -> PlayResult {
+    pub fn scroll(&mut self, by: impl Into<By>, delta: impl Into<Vec2>) -> PlayResult {
+        let delta = delta.into();
         self.gesture("scroll", by.into(), Location::caller(), |p, at| {
             p.frame(vec![Event::PointerMoved(aim(&at)?)])?;
             #[expect(clippy::cast_precision_loss, reason = "a handful of frames")]
@@ -854,22 +1032,6 @@ impl Play<'_> {
     /// What the scene has reported through [`action`](crate::action) during the play.
     pub fn actions(&self) -> &[String] {
         &self.actions
-    }
-
-    /// Check the scene reported `expected` through [`action`](crate::action).
-    ///
-    /// # Errors
-    /// When it didn't; the error lists what it did report.
-    #[track_caller]
-    pub fn expect_action(&self, expected: &str) -> PlayResult {
-        if self.actions.iter().any(|line| line == expected) {
-            return Ok(());
-        }
-        Err(PlayError::new(format!(
-            "no action `{expected}`; reported: {:?}",
-            self.actions
-        ))
-        .located(Location::caller()))
     }
 
     fn frame(&mut self, events: Vec<Event>) -> PlayResult {
@@ -906,7 +1068,7 @@ impl Play<'_> {
         })
     }
 
-    /// `body` as a step of its own unless one is already open,
+    /// `body` logged as a gesture, which counts as a step of its own outside one,
     /// pointing at `at` on failure.
     fn unnamed(
         &mut self,
@@ -914,11 +1076,7 @@ impl Play<'_> {
         at: &Location<'_>,
         body: impl FnOnce(&mut Self) -> PlayResult,
     ) -> PlayResult {
-        if self.open.is_empty() {
-            self.step_at(label, at, body)
-        } else {
-            body(self).map_err(|error| error.located(at))
-        }
+        self.entered(What::Gesture { label }, at, body)
     }
 
     /// The one widget `by` matches,

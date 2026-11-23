@@ -1,5 +1,5 @@
 //! A form whose save takes a moment, and a play that drives it.
-//! `wait_for` waits on what the scene shows, not on a frame count.
+//! What a play expects is waited for as the scene shows it, not counted out in frames.
 
 use gallery::prelude::*;
 
@@ -44,12 +44,15 @@ fn form(_ctx: &mut SceneCtx, ui: &mut Ui) {
 #[play(form)]
 fn saves_after_a_moment(p: &mut Play) -> PlayResult {
     p.fill("Name", "Ada")?;
+    p.expect("Name").to_have_value("Ada")?;
     p.click("Count")?;
     p.click("Count")?;
     p.expect_action("counted 2")?;
     // A bare string is a label; `By` narrows when that is ambiguous.
-    p.click(By::new().role(egui::accesskit::Role::Button).label("Save"))?;
+    p.click(By::button().label("Save"))?;
     p.step("the save lands", |p| {
-        p.wait_for(|p| p.query_by_label("Saved Ada").is_some())
+        // Waits until the save is done, a second of the scene's clock away.
+        p.expect("Saved Ada").to_exist()?;
+        p.expect("Saving…").to_be_absent()
     })
 }

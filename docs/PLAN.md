@@ -15,14 +15,17 @@ any run can be recorded. It is built from existing parts rather than invented he
 The work is sliced so every slice is checked headlessly — tests in `just dev::validate`, artifacts under `.tmp/` — and
 the in-window panel, the one part a person would otherwise have to click through, comes last.
 
-Plays (slice 1), recording with MP4 folded in (slices 2 and 4), and slice 3's catalog runner have landed; what they left
-undone is in `TODO.md`.
+Plays (slice 1), recording with MP4 folded in (slice 2), slice 3's catalog runner and slice 4's assertions have landed;
+what they left undone is in `TODO.md`.
 
 ### What is reused
 
 | Need                 | Taken from                                     | What stays ours               |
 | -------------------- | ---------------------------------------------- | ----------------------------- |
 | Queries, input       | `egui_kittest` 0.36 queries and input          | queries behind `PlayDriver`   |
+| Assertions           | Playwright `expect`; jest-dom's state names    | retrying over `By`, in frames |
+| Value matchers       | `googletest` 0.14 `Matcher` and its matchers   | the widget matchers over them |
+| Interaction log      | Storybook's Interactions panel                 | one log for every view of it  |
 | Structural snapshots | `insta` 1.49; Playwright `toMatchAriaSnapshot` | AccessKit tree to stable text |
 | Verdicts, report     | a GPL-3.0 wasm-runtime harness, designs only   | all of the code               |
 
@@ -39,25 +42,11 @@ From the wasm-runtime harness, as designs:
 Left out of it: its event recorder, network and device fixtures, and archived baselines, which pay off only past the
 reference count this repo has.
 
-### Slice 4 — assertions that report themselves (next, ahead of slice 3)
-
-A play asserts today with Rust's `assert!`, `wait_for` and `expect_action`: a failure carries whatever message its
-author wrote, and a passing check leaves no trace. The model is Playwright's `expect(locator)`: matchers that retry
-until they hold and fail with what was expected and what was found.
-
-- `p.expect(by)` returns the matchers: `to_have_value`, `to_have_label`, `to_be_focused`, `to_be_disabled`,
-  `to_be_checked`, `to_exist` and `to_be_absent`, with `p.expect_count(by, n)` beside them and `expect_action` joining
-  the family. Each retries within the play's frame budget, so none needs a `wait_for` around it.
-- Every check is recorded, passing or not, as data rather than a message: subject, matcher, expected, actual, frame.
-  That one record is what the terminal's step list, the JSON report, the HTML report, the step screenshots and slice 5's
-  panel all show, each in its own form.
-- `Found` gains a toggle's state, which `to_be_checked` reads; it has none to read today.
-- A plain `assert!` still works, and is reported as its step's failure without an expected or actual.
-
-It comes first because slice 3's snapshots are assertions too — Playwright's `toHaveScreenshot` and
-`toMatchAriaSnapshot` — so they land as two more matchers, recorded and reported as every other check is.
-
 ### Slice 3 — verdicts for catalogs
+
+Both snapshots are matchers like slice 4's, Playwright's `toHaveScreenshot` and `toMatchAriaSnapshot`: retried within
+the frame budget, recorded in the play's log as a check, and failing with the same panel. A check gains attachments —
+the reference, the actual and the diff — which the reports link and slice 5's panel shows.
 
 - Pixel comparison behind a `verify` feature, keeping dify's MPL-2.0 corner opt-in: `p.expect_screenshot("label")` and
   `--capture --verify`, with the verdicts above. kittest's result drops the pixel count of a difference within budget,

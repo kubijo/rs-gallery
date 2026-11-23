@@ -16,6 +16,8 @@ pub(super) struct HeadlessDriver<'h> {
     pub(super) trace_dir: Option<Utf8PathBuf>,
     /// The key whose value failed the last frame.
     pub(super) bad_knob: Option<String>,
+    /// Where the play's log is shown as it goes.
+    pub(super) view: &'h mut LogView,
 }
 
 impl crate::play::PlayDriver for HeadlessDriver<'_> {
@@ -115,6 +117,10 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
 
     fn end_step(&mut self) -> Result<(), String> {
         hold(self.harness)
+    }
+
+    fn logged(&mut self, index: usize, entry: &Entry) {
+        self.view.logged(index, entry);
     }
 }
 

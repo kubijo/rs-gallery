@@ -34,16 +34,12 @@ pub(super) struct OutputFile {
 pub(super) struct PlayOutcome {
     pub(super) name: String,
     pub(super) frames: u32,
-    pub(super) steps: Vec<StepOutcome>,
-    /// The steps go under the run's summary.
-    pub(super) listed: bool,
+    pub(super) log: Vec<Entry>,
 }
 
-pub(super) struct StepOutcome {
-    pub(super) label: String,
-    pub(super) frames: std::ops::Range<u32>,
-    /// The step's screenshot, when the trace was kept.
-    pub(super) trace: Option<Utf8PathBuf>,
+/// The entries of `log` the report counts as steps.
+fn steps(log: &[Entry]) -> Vec<StepReport<'_>> {
+    log.iter().filter_map(StepReport::of).collect()
 }
 
 /// A run's outcome as JSON, for a loop nobody is watching.
@@ -104,7 +100,8 @@ impl<'a> RunReport<'a> {
                     play: file.play.as_ref().map(|play| PlayReport {
                         name: &play.name,
                         frames: play.frames,
-                        steps: play.steps.iter().map(StepReport::of).collect(),
+                        steps: steps(&play.log),
+                        log: play.log.iter().map(EntryReport::of).collect(),
                     }),
                     video: file.video.as_ref().map(VideoReport::of),
                 })
@@ -124,7 +121,9 @@ impl<'a> RunReport<'a> {
                         .at()
                         .map(|at| format!("{}:{}:{}", at.file, at.line, at.column)),
                     on_screen: failed.error.on_screen(),
-                    steps: failed.steps.iter().map(StepReport::of).collect(),
+                    steps: steps(&failed.log),
+                    check: failed.error.check().map(CheckReport::of),
+                    log: failed.log.iter().map(EntryReport::of).collect(),
                     video: failed.video.as_deref(),
                 })
                 .collect(),
@@ -149,6 +148,10 @@ struct FailedShotReport<'a> {
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     on_screen: &'a [String],
     steps: Vec<StepReport<'a>>,
+    /// The check that failed the play, when a matcher is what stopped it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check: Option<CheckReport<'a>>,
+    log: Vec<EntryReport<'a>>,
     /// The play's recording, when the shot made one.
     #[serde(skip_serializing_if = "Option::is_none")]
     video: Option<&'a Utf8Path>,
@@ -160,13 +163,12 @@ pub(super) struct FailedShot {
     scene: String,
     play: String,
     error: crate::play::PlayError,
-    steps: Vec<StepOutcome>,
-    listed: bool,
+    log: Vec<Entry>,
     video: Option<Utf8PathBuf>,
 }
 
 impl FailedShot {
-    /// `shot`, whose `play` failed with `error`, taking the steps out of `run`.
+    /// `shot`, whose `play` failed with `error`, taking the log out of `run`.
     pub(super) fn of(
         shot: &Shot,
         scene: &SceneEntry,
@@ -185,18 +187,14 @@ impl FailedShot {
             scene: scene.name.to_owned(),
             play: play.name.clone(),
             error,
-            steps: run
-                .steps
-                .drain(..)
-                .map(|step| StepOutcome {
-                    label: step.label,
-                    frames: step.frames,
-                    trace: step.trace,
-                })
-                .collect(),
-            listed: play.steps,
+            log: std::mem::take(&mut run.log),
             video,
         }
+    }
+
+    /// The failed play's log as the terminal shows it.
+    pub(super) fn tree(&self) -> String {
+        step_list(&self.name, &self.play, &self.log, true)
     }
 }
 
@@ -273,6 +271,89 @@ struct PlayReport<'a> {
     /// Frames the play drew, before the shot settled again.
     frames: u32,
     steps: Vec<StepReport<'a>>,
+    log: Vec<EntryReport<'a>>,
+}
+
+/// One thing a play did: a step, a gesture or a check, in the order they began.
+#[derive(serde::Serialize)]
+struct EntryReport<'a> {
+    #[serde(flatten)]
+    what: WhatReport<'a>,
+    /// How many steps were open around it.
+    depth: usize,
+    /// The play's frames it drew: `[first, end)`.
+    frames: [u32; 2],
+    /// The play's line it ran at: `file:line:column`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<String>,
+    /// `passed` or `failed`; absent while it runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace: Option<&'a Utf8Path>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum WhatReport<'a> {
+    Step { label: &'a str, path: &'a str },
+    Gesture { label: &'a str },
+    Check(CheckReport<'a>),
+}
+
+#[derive(serde::Serialize)]
+struct CheckReport<'a> {
+    /// What was looked at: a widget as its locator reads, `actions` or `value`.
+    subject: &'a str,
+    /// The method that checked it: `to_have_value`.
+    matcher: &'a str,
+    negated: bool,
+    /// What should hold: `value is equal to "Ada"`.
+    expected: &'a str,
+    /// What was there when it was last looked at; `null` when nothing matched.
+    actual: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explanation: Option<&'a str>,
+    /// The play's own words for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'a str>,
+}
+
+impl<'a> CheckReport<'a> {
+    fn of(check: &'a Check) -> Self {
+        Self {
+            subject: &check.subject,
+            matcher: check.matcher,
+            negated: check.negated,
+            expected: &check.expected,
+            actual: check.actual.as_deref(),
+            explanation: check.explanation.as_deref(),
+            message: check.message.as_deref(),
+        }
+    }
+}
+
+impl<'a> EntryReport<'a> {
+    fn of(entry: &'a Entry) -> Self {
+        Self {
+            what: match &entry.what {
+                What::Step { label, path } => WhatReport::Step { label, path },
+                What::Gesture { label } => WhatReport::Gesture { label },
+                What::Check(check) => WhatReport::Check(CheckReport::of(check)),
+            },
+            depth: entry.depth,
+            frames: [entry.frames.start, entry.frames.end],
+            at: entry
+                .at
+                .as_ref()
+                .map(|at| format!("{}:{}:{}", at.file, at.line, at.column)),
+            outcome: entry.outcome.map(|outcome| match outcome {
+                Outcome::Passed => "passed",
+                Outcome::Failed => "failed",
+            }),
+            trace: entry.trace.as_deref(),
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -285,12 +366,13 @@ struct StepReport<'a> {
 }
 
 impl<'a> StepReport<'a> {
-    fn of(step: &'a StepOutcome) -> Self {
-        Self {
-            label: &step.label,
-            frames: [step.frames.start, step.frames.end],
-            trace: step.trace.as_deref(),
-        }
+    /// `entry` as the report's step, if it counts as one.
+    fn of(entry: &'a Entry) -> Option<Self> {
+        Some(Self {
+            label: entry.step_path()?,
+            frames: [entry.frames.start, entry.frames.end],
+            trace: entry.trace.as_deref(),
+        })
     }
 }
 
@@ -381,32 +463,6 @@ pub(super) fn report(
             style::path(json, stream)
         ));
     }
-    for slot in run.order {
-        let listed = match *slot {
-            Slot::Written(at) => {
-                let shot = &run.written[at];
-                shot.play.as_ref().filter(|play| play.listed).map(|play| {
-                    let name = shot.path.file_stem().unwrap_or(shot.path.as_str());
-                    (name, play.name.as_str(), &play.steps[..], Ok(()))
-                })
-            }
-            Slot::Failed(at) => {
-                let shot = &run.failed[at];
-                shot.listed.then(|| {
-                    let ended = Err(shot.error.step());
-                    (
-                        shot.name.as_str(),
-                        shot.play.as_str(),
-                        &shot.steps[..],
-                        ended,
-                    )
-                })
-            }
-        };
-        if let Some((shot, play, steps, ended)) = listed {
-            print(&step_list(shot, play, steps, ended));
-        }
-    }
     let count = run.findings.len();
     let titled: Vec<(String, &Diagnostic)> = run
         .findings
@@ -423,29 +479,21 @@ pub(super) fn report(
     }
 }
 
-/// What separates a nested step's label from the steps around it.
-const NESTED: &str = " › ";
-
-/// A play's steps as a tree, each with the frames it drew.
-/// `ended` is `Err` with the step a failed play failed in,
-/// and the steps around it are marked too;
-/// `Err(None)` for a play that failed outside any step.
-pub(super) fn step_list(
-    shot: &str,
-    play: &str,
-    steps: &[StepOutcome],
-    ended: Result<(), Option<&str>>,
-) -> String {
-    let failed = ended.err().flatten();
+/// A play's log as a tree: each step, gesture and check with the frames it drew,
+/// a failed check saying what it found instead.
+/// A play that `failed` with no entry to blame says it failed outside any step.
+pub(super) fn step_list(shot: &str, play: &str, log: &[Entry], failed: bool) -> String {
     let aside = Style::new().dimmed();
     let passed = paint(Style::new().fg_color(Some(AnsiColor::Green.into())), "✓");
     let broke = paint(Style::new().fg_color(Some(AnsiColor::Red.into())), "×");
-    let lines: Vec<(String, &StepOutcome)> = in_play_order(steps)
-        .into_iter()
-        .map(|step| {
-            let depth = step.label.matches(NESTED).count();
-            let own = step.label.rsplit(NESTED).next().unwrap_or(&step.label);
-            (format!("{}{own}", "  ".repeat(depth)), step)
+    let running = paint(aside, "…");
+    let lines: Vec<(String, &Entry)> = log
+        .iter()
+        .map(|entry| {
+            (
+                format!("{}{}", "  ".repeat(entry.depth), line(entry)),
+                entry,
+            )
         })
         .collect();
     let width = lines
@@ -455,7 +503,7 @@ pub(super) fn step_list(
         .unwrap_or(0);
     let digits = lines
         .iter()
-        .map(|(_, step)| step.frames.len().to_string().len())
+        .map(|(_, entry)| entry.frames.len().to_string().len())
         .max()
         .unwrap_or(1);
     let mut list = format!(
@@ -463,17 +511,18 @@ pub(super) fn step_list(
         paint(Style::new().bold(), shot),
         paint(aside, &format!("· {play}"))
     );
-    if lines.is_empty() && ended.is_ok() {
+    if lines.is_empty() && !failed {
         list.push_str(&format!("\n  {}", paint(aside, "no steps")));
     }
-    for (text, step) in lines {
-        let failing = failed.is_some_and(|failed| {
-            failed == step.label || failed.starts_with(&format!("{}{NESTED}", step.label))
-        });
-        let frames = step.frames.len();
+    for (text, entry) in lines {
+        let frames = entry.frames.len();
+        let mark = match entry.outcome {
+            Some(Outcome::Passed) => &passed,
+            Some(Outcome::Failed) => &broke,
+            None => &running,
+        };
         list.push_str(&format!(
-            "\n  {} {text}{}  {}",
-            if failing { &broke } else { &passed },
+            "\n  {mark} {text}{}  {}",
             " ".repeat(width - style::visible_width(&text)),
             paint(
                 aside,
@@ -484,7 +533,7 @@ pub(super) fn step_list(
             ),
         ));
     }
-    if ended == Err(None) {
+    if failed && !log.iter().any(Entry::failed) {
         list.push_str(&format!(
             "\n  {broke} {}",
             paint(aside, "failed outside any step")
@@ -493,39 +542,26 @@ pub(super) fn step_list(
     list
 }
 
-/// `steps`, recorded as each one ended, in the order they began: each before those inside it.
-///
-/// Frames cannot order them, as a step that draws nothing begins on the frame the next one does;
-/// the steps inside one are the deeper ones recorded just before it.
-fn in_play_order(steps: &[StepOutcome]) -> Vec<&StepOutcome> {
-    struct Node<'a> {
-        step: &'a StepOutcome,
-        depth: usize,
-        inside: Vec<Node<'a>>,
-    }
-    fn flatten<'a>(nodes: Vec<Node<'a>>, into: &mut Vec<&'a StepOutcome>) {
-        for node in nodes {
-            into.push(node.step);
-            flatten(node.inside, into);
+/// What an entry's line says, before its indent and frames.
+fn line(entry: &Entry) -> String {
+    let aside = Style::new().dimmed();
+    match &entry.what {
+        What::Step { label, .. } => label.clone(),
+        What::Gesture { label } => paint(aside, label),
+        What::Check(check) => {
+            let mut line = format!("{} {}", check.subject, one_line(&check.expected));
+            if entry.failed() {
+                let actual = check.actual.as_deref().unwrap_or("nothing matched");
+                line.push_str(&paint(aside, &format!("  got {}", one_line(actual))));
+            }
+            line
         }
     }
-    let mut ended: Vec<Node<'_>> = Vec::new();
-    for step in steps {
-        let depth = step.label.matches(NESTED).count();
-        let first_inside = ended
-            .iter()
-            .rposition(|node| node.depth <= depth)
-            .map_or(0, |at| at + 1);
-        let inside = ended.split_off(first_inside);
-        ended.push(Node {
-            step,
-            depth,
-            inside,
-        });
-    }
-    let mut ordered = Vec::with_capacity(steps.len());
-    flatten(ended, &mut ordered);
-    ordered
+}
+
+/// A phrase on one line: googletest lays a compound matcher's parts out on lines of their own.
+fn one_line(phrase: &str) -> String {
+    phrase.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Every shot of a run, in recipe order, for [`report`] to lay out.
@@ -616,10 +652,9 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
         .map(|w| w.size.width.to_string().len())
         .max()
         .unwrap_or_default();
-    let screenshots_of = |steps: &[StepOutcome]| {
-        steps
-            .iter()
-            .find_map(|step| step.trace.as_deref())
+    let screenshots_of = |log: &[Entry]| {
+        log.iter()
+            .find_map(|entry| entry.trace.as_deref())
             .and_then(Utf8Path::parent)
             .map(linked)
             .unwrap_or_default()
@@ -634,7 +669,10 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
                 }
                 let (steps, screenshots) = match &w.play {
                     None => (String::new(), String::new()),
-                    Some(play) => (play.steps.len().to_string(), screenshots_of(&play.steps)),
+                    Some(play) => (
+                        steps(&play.log).len().to_string(),
+                        screenshots_of(&play.log),
+                    ),
                 };
                 let recording = w.video.as_ref().map_or_else(String::new, |video| {
                     format!(
@@ -658,8 +696,8 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
                     failed.clone(),
                     shot.name.clone(),
                     paint(aside, "failed"),
-                    shot.steps.len().to_string(),
-                    screenshots_of(&shot.steps),
+                    steps(&shot.log).len().to_string(),
+                    screenshots_of(&shot.log),
                     shot.video.as_deref().map_or_else(String::new, linked),
                 ]
             }

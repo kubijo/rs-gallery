@@ -8,8 +8,12 @@ use crate::{
     By, Linked, Manifest, Play, PlayEntry, PlayError, PlayResult, Renderer, SceneCtx, SceneEntry,
     SceneKey, SceneSource,
     diagnostic::Diagnostic,
-    render::{Capture, DEFAULT_SCALE, Overrides, Shot, ShotPlay, Trace, render_with_globals},
+    render::{
+        Capture, DEFAULT_SCALE, LogMode, Overrides, Shot, ShotPlay, Trace, render_with_globals,
+    },
 };
+
+mod matchers;
 
 /// A fresh directory of this test's own.
 fn scratch(name: &str) -> Utf8PathBuf {
@@ -60,6 +64,7 @@ fn capture(
             sheet: None,
             report,
         },
+        LogMode::Off,
     )
 }
 
@@ -310,6 +315,7 @@ fn a_failed_play_does_not_stop_the_shots_after_it() {
             sheet: None,
             report: Some(report.clone()),
         },
+        LogMode::Off,
     )
     .expect_err("one play failed")
     .plain();
@@ -511,6 +517,7 @@ fn a_knob_no_frame_declares_fails_its_play_and_not_the_run() {
             sheet: None,
             report: Some(report.clone()),
         },
+        LogMode::Off,
     )
     .expect_err("the misspelt play fails")
     .plain();
@@ -1101,7 +1108,7 @@ fn a_drag_moves_the_pointer_across_the_widget_while_held() {
         ui.label(format!("dragged {dragged}"));
     }
     fn drag_right(p: &mut Play<'_>) -> PlayResult {
-        p.drag("pad", egui::vec2(100.0, 0.0))?;
+        p.drag("pad", [100.0, 0.0])?;
         p.step("the pad followed", |p| {
             let dragged = reading(p, "dragged");
             // `Response::drag_delta` is zero until `InputState::is_decidedly_dragging`,
@@ -1142,7 +1149,7 @@ fn a_scroll_moves_the_content_under_the_widget() {
         ui.data_mut(|data| data.insert_temp(id, output.state.offset.y));
     }
     fn scroll_down(p: &mut Play<'_>) -> PlayResult {
-        p.scroll("row 1", egui::vec2(0.0, -200.0))?;
+        p.scroll("row 1", [0.0, -200.0])?;
         p.step("the list moved", |p| {
             let offset = reading(p, "offset");
             assert!(offset > 0.0, "scrolled to {offset}");
@@ -1186,7 +1193,7 @@ fn nested(p: &mut Play<'_>) -> PlayResult {
 }
 
 fn tab_then_hover(p: &mut Play<'_>) -> PlayResult {
-    p.step("tab", |p| p.press(egui::Key::Tab))?;
+    p.step("tab", |p| p.press("Tab"))?;
     p.step("hover", |p| p.hover("off"))
 }
 
@@ -1359,4 +1366,36 @@ fn a_failing_play_keeps_its_recording_and_the_report_points_at_it() {
             .is_some_and(|path| path.ends_with("shot.apng")),
         "{failed}"
     );
+}
+
+#[test]
+fn a_mistyped_key_fails_its_press_saying_what_was_meant_and_where() {
+    fn ready(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.label("ready");
+    }
+    fn mistyped(p: &mut Play<'_>) -> PlayResult {
+        p.press("Cmd+Entr")
+    }
+    let (manifest, plays) = catalog(ready, &[("mistyped-key", mistyped)]);
+    let dir = scratch("mistyped-key");
+    let panel = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "mistyped-key",
+            Trace::RetainOnFailure,
+        ),
+        None,
+    )
+    .expect_err("the play fails")
+    .plain();
+    for line in [
+        "failed at step `press Cmd+Entr`",
+        "`Entr` is no key; did you mean `Enter`?",
+        r#"p.press("Cmd+Entr")"#,
+    ] {
+        assert!(panel.contains(line), "`{line}` in:\n{panel}");
+    }
 }

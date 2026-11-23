@@ -416,23 +416,49 @@ person would, finding widgets by their accessible label or role rather than by w
 #[play(form)]
 fn saves_after_a_moment(p: &mut Play) -> PlayResult {
     p.fill("Name", "Ada")?;
+    p.expect("Name").to_have_value("Ada")?;
     p.click("Count")?;
     p.expect_action("counted 1")?;
-    p.click(By::new().role(egui::accesskit::Role::Button).label("Save"))?;
-    p.step("the save lands", |p| {
-        p.wait_for(|p| p.query_by_label("Saved Ada").is_some())
-    })
+    p.click(By::button().label("Save"))?;
+    p.step("the save lands", |p| p.expect("Saved Ada").to_exist())
 }
 ```
 
-A bare string is a label; `By` narrows by role, a label fragment or a value when that alone is ambiguous. A gesture
-waits, a frame at a time, for exactly one widget to match, and fails naming what was on screen if none does. Each
-gesture is a fixed sequence of frames — a click is a move, a press, a release and a frame to settle — so a play draws
-the same frames on any machine. `wait_for` draws frames until its condition holds, `step` names part of the script and
-takes the blame for any panic in it, `expect_action` checks what the scene reported through `gallery::action`, and
-`set_knob` holds a knob over whatever the recipe set. A held scene knob, the recipe's or the play's, refuses the scene's
-own `set`; a `set_knob` value that never lands fails the play. A scene can have several plays, each known by its
-function's name.
+A bare string is a label; `By` narrows by role, a label fragment or a value when that alone is ambiguous, and
+`By::button()`, `slider()`, `checkbox()`, `combo_box()` and `text_input()` start from a role. `press` takes a shortcut
+as written — `"Enter"`, `"Shift+Tab"`, `"Cmd+A"` — by egui's key names and `Cmd`, `Ctrl`, `Alt` and `Shift`, in any
+case; plays press keys as Linux and Windows do, so `Cmd` and `Ctrl` are one key. A typo fails the press, suggesting the
+name it most likely meant. The prelude brings `Key`, `Modifiers` and `Role` for anything past those. A gesture waits, a
+frame at a time, for exactly one widget to match, and fails naming what was on screen if none does. Each gesture is a
+fixed sequence of frames — a click is a move, a press, a release and a frame to settle — so a play draws the same frames
+on any machine. `step` names part of the script and takes the blame for any panic in it, and `set_knob` holds a knob
+over whatever the recipe set. A held scene knob, the recipe's or the play's, refuses the scene's own `set`; a `set_knob`
+value that never lands fails the play. A scene can have several plays, each known by its function's name.
+
+### What a play expects
+
+`p.expect(by)` checks the widget `by` matches, drawing frames until the check holds — within the play's wait budget, or
+`.within(frames)` — so no check needs a wait around it:
+
+| Matcher                                      | Holds when                                |
+| -------------------------------------------- | ----------------------------------------- |
+| `to_exist`, `to_be_absent`                   | one widget matches; none does             |
+| `to_have_count(n)`                           | as many match                             |
+| `to_have_value`, `to_have_label`             | its value or accessible name matches      |
+| `to_have_description`, `to_have_placeholder` | its tooltip or empty-field text matches   |
+| `to_have_numeric_value`                      | a slider's or drag value's number matches |
+| `to_be_focused`                              | it has keyboard focus                     |
+| `to_be_disabled`, `to_be_enabled`            | as named                                  |
+| `to_be_checked`, `to_be_partially_checked`   | a checkbox is on, or mixed                |
+| `to_be_selected`, `to_be_expanded`           | as named                                  |
+| `to_be_visible`, `to_be_hidden`              | it has a place on screen, or none         |
+
+`.not()` expects the opposite, and `.because("…")` puts the check in the play's own words. A plain value means equality;
+anything else is one of googletest's matchers, re-exported as `gallery::matchers`:
+`to_have_value(contains_substring("Ad"))`, `to_have_numeric_value(gt(0.0))`, `to_have_count(all![gt(1), lt(5)])`.
+`p.expect_value(|p| …, matcher)` polls any value the play can compute, and `p.expect_action(…)` waits for the scene to
+report an action through `gallery::action`. A failure says what was expected, what was found, and points at the line; a
+plain `assert!` still fails its step, without the two.
 
 A shot captures the state a play leaves behind:
 
@@ -448,12 +474,18 @@ play = "saves_after_a_moment"
 trace = "on" # optional; "retain-on-failure" unless set
 ```
 
-The report lists the play's steps and the frames each drew, and the terminal does too under the summary — always for a
-single `--play`, and for every play of a recipe with `--steps` — as a tree with the failing step marked. A play that
-fails does not stop the run: the other shots still run, the summary marks each shot passed or failed, and each failure
-follows in a panel that names the step and shows the play's own failing line. A failed play keeps a screenshot after
-every step in a directory beside the shot, `renders/saved.steps/01-fill-name.png` and on, which `trace = "on"` keeps for
-a passing play too. The run exits non-zero, and the report's `failed_shots` lists every failure step by step.
+While a capture runs, each play's log — its steps, gestures and checks, with the frames each drew — shows on stderr. On
+a terminal the running play's tree is redrawn in place, and a play that passed folds to one line; through a pipe, in CI,
+on a dumb terminal or under an agent's harness each play is printed once it is over, the same lines without redrawing.
+`--steps` keeps a passing play's whole tree, as a single `--play` always does; `--log live|linear|off`, or
+`GALLERY_LOG`, overrides the choice for a harness that pretends to be a terminal. `GALLERY_LOG_PACE=300` holds each live
+redraw for 300 ms, slow enough to follow a run or record it.
+
+A play that fails does not stop the run: the other shots still run, the summary marks each shot passed or failed, and
+each failure follows in a panel that names the step and shows the play's own failing line. A failed play keeps a
+screenshot after every step in a directory beside the shot, `renders/saved.steps/01-fill-name.png` and on, which
+`trace = "on"` keeps for a passing play too. The run exits non-zero. The report's `play` gives its `steps` and its whole
+`log`, each check with what it expected and found; `failed_shots` adds the `check` that failed.
 
 Screenshots show the pointer where the play left it, as `egui_kittest` draws it. It stays in the final shot too: the
 hover it marks is the state a hover play exists to capture.

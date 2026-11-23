@@ -140,7 +140,7 @@ impl Catalog {
                 &self.setup,
                 &shot,
             )
-            .map_err(|failure| Failed::from(failure.plain()))
+            .map_err(Failed::from)
         })
     }
 }

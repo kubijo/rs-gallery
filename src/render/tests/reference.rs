@@ -25,6 +25,7 @@ fn the_reference_images_match_what_the_recipe_renders() {
         Renderer::Glow,
         &|_: &egui::Context| {},
         &capture,
+        LogMode::Off,
     )
     .expect("every reference shot renders");
 

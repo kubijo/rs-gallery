@@ -30,6 +30,7 @@ use crate::{
     install_context,
     knobs::Span,
     offscreen::GlDeps,
+    play::log::{Check, Entry, Outcome, What},
     render_canvas_pinned, sheet,
     sheet::Panel,
     style::{self, paint},
@@ -38,6 +39,7 @@ use crate::{
 
 pub(crate) use crate::video::VideoFormat;
 
+mod log_view;
 mod overlay;
 mod overrides;
 mod play_driver;
@@ -49,6 +51,8 @@ mod shot;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use self::log_view::LogMode;
+use self::log_view::LogView;
 pub(crate) use self::overlay::Corner;
 use self::{overlay::InputOverlay, play_driver::*, record::*};
 pub(crate) use self::{overrides::*, recipe::*, report::*, session::*, shot::*};
@@ -302,9 +306,10 @@ pub(crate) fn render(
     setup: &impl Fn(&egui::Context),
     capture: &Capture,
 ) -> Result<(), Diagnostic> {
-    render_with_globals(manifest, None, &[], renderer, setup, capture)
+    render_with_globals(manifest, None, &[], renderer, setup, capture, LogMode::Off)
 }
 
+/// Run every shot of `capture`, its plays shown as they go as `log` says.
 pub(crate) fn render_with_globals(
     manifest: &Manifest,
     globals: Option<GlobalEntry>,
@@ -312,9 +317,11 @@ pub(crate) fn render_with_globals(
     renderer: Renderer,
     setup: &impl Fn(&egui::Context),
     capture: &Capture,
+    log: LogMode,
 ) -> Result<(), Diagnostic> {
     // Before the loop rather than inside it — [`Session`] has why that matters.
     let session = Session::open(renderer)?;
+    let mut view = LogView::new(log);
     let mut written = Vec::new();
     let mut panels = Vec::new();
     let mut outcome = Ok(());
@@ -340,16 +347,11 @@ pub(crate) fn render_with_globals(
     // Every shot in recipe order, written or failed, for the summary table.
     let mut order = Vec::new();
     for shot in &capture.shots {
-        let mut failed_shot = None;
-        match shoot_with_globals(
-            manifest,
-            globals,
-            plays,
-            &session,
-            setup,
-            shot,
-            &mut failed_shot,
-        ) {
+        let mut watch = Watch::new(&mut view);
+        let shot_outcome =
+            shoot_with_globals(manifest, globals, plays, &session, setup, shot, &mut watch);
+        let failed_shot = watch.failed;
+        match shot_outcome {
             Ok(None) => {}
             Ok(Some(taken)) => {
                 // Held only for a sheet, so a run without one keeps a single capture in memory
@@ -472,8 +474,8 @@ pub(crate) fn render_with_globals(
 /// nothing reported, only whether it failed.
 ///
 /// # Errors
-/// What a capture would report for the shot,
-/// a failed play or a panicking scene included.
+/// What a capture would report for the shot, as plain text,
+/// a failed play or a panicking scene included; a failed play's log follows its report.
 pub(crate) fn check_shot(
     manifest: &Manifest,
     globals: Option<GlobalEntry>,
@@ -481,8 +483,18 @@ pub(crate) fn check_shot(
     session: &Session,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
-) -> Result<(), Diagnostic> {
-    shoot_with_globals(manifest, globals, plays, session, setup, shot, &mut None).map(drop)
+) -> Result<(), String> {
+    let mut view = LogView::off();
+    let mut watch = Watch::new(&mut view);
+    let outcome = shoot_with_globals(manifest, globals, plays, session, setup, shot, &mut watch);
+    outcome.map(drop).map_err(|failure| {
+        let mut text = failure.plain();
+        if let Some(failed) = &watch.failed {
+            text.push_str("\n\n");
+            text.push_str(&style::plain(&failed.tree()));
+        }
+        text
+    })
 }
 
 /// What one invocation asks for.

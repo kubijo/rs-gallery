@@ -2,7 +2,10 @@
 //! Some plays pass and some fail on purpose, each in its own way.
 //! Copied into the demo beside the template's scenes; not part of the template.
 
-use gallery::prelude::*;
+use gallery::{
+    matchers::{gt, lt},
+    prelude::*,
+};
 
 scene_meta! { title: "Demo / Tasks" }
 
@@ -137,16 +140,17 @@ fn todo(_ctx: &mut SceneCtx, ui: &mut Ui) {
 
 fn add(p: &mut Play, name: &str) -> PlayResult {
     p.fill("New task", name)?;
-    p.press(egui::Key::Enter)
+    p.press("Enter")
 }
 
-/// The number at the end of the one label starting with `prefix`.
-fn reading(p: &Play, prefix: &str) -> f32 {
-    let label = p
-        .get(By::new().label_contains(prefix))
-        .label
-        .unwrap_or_default();
-    label[prefix.len()..].trim().parse().unwrap_or(f32::NAN)
+/// The label counting the tasks still open.
+fn count_left() -> By {
+    By::new().label_contains(" left")
+}
+
+/// Where a task's row sits from the top.
+fn top(p: &Play, task: &str) -> f32 {
+    p.get(task).rect.top()
 }
 
 #[play(todo)]
@@ -157,18 +161,13 @@ fn adds_completes_and_filters(p: &mut Play) -> PlayResult {
     p.expect_action("added Ship it")?;
     p.click("Write docs")?;
     p.expect_action("completed Write docs")?;
-    p.step("one task is left", |p| {
-        p.get_by_label("1 left");
-        Ok(())
-    })?;
+    p.expect("Write docs").to_be_checked()?;
+    p.expect(count_left()).to_have_label("1 left")?;
     p.click("Active")?;
+    p.expect("Active").to_be_selected()?;
     p.step("only the open task shows", |p| {
-        assert!(
-            p.query_by_label("Write docs").is_none(),
-            "the done task is hidden"
-        );
-        assert!(p.query_by_label("Ship it").is_some(), "the open task shows");
-        Ok(())
+        p.expect("Write docs").to_be_absent()?;
+        p.expect("Ship it").not().to_be_checked()
     })
 }
 
@@ -176,43 +175,28 @@ fn adds_completes_and_filters(p: &mut Play) -> PlayResult {
 fn sorts_by_name_from_the_menu(p: &mut Play) -> PlayResult {
     add(p, "Zebra")?;
     add(p, "Apple")?;
-    p.click(By::new().role(egui::accesskit::Role::ComboBox))?;
+    p.click(By::combo_box())?;
     p.click("Name")?;
     p.step("Apple comes first", |p| {
-        let apple = p.get_by_label("Apple").rect.top();
-        let zebra = p.get_by_label("Zebra").rect.top();
-        assert!(apple < zebra, "Apple at {apple}, Zebra at {zebra}");
-        Ok(())
+        let zebra = top(p, "Zebra");
+        p.expect_value(|p| top(p, "Apple"), lt(zebra))
     })
 }
 
 #[play(todo)]
 fn drags_the_priority_up(p: &mut Play) -> PlayResult {
-    p.drag(
-        By::new().role(egui::accesskit::Role::Slider),
-        egui::vec2(80.0, 0.0),
-    )?;
-    p.step("the priority rose", |p| {
-        let priority = reading(p, "priority");
-        assert!(priority > 0.0, "priority is {priority}");
-        Ok(())
-    })
+    p.drag(By::slider(), [80.0, 0.0])?;
+    p.expect(By::slider()).to_have_numeric_value(gt(0.0))
 }
 
 #[play(todo)]
 fn scrolls_to_the_end_of_a_long_list(p: &mut Play) -> PlayResult {
     p.click("Add 30 samples")?;
-    p.step("the last sample starts off screen", |p| {
-        assert!(
-            p.query_by_label("Sample 30").is_none(),
-            "it is not laid out yet"
-        );
-        Ok(())
-    })?;
-    p.scroll("Sample 1", egui::vec2(0.0, -800.0))?;
-    p.step("the last sample comes into view", |p| {
-        p.wait_for(|p| p.query_by_label("Sample 30").is_some())
-    })
+    p.expect("Sample 30")
+        .because("rows off screen are not laid out")
+        .to_be_absent()?;
+    p.scroll("Sample 1", [0.0, -800.0])?;
+    p.expect("Sample 30").to_exist()
 }
 
 #[play(todo)]
@@ -223,12 +207,8 @@ fn clears_done_tasks(p: &mut Play) -> PlayResult {
     p.click("Clear done")?;
     p.expect_action("cleared 1")?;
     p.step("only the open task is left", |p| {
-        p.get_by_label("1 left");
-        assert!(
-            p.query_by_label("Write docs").is_none(),
-            "the done task is gone"
-        );
-        Ok(())
+        p.expect(count_left()).to_have_label("1 left")?;
+        p.expect("Write docs").to_be_absent()
     })
 }
 
@@ -254,8 +234,7 @@ fn counts_the_wrong_number_left(p: &mut Play) -> PlayResult {
     add(p, "Ship it")?;
     p.click("Write docs")?;
     p.step("two tasks are left", |p| {
-        p.get_by_label("2 left");
-        Ok(())
+        p.expect(count_left()).within(10).to_have_label("2 left")
     })
 }
 
@@ -264,13 +243,12 @@ fn counts_the_wrong_number_left(p: &mut Play) -> PlayResult {
 fn asserts_the_wrong_order(p: &mut Play) -> PlayResult {
     add(p, "Zebra")?;
     add(p, "Apple")?;
-    p.click(By::new().role(egui::accesskit::Role::ComboBox))?;
+    p.click(By::combo_box())?;
     p.click("Name")?;
     p.step("Zebra comes first", |p| {
-        let apple = p.get_by_label("Apple").rect.top();
-        let zebra = p.get_by_label("Zebra").rect.top();
-        assert!(zebra < apple, "Zebra at {zebra}, Apple at {apple}");
-        Ok(())
+        let apple = top(p, "Apple");
+        p.set_wait_frames(10);
+        p.expect_value(|p| top(p, "Zebra"), lt(apple))
     })
 }
 
@@ -278,9 +256,8 @@ fn asserts_the_wrong_order(p: &mut Play) -> PlayResult {
 #[play(todo)]
 fn waits_for_a_save_that_never_comes(p: &mut Play) -> PlayResult {
     add(p, "Write docs")?;
-    p.set_wait_frames(10);
     p.step("the list is saved", |p| {
-        p.wait_for(|p| p.query_by_label("Saved").is_some())
+        p.expect("Saved").within(10).to_exist()
     })
 }
 

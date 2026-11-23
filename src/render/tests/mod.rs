@@ -2,6 +2,7 @@
 
 mod capture;
 mod globals;
+mod log_view;
 mod offscreen;
 mod overlay;
 mod overrides;

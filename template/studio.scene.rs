@@ -5,7 +5,7 @@
 //! Recorded with `input = true`, the keys and the mouse
 //! show over it as a screencast would.
 
-use gallery::prelude::*;
+use gallery::{matchers::gt, prelude::*};
 
 scene_meta! { title: "Example / Studio" }
 
@@ -129,25 +129,24 @@ fn show(ui: &Ui, area: egui::Rect, poster: &Poster) {
 fn tours_every_kind_of_input(p: &mut Play) -> PlayResult {
     p.step("name the poster", |p| {
         p.click("Title")?;
-        p.press_with(egui::Modifiers::COMMAND, egui::Key::A)?;
-        p.type_text("Hello, gallery")
+        p.press("Cmd+A")?;
+        p.type_text("Hello, gallery")?;
+        p.expect("Title").to_have_value("Hello, gallery")
     })?;
     p.step("make it bold", |p| {
-        p.press_with(egui::Modifiers::COMMAND, egui::Key::B)?;
-        p.expect_action("bold on")
+        p.press("Cmd+B")?;
+        p.expect_action("bold on")?;
+        p.expect("Bold (Ctrl+B)").to_be_checked()
     })?;
     p.step("grow the type", |p| {
-        p.drag(
-            By::new().role(egui::accesskit::Role::Slider),
-            egui::vec2(30.0, 0.0),
-        )
+        p.drag(By::slider(), [30.0, 0.0])?;
+        p.expect(By::slider()).to_have_numeric_value(gt(48.0))
     })?;
-    p.step("scroll to violet", |p| {
-        p.scroll("Coral", egui::vec2(0.0, -120.0))
-    })?;
+    p.step("scroll to violet", |p| p.scroll("Coral", [0.0, -120.0]))?;
     p.step("paint it violet", |p| {
         p.click("Violet")?;
-        p.expect_action("colour Violet")
+        p.expect_action("colour Violet")?;
+        p.expect("Violet").to_be_selected()
     })?;
     p.step("look it over", |p| p.hover("Reset"))
 }

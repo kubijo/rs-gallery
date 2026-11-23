@@ -205,11 +205,32 @@ pub(super) fn shoot(
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
 ) -> Result<Option<ShotOutput>, Diagnostic> {
-    shoot_with_globals(manifest, None, &[], session, setup, shot, &mut None)
+    let mut view = LogView::off();
+    shoot_with_globals(
+        manifest,
+        None,
+        &[],
+        session,
+        setup,
+        shot,
+        &mut Watch::new(&mut view),
+    )
 }
 
-/// `failed` is where a play that stops the shot
-/// leaves what it did, for the run's report.
+/// What a run keeps of a shot's play besides the image.
+pub(super) struct Watch<'a> {
+    /// Where the play's log is shown as it goes.
+    pub(super) view: &'a mut LogView,
+    /// What a play that stopped the shot did, for the run's report.
+    pub(super) failed: Option<FailedShot>,
+}
+
+impl<'a> Watch<'a> {
+    pub(super) fn new(view: &'a mut LogView) -> Self {
+        Self { view, failed: None }
+    }
+}
+
 pub(super) fn shoot_with_globals(
     manifest: &Manifest,
     globals: Option<GlobalEntry>,
@@ -217,7 +238,7 @@ pub(super) fn shoot_with_globals(
     session: &Session,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
-    failed: &mut Option<FailedShot>,
+    watch: &mut Watch<'_>,
 ) -> Result<Option<ShotOutput>, Diagnostic> {
     let scene = *resolve_scene(&manifest.scenes, &shot.scene)?;
     let SceneFrame {
@@ -265,8 +286,16 @@ pub(super) fn shoot_with_globals(
                 trim: shot.trim,
                 trace_dir: trace_dir.clone(),
                 bad_knob: None,
+                view: watch.view,
             };
+            let name = shot
+                .out
+                .as_deref()
+                .and_then(Utf8Path::file_stem)
+                .unwrap_or(&shot.scene);
+            driver.view.begin(name, &play.name, play.steps);
             let mut run = crate::play::run(entry, &mut driver);
+            driver.view.end(run.failure.is_some(), run.frames);
             let ledger = driver.ledger;
             harness.state_mut().actions = None;
             let video = finish(&mut harness)?;
@@ -282,8 +311,25 @@ pub(super) fn shoot_with_globals(
                 let mut report = Diagnostic::new(format!(
                     "play `{}` on `{}` failed{at}",
                     play.name, scene.name
-                ))
-                .cause(failure.reason());
+                ));
+                report = match failure.check() {
+                    Some(check) => {
+                        if let Some(message) = &check.message {
+                            report = report.cause(message);
+                        }
+                        report = report
+                            .cause(format!("expected {} {}", check.subject, check.expected))
+                            .cause(format!(
+                                "found {}",
+                                check.actual.as_deref().unwrap_or("nothing matched")
+                            ));
+                        match &check.explanation {
+                            Some(explanation) => report.cause(explanation),
+                            None => report,
+                        }
+                    }
+                    None => report.cause(failure.reason()),
+                };
                 if !failure.on_screen().is_empty() {
                     report = report.cause(on_screen(failure.on_screen()));
                 }
@@ -292,10 +338,15 @@ pub(super) fn shoot_with_globals(
                     report = report.hint(format!("not at the value set: {reason}"));
                 }
                 if let Some(at) = failure.at() {
-                    report = report.source_at(&at.file, at.line, at.column, "failed here");
+                    let label = if failure.check().is_some() {
+                        "expected here"
+                    } else {
+                        "failed here"
+                    };
+                    report = report.source_at(&at.file, at.line, at.column, label);
                 }
                 if let Some(dir) = &trace_dir
-                    && run.steps.iter().any(|step| step.trace.is_some())
+                    && run.log.iter().any(|entry| entry.trace.is_some())
                 {
                     report = report.hint(format!(
                         "screenshots of each step are in {}",
@@ -308,7 +359,7 @@ pub(super) fn shoot_with_globals(
                         crate::style::path_on_stderr(path)
                     ));
                 }
-                *failed = Some(FailedShot::of(
+                watch.failed = Some(FailedShot::of(
                     shot,
                     &scene,
                     play,
@@ -342,7 +393,7 @@ pub(super) fn shoot_with_globals(
                     play.name, scene.name
                 ))
                 .cause(report.summary());
-                *failed = Some(FailedShot::of(
+                watch.failed = Some(FailedShot::of(
                     shot, &scene, play, error, &mut run, video_path,
                 ));
                 return Err(report);
@@ -352,8 +403,8 @@ pub(super) fn shoot_with_globals(
                 if let Some(dir) = &trace_dir {
                     clear_trace(dir)?;
                 }
-                for step in &mut run.steps {
-                    step.trace = None;
+                for entry in &mut run.log {
+                    entry.trace = None;
                 }
             }
             let video = match (video, shot.record) {
@@ -372,17 +423,8 @@ pub(super) fn shoot_with_globals(
             };
             let outcome = PlayOutcome {
                 name: play.name.clone(),
-                listed: play.steps,
                 frames: run.frames,
-                steps: run
-                    .steps
-                    .into_iter()
-                    .map(|step| StepOutcome {
-                        label: step.label,
-                        frames: step.frames,
-                        trace: step.trace,
-                    })
-                    .collect(),
+                log: run.log,
             };
             (Some(outcome), video)
         }

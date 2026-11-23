@@ -61,28 +61,55 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
     assert_eq!(columns[0], columns[1], "the sizes line up:\n{table}");
 }
 
-#[test]
-fn a_plays_steps_list_as_a_tree_with_the_failing_branch_marked() {
-    let step = |label: &str, frames: std::ops::Range<u32>| StepOutcome {
-        label: label.to_owned(),
+/// A log entry as a play leaves it, finished with `outcome`.
+fn entry(depth: usize, frames: std::ops::Range<u32>, passed: bool, what: What) -> Entry {
+    Entry {
+        depth,
         frames,
+        at: None,
+        outcome: Some(if passed {
+            Outcome::Passed
+        } else {
+            Outcome::Failed
+        }),
         trace: None,
+        what,
+    }
+}
+
+fn step(label: &str) -> What {
+    What::Step {
+        label: label.to_owned(),
+        path: label.to_owned(),
+    }
+}
+
+#[test]
+fn a_plays_log_lists_steps_gestures_and_checks_as_a_tree_with_the_failure_marked() {
+    let saved = crate::play::log::Check {
+        subject: "\"Saved\"".to_owned(),
+        matcher: "to_exist",
+        negated: false,
+        expected: "exists".to_owned(),
+        actual: None,
+        explanation: None,
+        message: None,
     };
-    // As a play records them: each as it ends, so the inner ones come first.
-    // "ready" draws nothing, so it begins on the frame "save" does.
-    let steps = [
-        step("open", 0..3),
-        step("ready", 3..3),
-        step("save › type the name", 3..5),
-        step("save › wait for it", 5..65),
-        step("save", 3..65),
+    let log = [
+        entry(0, 0..3, true, step("open")),
+        entry(0, 3..3, true, step("ready")),
+        entry(0, 3..65, false, step("save")),
+        entry(
+            1,
+            3..5,
+            true,
+            What::Gesture {
+                label: "type \"Ada\"".to_owned(),
+            },
+        ),
+        entry(1, 5..65, false, What::Check(Box::new(saved))),
     ];
-    let list = crate::style::plain(&step_list(
-        "form",
-        "saves",
-        &steps,
-        Err(Some("save › wait for it")),
-    ));
+    let list = crate::style::plain(&step_list("form", "saves", &log, true));
     let lines: Vec<&str> = list.lines().collect();
     assert_eq!(lines[0], "form · saves");
     let rows: Vec<(char, &str)> = lines[1..]
@@ -100,10 +127,14 @@ fn a_plays_steps_list_as_a_tree_with_the_failing_branch_marked() {
             ('✓', "open"),
             ('✓', "ready"),
             ('×', "save"),
-            ('✓', "type the name"),
-            ('×', "wait for it")
+            ('✓', "type \"Ada\""),
+            ('×', "\"Saved\" exists")
         ],
-        "a step before those inside it, and the failure marked up its branch:\n{list}"
+        "in the order they began, each marked as it ended:\n{list}"
+    );
+    assert!(
+        lines[5].contains("got nothing matched"),
+        "the failed check says what it found:\n{list}"
     );
     let column: Vec<_> = lines[1..]
         .iter()
@@ -117,12 +148,8 @@ fn a_plays_steps_list_as_a_tree_with_the_failing_branch_marked() {
 
 #[test]
 fn a_play_failing_outside_its_steps_says_so_after_them() {
-    let steps = [StepOutcome {
-        label: "open".to_owned(),
-        frames: 0..3,
-        trace: None,
-    }];
-    let list = crate::style::plain(&step_list("form", "saves", &steps, Err(None)));
+    let log = [entry(0, 0..3, true, step("open"))];
+    let list = crate::style::plain(&step_list("form", "saves", &log, true));
     let last = list.lines().last().expect("a line");
     assert!(
         last.trim_start().starts_with("× failed outside any step"),

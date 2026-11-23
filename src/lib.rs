@@ -103,9 +103,15 @@ use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
 pub use play::__run_play;
 pub use play::{
-    By, DEFAULT_WAIT_FRAMES, DRAG_FRAMES, Found, Play, PlayEntry, PlayError, PlayResult,
-    SCROLL_FRAMES, SceneKey,
+    By, DEFAULT_WAIT_FRAMES, DRAG_FRAMES, Expect, Expected, Found, Numeric, Play, PlayEntry,
+    PlayError, PlayResult, SCROLL_FRAMES, SceneKey,
 };
+
+/// googletest's matchers, for what a play expects of a value: `eq`, `contains_substring`,
+/// `gt`, `all!`, `any!`, `not` and the rest. A plain value stands for `eq` to it.
+pub mod matchers {
+    pub use googletest::matchers::*;
+}
 use svg::Icons;
 pub use svg::{Icon, IconError};
 pub use testing::__test_main;
@@ -117,6 +123,8 @@ use watch::{HotStatus, SceneWatcher, render_build_bar, render_hot_chip};
 pub mod prelude {
     /// Every scene signature names it, so it comes bare rather than through `egui::`.
     pub use egui::Ui;
+    /// What plays name beyond their own shorthands: `Role::Link`, `Key::Tab`, `Modifiers::SHIFT`.
+    pub use egui::{Key, Modifiers, accesskit::Role};
 
     pub use crate::{
         By, CatalogGlobals, Checkerboard, GlobalControls, GlobalKey, Icon, ImageInput, Knob,

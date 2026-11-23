@@ -145,22 +145,17 @@ fn keyboard(ctx: &mut SceneCtx, ui: &mut Ui) {
 #[play(keyboard)]
 fn tab_counts_while_focused(p: &mut Play) -> PlayResult {
     p.click("Key capture")?;
-    p.press(egui::Key::Tab)?;
-    p.press_with(egui::Modifiers::SHIFT, egui::Key::Tab)?;
-    p.press(egui::Key::Escape)?;
-    p.step("each key was counted once", |p| {
-        p.get_by_label("Tab: 1   Shift+Tab: 1   Escape: 1");
-        Ok(())
-    })?;
+    p.press("Tab")?;
+    p.press("Shift+Tab")?;
+    p.press("Escape")?;
+    p.expect(By::new().label_contains("Tab:"))
+        .because("each key is counted once")
+        .to_have_label("Tab: 1   Shift+Tab: 1   Escape: 1")?;
     p.expect_action("Key pressed: Tab")
 }
 
 #[play(keyboard)]
 fn typing_fills_a_field(p: &mut Play) -> PlayResult {
     p.fill("First text field", "hello")?;
-    p.step("the field holds the text", |p| {
-        let field = p.get_by_label("First text field");
-        assert_eq!(field.value.as_deref(), Some("hello"));
-        Ok(())
-    })
+    p.expect("First text field").to_have_value("hello")
 }

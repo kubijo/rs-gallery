@@ -50,13 +50,30 @@ so a minor release may carry a breaking change.
 - **Plays: scripted interactions.** `#[play(scene_fn)] fn name(p: &mut Play) -> PlayResult` drives a scene the way a
   person would — `click`, `hover`, `focus`, `fill`, `type_text`, `press`, `drag`, `scroll` — finding widgets by their
   accessible label or role. Each gesture is a fixed sequence of frames, so a play draws the same frames anywhere.
-  `wait_for` draws frames until a condition holds; `step` names part of a script and takes the blame for a panic in it;
-  `expect_action` checks what the scene reported; `set_knob` holds a knob over the recipe.
+  `press` takes a shortcut as written, `"Cmd+A"` or `"Shift+Tab"`, and a typo fails saying what it most likely meant;
+  `drag` and `scroll` take `[x, y]`; `By::button()`, `slider()`, `checkbox()`, `combo_box()` and `text_input()` name a
+  role, and the prelude brings `Key`, `Modifiers` and `Role` for the rest. `wait_for` draws frames until a condition
+  holds; `step` names part of a script and takes the blame for a panic in it; `expect_action` waits for the scene to
+  report an action, given as a string or a matcher; `set_knob` holds a knob over the recipe.
 
 - **Captures run plays.** `[[shot]] play = "name"` and `--play NAME` capture the state a play leaves behind — hover,
-  focus, typed text, which no knob can set. The report lists each step and its frames, and so does the terminal, under
-  the summary: for a single `--play` always, for a recipe's plays with `--steps`. A failing play keeps a screenshot per
-  step beside the shot (`trace = "on"` keeps them always), and the instance justfile gains `just play`.
+  focus, typed text, which no knob can set. The report lists each step and its frames. A failing play keeps a screenshot
+  per step beside the shot (`trace = "on"` keeps them always), and the instance justfile gains `just play`.
+
+- **Plays check with matchers that wait.** `p.expect(by)` checks the widget a locator matches — `to_exist`,
+  `to_be_absent`, `to_have_count`, `to_have_value`, `to_have_label`, `to_have_description`, `to_have_placeholder`,
+  `to_have_numeric_value`, `to_be_focused`, `to_be_disabled`, `to_be_enabled`, `to_be_checked`,
+  `to_be_partially_checked`, `to_be_selected`, `to_be_expanded`, `to_be_visible`, `to_be_hidden` — drawing frames until
+  it holds, with `.not()`, `.because(…)` and `.within(frames)`. Values compare by equality or by googletest's matchers,
+  re-exported as `gallery::matchers`; `p.expect_value` polls any computed value. A failure says what was expected and
+  found. `Found` carries a widget's toggled, selected, expanded, numeric, hidden, read-only, required, description and
+  placeholder state.
+
+- **A play's log shows as it runs.** Its steps, gestures and checks are redrawn in place on a terminal, a passing play
+  folding to one line, and printed once each play is over anywhere else — a pipe, CI, `TERM=dumb`, an agent's harness.
+  `--steps` keeps every tree, `--log live|linear|off` and `GALLERY_LOG` override the choice, and `GALLERY_LOG_PACE`
+  slows the live log down by so many milliseconds a redraw. The report's `play` and `failed_shots` gain the whole `log`,
+  and a failed shot the `check` that failed it. A failed catalog test shows its play's log after its report.
 
 - **A failed play does not stop the run.** The other shots still run; the summary marks each shot passed or failed, each
   failure follows in a numbered panel pointing at the play's own line, and the run exits non-zero. The report's
@@ -65,9 +82,6 @@ so a minor release may carry a breaking change.
 - **Errors read as reports.** miette lays them out: what failed, why, the names in play, and what to do. Colour,
   box-drawing, clickable paths and wrapping follow what the terminal supports, and a CI log keeps whole lines.
   Screenshot folders, play steps and the run's report all show up, linked, in a capture's summary.
-
-- **Audit clean without exceptions.** The three AT-SPI advisory exceptions no longer match anything and are gone, and
-  the lock moves off the yanked async-executor 1.14.0.
 
 - **Fixed: the Actions panel heard nothing from a scenes dylib.** The dylib's copy of gallery kept actions to itself; it
   now reports them to the shell.
@@ -86,13 +100,7 @@ so a minor release may carry a breaking change.
   seekable H.264 MP4. The report and the summary name each recording, and the report adds what a frame cost to draw,
   capture and encode.
 
-- **Dependencies.** usvg 0.50 and notify 9, and the lockfile refreshed. kittest stays on 0.4 until the egui upgrade, as
-  egui_kittest 0.36 is built on it.
-
-- **A failing play's source line is no longer syntax-coloured.** miette's syntect highlighter brought in bincode and
-  yaml-rust, both now flagged unmaintained; the line still shows, marked where it failed. The audit excuses zbus's
-  merged-away crates until the egui upgrade replaces them, and states its unmaintained scope so cargo-deny versions
-  agree.
+- **Dependencies.** usvg 0.50 and notify 9.
 
 - **Catalog tests.** `gallery::test_main!(renderer)` in a `harness = false` test makes every scene a `smoke::<scene>`
   test and every play a `play::<scene>::<name>` test, run through the same scenes dylib the window loads; `just test` in
