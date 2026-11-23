@@ -60,9 +60,9 @@ reactive; idle → it holds the last real frame's numbers.
 
 ### Tier 2 — per-scene profiling with automatic gallery-vs-their-code attribution
 
-`just profile <scene>`: a fixed-frame headless pump of one scene at default knobs, under samply, with an A/B ledger. The
-framework-vs-component attribution the profile must make obvious comes from stacking four layers, three of them
-automatic:
+`just dev::profile <scene>`: a fixed-frame headless pump of one scene at default knobs, under samply, with an A/B
+ledger. The framework-vs-component attribution the profile must make obvious comes from stacking four layers, three of
+them automatic:
 
 - [ ] **Crate attribution (free):** samply symbolication → per-crate breakdown (`gallery` / component crate / egui /
   epaint / wgpu). An analyse + compare pair needs only samply's Firefox-Profiler format, so both port cleanly, as does

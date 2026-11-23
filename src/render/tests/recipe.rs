@@ -289,7 +289,7 @@ fn recipe(name: &str, text: &str, out: Option<&str>) -> Result<Capture, Diagnost
 /// The recipe a scaffold ships reads back, since `deny_unknown_fields` turns a key that drifts
 /// out of the `Recipe` struct into an error for every instance rather than a stale comment.
 ///
-/// Nothing else parses it: `just validate` compiles the crate, not the files it hands out.
+/// Nothing else parses it: `just dev::validate` compiles the crate, not the files it hands out.
 #[test]
 fn the_scaffolded_recipe_still_parses() {
     let shipped = Utf8Path::new("template/capture.toml");

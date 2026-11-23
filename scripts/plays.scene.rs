@@ -1,4 +1,4 @@
-//! A task list with state that lasts across frames, and plays that drive it, for `just demo-plays`.
+//! A task list with state that lasts across frames, and plays that drive it, for `just demo::plays`.
 //! Some plays pass and some fail on purpose, each in its own way.
 //! Copied into the demo beside the template's scenes; not part of the template.
 

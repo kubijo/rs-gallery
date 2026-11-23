@@ -12,8 +12,8 @@ A capture can set knobs but not hover, focus, type or drag, so a scene's interac
 tested. The model to reach is Storybook's: a scene is a smoke test, a play function makes it an interaction test, and
 any run can be recorded. It is built from existing parts rather than invented here.
 
-The work is sliced so every slice is checked headlessly — tests in `just validate`, artifacts under `.tmp/` — and the
-in-window panel, the one part a person would otherwise have to click through, comes last.
+The work is sliced so every slice is checked headlessly — tests in `just dev::validate`, artifacts under `.tmp/` — and
+the in-window panel, the one part a person would otherwise have to click through, comes last.
 
 ### What is reused
 

@@ -294,7 +294,7 @@ Unconsumed Tab/Shift+Tab cycle filtered scenes; unconsumed Escape clears the fil
 widgets or indents code instead. Cmd/Ctrl+F, Cmd/Ctrl+B and Cmd/Ctrl+Shift+L/R remain gallery shortcuts.
 
 [`keyboard.scene.rs`](template/keyboard.scene.rs) demonstrates capture, focus release and text editing, with the last
-key shown in the panel and an Actions log. Run `just demo-wgpu --hot --scene keyboard`, then edit
+key shown in the panel and an Actions log. Run `just demo::wgpu --hot --scene keyboard`, then edit
 `.tmp/demo-wgpu/keyboard.scene.rs`, not the template. Rerunning the recipe regenerates the demo.
 
 ## Rendering scenes to images
@@ -473,22 +473,23 @@ Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` 
 ## Dependency compatibility
 
 Gallery and scenes use compatible egui 0.36 dependencies. Native accessibility uses `eframe/accesskit`, and runtime
-capture uses `egui_kittest`. `gallery-build` has no accessibility stack. `just audit` runs with no advisory exceptions.
+capture uses `egui_kittest`. `gallery-build` has no accessibility stack. `just dev::audit` runs with no advisory
+exceptions.
 
 ## Cutting a release
 
 Write the notes under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) as the work lands, then, from a clean `main`:
 
 ```bash
-just tag minor # or major, or patch
+just release::tag minor # or major, or patch
 ```
 
 It bumps `[workspace.package] version` — the one place a version is written, inherited by all three crates — dates the
 `## [Unreleased]` heading to it, refreshes the lockfile, and prints what it is about to do before asking. On yes it
-re-reads its own edits (`just release-check v<version>`), runs `just validate`, then commits and tags `v<version>`.
-Pushing is yours: `git push --follow-tags`.
+re-reads its own edits (`just release::check v<version>`), runs `just dev::validate`, then commits and tags
+`v<version>`. Pushing is yours: `git push --follow-tags`.
 
-CI runs the same `release-check` on a tag push, along with the rest of the gate, so what is released is what passed.
+CI runs the same `release::check` on a tag push, along with the rest of the gate, so what is released is what passed.
 
 ## Status & roadmap
 

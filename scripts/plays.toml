@@ -1,4 +1,4 @@
-# `just demo-plays`: plays that pass, captured through the demo's scenes dylib.
+# `just demo::plays`: plays that pass, captured through the demo's scenes dylib.
 # No `out`: the script passes one under .tmp/plays/.
 size = "560x520"
 report = "report.json"

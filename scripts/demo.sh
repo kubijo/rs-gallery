@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `just demo-<variant>` runs the consumer init command against THIS checkout: scaffold template/ straight
+# `just demo::<variant>` runs the consumer init command against THIS checkout: scaffold template/ straight
 # into a git-ignored .tmp/demo-<variant>/ with --no-workspace (so it never touches this repo's own workspace),
 # repoint the gallery deps at the working tree, and run it. Any trailing arguments go to the gallery
 # binary (e.g. --hot). Re-run (or delete the dir) to reset; the build cache lives in .tmp/target/demo-<variant>
@@ -70,7 +70,7 @@ if [ "$variant" = femtovg ]; then
         | grep -oE '\bglow v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | sed 's/^/  /' >&2
 fi
 
-# Scene files the template doesn't ship, for a run that needs them (`just demo-plays`).
+# Scene files the template doesn't ship, for a run that needs them (`just demo::plays`).
 # One per line, so a path may hold spaces.
 while IFS= read -r scene; do
     if [ -n "$scene" ]; then

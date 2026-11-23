@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `just demo-plays`: run plays through a real scenes dylib in one capture,
+# `just demo::plays`: run plays through a real scenes dylib in one capture,
 # those that pass and those that fail on purpose. Gallery lays out what each came to.
 set -euo pipefail
 

@@ -1,4 +1,4 @@
-//! Gallery's own components, browsed in gallery: `just shell-scenes`.
+//! Gallery's own components, browsed in gallery: `just demo::shell-scenes`.
 //!
 //! They live inside the crate and reach the shell through [`Linked`](gallery::Linked), as a host
 //! that links its own scenes does. No dylib, so nothing here reloads — `--hot` is only the subject.

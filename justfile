@@ -1,87 +1,13 @@
 # Run every recipe from the repo root
 set working-directory := '.'
 
-# Bare `just` lists recipes instead of running the first one.
-[private]
-default:
-    @just --justfile {{ justfile() }} --list
+import 'just/common.just'
 
-# Run a tool in the Nix dev shell, or directly when it is already on PATH.
-[private]
-in-shell +cmd:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    set -- {{ cmd }}
-    if command -v "$1" >/dev/null 2>&1; then exec "$@"; fi
-    exec nix develop --command "$@"
+# Checks, formatting, dependencies and profiling: `just dev`.
+mod dev 'just/dev.just'
 
-# Scaffold + run the wgpu demo (default backend, pure-egui scenes).
-demo-wgpu *args:
-    @scripts/demo.sh wgpu {{ args }}
+# Scaffolded demo catalogs and gallery's own chrome: `just demo`.
+mod demo 'just/demo.just'
 
-# Run the demo's plays through its scenes dylib, plus one that fails on purpose, into .tmp/plays/.
-demo-plays:
-    @scripts/demo-plays.sh
-
-# Scaffold + run the glow/femtovg demo into .tmp/demo-femtovg/.
-demo-femtovg *args:
-    @scripts/demo.sh femtovg {{ args }}
-
-# Browse the shell's own components — every state of the chrome gallery draws around a scene.
-shell-scenes *args:
-    @cargo run --example shell-scenes --features shell-scenes {{ args }}
-
-# Record a CPU profile of SCENE (a key fragment, e.g. `orbit`) into .tmp/reports/REPORT.
-profile SCENE="" REPORT="00-latest" FRAMES="600":
-    @scripts/profile.sh {{ SCENE }} {{ REPORT }} {{ FRAMES }}
-
-# Reformat the whole repo.
-format *args:
-    @nix run .#format -- {{ args }}
-
-# Validate the crate: formatting, repo lint, clippy, tests under coverage, and plays through a real scenes dylib.
-validate:
-    @just in-shell validate
-    @just demo-plays
-
-# Take the current renders as the committed references in `tests/snapshots/` — look at them first.
-snapshots:
-    @UPDATE_SNAPSHOTS=1 just in-shell gallery-test the_reference_images_match
-
-# Cut a release: bump LEVEL (major|minor|patch), date the changelog, commit and tag — on confirmation.
-tag LEVEL:
-    @just in-shell gallery-release tag {{ LEVEL }}
-
-# Check TAG against the version the manifests carry and the CHANGELOG documents, before cutting it.
-release-check TAG:
-    @just in-shell gallery-release check {{ TAG }}
-
-# Report direct dependency updates against the documented exceptions in outdated.toml.
-outdated:
-    @just in-shell gallery-outdated
-
-# Upgrade every dependency lock.
-upgrade:
-    @just upgrade-nix
-    @just upgrade-cargo
-    @just upgrade-python
-
-# Upgrade Nix inputs.
-upgrade-nix *args:
-    @nix flake update {{ args }}
-
-# Upgrade Rust dependencies within their declared requirements.
-upgrade-cargo *args:
-    @just in-shell cargo update {{ args }}
-
-# Upgrade every Python tool dependency allowed by tools/pyproject.toml.
-upgrade-python *args:
-    @just in-shell uv lock --project tools --upgrade {{ args }}
-
-# Dependency audit — cargo-deny: advisories (RustSec) + license/ban/source policy (deny.toml).
-audit:
-    @just in-shell cargo deny check -D warnings -A no-license-field
-
-# Build the API docs.
-docs *args:
-    @RUSTDOCFLAGS="-D warnings" just in-shell cargo doc --no-deps {{ args }}
+# Cutting and checking a release: `just release`.
+mod release 'just/release.just'

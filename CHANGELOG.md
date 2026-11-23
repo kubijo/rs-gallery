@@ -71,6 +71,11 @@ so a minor release may carry a breaking change.
 - **Fixed: the Actions panel heard nothing from a scenes dylib.** The dylib's copy of gallery kept actions to itself; it
   now reports them to the shell.
 
+- **Recipes grouped into `just dev`, `just demo` and `just release`.** `validate`, `format`, `snapshots`, `audit`,
+  `docs`, `outdated`, `profile` and the `upgrade` recipes are `just dev::…` (`just dev::validate`); the demos are
+  `just demo::wgpu`, `femtovg`, `plays` and `shell-scenes`; `just tag` and `just release-check` are `just release::tag`
+  and `just release::check`.
+
 ## [0.16.0] - 2026-10-26
 
 - **Scenes can write catalog globals.** `SceneCtx::set_global(key, value)` keeps a story's own switcher and the window

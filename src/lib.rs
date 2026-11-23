@@ -2618,7 +2618,7 @@ mod tests {
     ///
     /// The requested scene is deliberately not the first in the manifest, because the failure being
     /// guarded is quiet: a key that matches nothing leaves `still_here` false and the shell falls back
-    /// to the first scene, so `just profile <scene>` would measure the wrong one and say nothing.
+    /// to the first scene, so `just dev::profile <scene>` would measure the wrong one and say nothing.
     /// Driven headlessly, since a window drawing five frames is gone before anyone can look at it.
     #[test]
     fn a_requested_scene_is_the_one_selected_on_the_first_frame() {
