@@ -445,13 +445,18 @@ value that never lands fails the play. A scene can have several plays, each know
 | `to_exist`, `to_be_absent`                   | one widget matches; none does             |
 | `to_have_count(n)`                           | as many match                             |
 | `to_have_value`, `to_have_label`             | its value or accessible name matches      |
-| `to_have_description`, `to_have_placeholder` | its tooltip or empty-field text matches   |
+| `to_have_description`, `to_have_placeholder` | its description or empty-field text does  |
 | `to_have_numeric_value`                      | a slider's or drag value's number matches |
 | `to_be_focused`                              | it has keyboard focus                     |
 | `to_be_disabled`, `to_be_enabled`            | as named                                  |
 | `to_be_checked`, `to_be_partially_checked`   | a checkbox is on, or mixed                |
 | `to_be_selected`, `to_be_expanded`           | as named                                  |
 | `to_be_visible`, `to_be_hidden`              | it has a place on screen, or none         |
+
+[`checks.scene.rs`](template/checks.scene.rs) is the reference: a form whose play passes every matcher in turn, recorded
+by `just demo::recordings`. egui's own widgets report a placeholder, focus, disabled, checked and a value; none reports
+a description, expanded or hidden, and `add_visible(false, …)` keeps a widget in the tree as shown. A widget that has
+them says so itself, as that scene's do: `ui.ctx().accesskit_node_builder(response.id, |node| node.set_expanded(open))`.
 
 `.not()` expects the opposite, and `.because("…")` puts the check in the play's own words. A plain value means equality;
 anything else is one of googletest's matchers, re-exported as `gallery::matchers`:
@@ -501,7 +506,7 @@ A shot can record what it draws beside its PNG, as `saved.apng` or `saved.mp4`:
 [[shot]]
 name = "orbit"
 scene = "orbit"
-record = { fps = 60, seconds = 2 } # optional; `format = "mp4"` for a video
+record = { fps = 60, seconds = 2 } # optional; `format = "mp4"`, or both: `format = ["apng", "mp4"]`
 
 [[shot]]
 name = "saved"
@@ -534,8 +539,10 @@ drags and scrolls across a scene filling its stage.
 - **MP4** (H.264): small, and seekable and pausable in any player, with a keyframe every second. Encoded by OpenH264,
   which builds from bundled C++, so a first build needs a C++ compiler.
 
-The report's `video` holds the path, the frames drawn, held and written, and what a frame cost on average: drawing the
-scene, rendering and reading it back, and encoding it.
+Several formats (`--record-format apng,mp4`) are written from one run of the shot, every file from the same frames.
+
+The report's `videos` has an entry per format: its path, the frames drawn, held and written, and what a frame cost on
+average: drawing the scene, rendering and reading it back, and encoding it.
 
 ## Testing a catalog
 

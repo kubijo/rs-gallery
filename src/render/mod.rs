@@ -37,7 +37,7 @@ use crate::{
     tree::{resolve_scene, scene_key},
 };
 
-pub(crate) use crate::video::VideoFormat;
+pub(crate) use crate::video::{VideoFormat, VideoFormats};
 
 mod log_view;
 mod overlay;
@@ -103,7 +103,7 @@ pub(crate) struct Record {
     pub(crate) seconds: Option<f32>,
     /// `RetainOnFailure` drops a play's recording once the play passes.
     pub(crate) keep: Trace,
-    pub(crate) format: VideoFormat,
+    pub(crate) formats: VideoFormats,
     /// Seconds a play's recording shows each step's last frame for, beyond its own;
     /// [`DEFAULT_HOLD`] when unset.
     pub(crate) hold: Option<f32>,
@@ -213,7 +213,7 @@ pub(crate) fn parse_record(raw: &str) -> Result<Record, String> {
         fps,
         seconds,
         keep: Trace::On,
-        format: VideoFormat::default(),
+        formats: VideoFormats::default(),
         hold: None,
         input: None,
     })
@@ -525,7 +525,7 @@ fn gather(
         scale: DEFAULT_SCALE,
         globals: BTreeMap::new(),
         play: None,
-        video: None,
+        videos: Vec::new(),
         bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
         // A sheet is drawn once from images already taken;
         // there is nothing for it to settle.

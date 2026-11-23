@@ -25,7 +25,7 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
                 motion: Motion::Settled,
             },
             play: None,
-            video: None,
+            videos: Vec::new(),
         },
         OutputFile {
             path: "/tmp/a-much-longer-name.png".into(),
@@ -41,7 +41,7 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
                 motion: Motion::Settled,
             },
             play: None,
-            video: None,
+            videos: Vec::new(),
         },
     ];
     let ran = Ran {

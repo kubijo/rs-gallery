@@ -138,8 +138,9 @@ struct RecipeRecord {
     /// How long a shot without a play records;
     /// a play shot records the play.
     seconds: Option<f32>,
+    /// One format, or a list recorded together from the same frames.
     #[serde(default)]
-    format: VideoFormat,
+    format: VideoFormats,
     /// Seconds a play's recording pauses at each step's end.
     hold: Option<f32>,
     /// The play's input on the recording: `true`,
@@ -233,7 +234,7 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                         fps: record.fps,
                         seconds: record.seconds,
                         keep: shot.video.unwrap_or(Trace::On),
-                        format: record.format,
+                        formats: record.format,
                         hold: record.hold,
                         input: record.input.as_ref().and_then(RecipeInput::corner),
                     };

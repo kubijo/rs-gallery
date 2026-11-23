@@ -68,7 +68,7 @@ fn recorded(
                 fps,
                 seconds: Some(seconds),
                 keep: Trace::On,
-                format: VideoFormat::Apng,
+                formats: VideoFormat::Apng.into(),
                 hold: None,
                 input: None,
             }),
@@ -112,7 +112,7 @@ fn each_recorded_frame_is_the_scene_at_exactly_its_time() {
         widths.windows(2).all(|pair| pair[1] == pair[0] + 4),
         "frame n is drawn at n / fps: {widths:?}"
     );
-    let video = &report["shots"][0]["video"];
+    let video = &report["shots"][0]["videos"][0];
     assert_eq!(video["frames"], 10);
     assert_eq!(video["written"], 10);
     assert_eq!(video["fps"], 10);
@@ -129,7 +129,7 @@ fn a_recording_of_a_still_scene_is_one_frame_held() {
         (5, 10),
         "the five frames drawn, merged into one"
     );
-    let video = &report["shots"][0]["video"];
+    let video = &report["shots"][0]["videos"][0];
     assert_eq!(
         (video["frames"].as_u64(), video["written"].as_u64()),
         (Some(5), Some(1))

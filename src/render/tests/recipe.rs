@@ -546,6 +546,20 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
             "#},
             "gif",
         ),
+        (
+            "an-unknown-format-in-a-list",
+            indoc! {r#"
+                record = { fps = 30, seconds = 1, format = ["apng", "gif"] }
+            "#},
+            "`gif` is not a recording format",
+        ),
+        (
+            "no-format-at-all",
+            indoc! {r#"
+                record = { fps = 30, seconds = 1, format = [] }
+            "#},
+            "records nothing",
+        ),
     ];
     for (why, extra, says) in cases {
         let error = recipe(why, &shot(extra), None)
@@ -564,10 +578,32 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
             fps: 24,
             seconds: Some(1.5),
             keep: Trace::On,
-            format: VideoFormat::Mp4,
+            formats: VideoFormat::Mp4.into(),
             hold: None,
             input: None,
         })
+    );
+    let both = indoc! {r#"
+        record = { fps = 24, seconds = 1.5, format = ["mp4", "apng", "mp4"] }
+    "#};
+    let taken = recipe("both", &shot(both), None).expect("a recording in two formats");
+    let formats: Vec<VideoFormat> = taken.shots[0]
+        .record
+        .expect("a recording")
+        .formats
+        .iter()
+        .collect();
+    assert_eq!(
+        formats,
+        [VideoFormat::Apng, VideoFormat::Mp4],
+        "each format once, in a fixed order"
+    );
+    assert_eq!(
+        "mp4, apng"
+            .parse::<VideoFormats>()
+            .map(|set| set.iter().count()),
+        Ok(2),
+        "the command line's `--record-format` takes the same list"
     );
 }
 

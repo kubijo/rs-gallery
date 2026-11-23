@@ -258,8 +258,8 @@ pub(super) fn shoot_with_globals(
 
     // A shot with nowhere to write records nothing either.
     let recording = shot.record.zip(shot.out.as_ref());
-    let (played, mut video) = match &shot.play {
-        None => (None, None),
+    let (played, mut videos) = match &shot.play {
+        None => (None, Vec::new()),
         Some(play) => {
             let entry = find_play(plays, &scene, &play.name)?;
             let trace_dir = shot.out.as_ref().map(|out| steps_dir(out));
@@ -298,8 +298,9 @@ pub(super) fn shoot_with_globals(
             driver.view.end(run.failure.is_some(), run.frames);
             let ledger = driver.ledger;
             harness.state_mut().actions = None;
-            let video = finish(&mut harness)?;
-            let video_path = video.as_ref().map(|video| video.path.clone());
+            let videos = finish(&mut harness)?;
+            let video_paths: Vec<Utf8PathBuf> =
+                videos.iter().map(|video| video.path.clone()).collect();
             // Reported before anything else is drawn: settling again
             // could fail on the very thing the play did, and that
             // would stop the run instead of reporting the play.
@@ -353,11 +354,13 @@ pub(super) fn shoot_with_globals(
                         crate::style::path_on_stderr(&landed(dir))
                     ));
                 }
-                if let Some(path) = &video_path {
-                    report = report.hint(format!(
-                        "the play is recorded in {}",
-                        crate::style::path_on_stderr(path)
-                    ));
+                if !video_paths.is_empty() {
+                    let paths: Vec<String> = video_paths
+                        .iter()
+                        .map(|path| crate::style::path_on_stderr(path))
+                        .collect();
+                    report =
+                        report.hint(format!("the play is recorded in {}", paths.join(" and ")));
                 }
                 watch.failed = Some(FailedShot::of(
                     shot,
@@ -365,7 +368,7 @@ pub(super) fn shoot_with_globals(
                     play,
                     failure.clone(),
                     &mut run,
-                    video_path,
+                    video_paths,
                 ));
                 return Err(report);
             }
@@ -394,7 +397,12 @@ pub(super) fn shoot_with_globals(
                 ))
                 .cause(report.summary());
                 watch.failed = Some(FailedShot::of(
-                    shot, &scene, play, error, &mut run, video_path,
+                    shot,
+                    &scene,
+                    play,
+                    error,
+                    &mut run,
+                    video_paths,
                 ));
                 return Err(report);
             }
@@ -407,26 +415,26 @@ pub(super) fn shoot_with_globals(
                     entry.trace = None;
                 }
             }
-            let video = match (video, shot.record) {
-                (
-                    Some(video),
-                    Some(Record {
-                        keep: Trace::RetainOnFailure,
-                        ..
-                    }),
-                ) => {
-                    std::fs::remove_file(&video.path)
-                        .map_err(|e| format!("remove the passing play's `{}`: {e}", video.path))?;
-                    None
+            let videos = match shot.record {
+                Some(Record {
+                    keep: Trace::RetainOnFailure,
+                    ..
+                }) => {
+                    for video in &videos {
+                        std::fs::remove_file(&video.path).map_err(|e| {
+                            format!("remove the passing play's `{}`: {e}", video.path)
+                        })?;
+                    }
+                    Vec::new()
                 }
-                (video, _) => video,
+                _ => videos,
             };
             let outcome = PlayOutcome {
                 name: play.name.clone(),
                 frames: run.frames,
                 log: run.log,
             };
-            (Some(outcome), video)
+            (Some(outcome), videos)
         }
     };
     if shot.play.is_none()
@@ -434,7 +442,7 @@ pub(super) fn shoot_with_globals(
     {
         start(&mut harness, session, (size, shot.scale), out, record)?;
         record_frames(&mut harness, shot, record.frames())?;
-        video = finish(&mut harness)?;
+        videos = finish(&mut harness)?;
     }
 
     if shot.list {
@@ -503,7 +511,7 @@ pub(super) fn shoot_with_globals(
                 .as_ref()
                 .map_or_else(BTreeMap::new, |global| control_values(global.knobs())),
             play: played,
-            video,
+            videos,
         };
         return Ok(Some(ShotOutput { written, image }));
     }

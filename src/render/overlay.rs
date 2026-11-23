@@ -208,6 +208,7 @@ pub(super) struct OverlayApp {
 const INK: egui::Color32 = egui::Color32::WHITE;
 const BACKDROP: egui::Color32 = egui::Color32::from_black_alpha(170);
 const LIT: egui::Color32 = egui::Color32::from_rgb(255, 196, 64);
+const WHEEL: egui::Color32 = egui::Color32::from_gray(40);
 
 impl eframe::App for OverlayApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -259,37 +260,53 @@ impl OverlayApp {
     }
 
     fn mouse(&self, ui: &mut egui::Ui) {
+        const ROUNDING: u8 = 12;
+        const STROKE: f32 = 1.5;
         let (body, _) = ui.allocate_exact_size(egui::vec2(28.0, 42.0), egui::Sense::hover());
         let painter = ui.painter();
         let split = body.top() + body.height() * 0.42;
-        let wheel = 6.0;
+        let middle_x = body.center().x;
         let [primary, secondary, middle] = self.shown.buttons;
-        let fill = |rect: egui::Rect, lit: bool| {
-            if lit {
-                painter.rect_filled(rect.shrink(1.0), 3.0, LIT);
-            }
+
+        // Each button fills its half of the outline up to the stroke, rounded where the body is.
+        let inside = body.shrink(STROKE);
+        // The outline's rounding, less the stroke it sits inside.
+        let rounded = ROUNDING - 2;
+        if primary {
+            let left = egui::Rect::from_min_max(inside.min, egui::pos2(middle_x, split));
+            let corners = egui::CornerRadius {
+                nw: rounded,
+                ..egui::CornerRadius::ZERO
+            };
+            painter.rect_filled(left, corners, LIT);
+        }
+        if secondary {
+            let right = egui::Rect::from_min_max(
+                egui::pos2(middle_x, inside.top()),
+                egui::pos2(inside.right(), split),
+            );
+            let corners = egui::CornerRadius {
+                ne: rounded,
+                ..egui::CornerRadius::ZERO
+            };
+            painter.rect_filled(right, corners, LIT);
+        }
+
+        let wheel = egui::Rect::from_center_size(
+            egui::pos2(middle_x, body.top() + body.height() * 0.22),
+            egui::vec2(4.0, body.height() * 0.24),
+        );
+        // Filled either way, so it stays a wheel over a lit button beneath it.
+        let wheel_fill = if middle || self.shown.wheel {
+            LIT
+        } else {
+            WHEEL
         };
-        fill(
-            egui::Rect::from_min_max(body.min, egui::pos2(body.center().x - wheel / 2.0, split)),
-            primary,
-        );
-        fill(
-            egui::Rect::from_min_max(
-                egui::pos2(body.center().x + wheel / 2.0, body.top()),
-                egui::pos2(body.right(), split),
-            ),
-            secondary,
-        );
-        let wheel_rect = egui::Rect::from_center_size(
-            egui::pos2(body.center().x, body.top() + body.height() * 0.22),
-            egui::vec2(wheel - 2.0, body.height() * 0.24),
-        );
-        fill(wheel_rect, middle || self.shown.wheel);
-        let line = egui::Stroke::new(1.5, INK);
-        painter.rect_stroke(body, 12.0, line, egui::StrokeKind::Inside);
+        let line = egui::Stroke::new(STROKE, INK);
+        painter.rect_stroke(body, ROUNDING, line, egui::StrokeKind::Inside);
         painter.hline(body.x_range(), split, line);
-        painter.vline(body.center().x, body.top()..=split, line);
-        painter.rect_stroke(wheel_rect, 2.0, line, egui::StrokeKind::Outside);
+        painter.vline(middle_x, body.top()..=split, line);
+        painter.rect(wheel, 2.0, wheel_fill, line, egui::StrokeKind::Outside);
     }
 }
 

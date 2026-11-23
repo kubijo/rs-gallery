@@ -20,7 +20,7 @@ record backend='wgpu' format='apng' scene='orbit' rate='60:2':
     @scripts/demo.sh {{ backend }} --scene {{ scene }} \
         --render .tmp/record/{{ backend }}/{{ scene }}.png --record {{ rate }} --record-format {{ format }}
 
-# Record an animation in every video format, and the studio tour with its input shown, on both backends.
+# Record the studio tour, its input shown, and the checks tour, each in every video format, on both backends.
 recordings:
     @scripts/demo-recordings.sh
 

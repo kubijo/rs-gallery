@@ -27,7 +27,8 @@ pub(super) struct OutputFile {
     pub(super) frames: Frames,
     pub(super) globals: BTreeMap<String, ControlValue>,
     pub(super) play: Option<PlayOutcome>,
-    pub(super) video: Option<VideoOutcome>,
+    /// A recording's file in each format, or none.
+    pub(super) videos: Vec<VideoOutcome>,
 }
 
 /// What a shot's play did before the capture.
@@ -103,7 +104,7 @@ impl<'a> RunReport<'a> {
                         steps: steps(&play.log),
                         log: play.log.iter().map(EntryReport::of).collect(),
                     }),
-                    video: file.video.as_ref().map(VideoReport::of),
+                    videos: file.videos.iter().map(VideoReport::of).collect(),
                 })
                 .collect(),
             sheet,
@@ -124,7 +125,7 @@ impl<'a> RunReport<'a> {
                     steps: steps(&failed.log),
                     check: failed.error.check().map(CheckReport::of),
                     log: failed.log.iter().map(EntryReport::of).collect(),
-                    video: failed.video.as_deref(),
+                    videos: &failed.videos,
                 })
                 .collect(),
         }
@@ -152,9 +153,9 @@ struct FailedShotReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     check: Option<CheckReport<'a>>,
     log: Vec<EntryReport<'a>>,
-    /// The play's recording, when the shot made one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    video: Option<&'a Utf8Path>,
+    /// The play's recording in each format the shot asked for.
+    #[serde(skip_serializing_if = "<[Utf8PathBuf]>::is_empty")]
+    videos: &'a [Utf8PathBuf],
 }
 
 /// What a play that failed had done, kept for the report.
@@ -164,7 +165,7 @@ pub(super) struct FailedShot {
     play: String,
     error: crate::play::PlayError,
     log: Vec<Entry>,
-    video: Option<Utf8PathBuf>,
+    videos: Vec<Utf8PathBuf>,
 }
 
 impl FailedShot {
@@ -175,7 +176,7 @@ impl FailedShot {
         play: &ShotPlay,
         error: crate::play::PlayError,
         run: &mut crate::play::PlayRun,
-        video: Option<Utf8PathBuf>,
+        videos: Vec<Utf8PathBuf>,
     ) -> Self {
         Self {
             name: shot
@@ -188,7 +189,7 @@ impl FailedShot {
             play: play.name.clone(),
             error,
             log: std::mem::take(&mut run.log),
-            video,
+            videos,
         }
     }
 
@@ -219,14 +220,15 @@ struct ShotReport<'a> {
     /// Absent unless the shot ran a play.
     #[serde(skip_serializing_if = "Option::is_none")]
     play: Option<PlayReport<'a>>,
-    /// Absent unless the shot kept a recording.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    video: Option<VideoReport<'a>>,
+    /// The recording's file in each format, absent unless the shot kept one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    videos: Vec<VideoReport<'a>>,
 }
 
-/// A recording, and what its frames cost on average.
+/// One format's file of a recording, and what its frames cost on average.
 #[derive(serde::Serialize)]
 struct VideoReport<'a> {
+    format: &'static str,
     path: &'a Utf8Path,
     fps: u16,
     /// Frames drawn into it.
@@ -252,6 +254,7 @@ impl<'a> VideoReport<'a> {
             u64::try_from(spent.as_micros()).unwrap_or(u64::MAX) / u64::from(video.frames.max(1))
         };
         Self {
+            format: video.format.extension(),
             path: &video.path,
             fps: video.fps,
             frames: video.frames,
@@ -634,8 +637,8 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
     let aside = Style::new().dimmed();
     let passed = paint(Style::new().fg_color(Some(AnsiColor::Green.into())), "✓");
     let failed = paint(Style::new().fg_color(Some(AnsiColor::Red.into())), "×");
-    let recorded = run.written.iter().any(|w| w.video.is_some())
-        || run.failed.iter().any(|shot| shot.video.is_some());
+    let recorded = run.written.iter().any(|w| !w.videos.is_empty())
+        || run.failed.iter().any(|shot| !shot.videos.is_empty());
     let mut header = vec!["", "shot", "size", "steps", "screenshots"];
     if recorded {
         header.push("recording");
@@ -674,13 +677,18 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
                         screenshots_of(&play.log),
                     ),
                 };
-                let recording = w.video.as_ref().map_or_else(String::new, |video| {
-                    format!(
-                        "{}  {}",
-                        linked(&video.path),
-                        paint(aside, &format!("{} frames", video.frames))
-                    )
-                });
+                let recording = w
+                    .videos
+                    .iter()
+                    .map(|video| {
+                        format!(
+                            "{}  {}",
+                            linked(&video.path),
+                            paint(aside, &format!("{} frames", video.frames))
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 vec![
                     passed.clone(),
                     linked(&w.path),
@@ -698,7 +706,11 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
                     paint(aside, "failed"),
                     steps(&shot.log).len().to_string(),
                     screenshots_of(&shot.log),
-                    shot.video.as_deref().map_or_else(String::new, linked),
+                    shot.videos
+                        .iter()
+                        .map(|path| linked(path))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 ]
             }
         };

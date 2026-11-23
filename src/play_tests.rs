@@ -1220,7 +1220,7 @@ fn a_plays_input_shows_on_its_recording_and_nowhere_else() {
         fps: 30,
         seconds: None,
         keep: Trace::On,
-        format: crate::render::VideoFormat::Apng,
+        formats: crate::render::VideoFormat::Apng.into(),
         hold: None,
         input,
     };
@@ -1256,6 +1256,50 @@ fn a_plays_input_shows_on_its_recording_and_nowhere_else() {
     );
 }
 
+#[test]
+fn one_play_records_in_every_format_asked_for_from_the_same_frames() {
+    let record = |formats| crate::render::Record {
+        fps: 30,
+        seconds: None,
+        keep: Trace::On,
+        formats,
+        hold: None,
+        input: None,
+    };
+    let both = crate::render::VideoFormats::of([
+        crate::render::VideoFormat::Apng,
+        crate::render::VideoFormat::Mp4,
+    ])
+    .expect("two formats");
+    let (apng, report) = record_play("both-formats", flip, Trace::On, record(both));
+    let mp4 = apng.with_extension("mp4");
+    assert!(mp4.exists(), "`{mp4}` beside `{apng}`");
+    let videos = report["shots"][0]["videos"]
+        .as_array()
+        .expect("a list of recordings");
+    let formats: Vec<_> = videos
+        .iter()
+        .map(|video| video["format"].as_str())
+        .collect();
+    assert_eq!(formats, [Some("apng"), Some("mp4")]);
+    assert_eq!(
+        videos[0]["frames"], videos[1]["frames"],
+        "both files hold every frame the play drew"
+    );
+
+    let (alone, _) = record_play(
+        "apng-alone",
+        flip,
+        Trace::On,
+        record(crate::render::VideoFormat::Apng.into()),
+    );
+    assert_eq!(
+        std::fs::read(&apng).expect("the APNG"),
+        std::fs::read(&alone).expect("the lone APNG"),
+        "the MP4 beside it changes nothing in the APNG"
+    );
+}
+
 /// A play shot recording at 30 fps, kept as `keep` says
 /// and pausing `hold` seconds at step ends;
 /// the recording and the run's report.
@@ -1273,7 +1317,7 @@ fn recorded_play(
             fps: 30,
             seconds: None,
             keep,
-            format: crate::render::VideoFormat::Apng,
+            formats: crate::render::VideoFormat::Apng.into(),
             hold,
             input: None,
         },
@@ -1309,8 +1353,8 @@ fn a_recorded_play_holds_every_frame_the_play_drew() {
     let (video, report) = recorded_play("flip", flip, Trace::On, Some(0.0));
     let shot = &report["shots"][0];
     let played = shot["play"]["frames"].as_u64().expect("the play's frames");
-    assert_eq!(shot["video"]["frames"].as_u64(), Some(played));
-    assert_eq!(shot["video"]["held"].as_u64(), Some(0));
+    assert_eq!(shot["videos"][0]["frames"].as_u64(), Some(played));
+    assert_eq!(shot["videos"][0]["held"].as_u64(), Some(0));
     assert_eq!(
         recorded_frames(&video),
         played,
@@ -1326,11 +1370,11 @@ fn a_recorded_play_pauses_at_each_steps_end() {
     let shot = &report["shots"][0];
     let played = shot["play"]["frames"].as_u64().expect("the play's frames");
     assert_eq!(
-        shot["video"]["held"].as_u64(),
+        shot["videos"][0]["held"].as_u64(),
         Some(30),
         "two steps, each held half a second at 30 fps"
     );
-    assert_eq!(shot["video"]["frames"].as_u64(), Some(played));
+    assert_eq!(shot["videos"][0]["frames"].as_u64(), Some(played));
     assert_eq!(recorded_frames(&video), played + 30);
 }
 
@@ -1339,7 +1383,7 @@ fn a_step_ending_with_the_one_around_it_pauses_once() {
     let (video, report) = recorded_play("nested-held", nested, Trace::On, None);
     let shot = &report["shots"][0];
     let played = shot["play"]["frames"].as_u64().expect("the play's frames");
-    assert_eq!(shot["video"]["held"].as_u64(), Some(15));
+    assert_eq!(shot["videos"][0]["held"].as_u64(), Some(15));
     assert_eq!(recorded_frames(&video), played + 15);
 }
 
@@ -1347,7 +1391,7 @@ fn a_step_ending_with_the_one_around_it_pauses_once() {
 fn a_passing_play_drops_a_recording_kept_only_on_failure() {
     let (video, report) = recorded_play("flip-kept-on-failure", flip, Trace::RetainOnFailure, None);
     assert!(!video.exists(), "the play passed, so `{video}` is gone");
-    assert!(report["shots"][0].get("video").is_none());
+    assert!(report["shots"][0].get("videos").is_none());
 }
 
 #[test]
@@ -1361,7 +1405,7 @@ fn a_failing_play_keeps_its_recording_and_the_report_points_at_it() {
     assert!(video.exists(), "the play failed, so `{video}` stays");
     let failed = &report["failed_shots"][0];
     assert!(
-        failed["video"]
+        failed["videos"][0]
             .as_str()
             .is_some_and(|path| path.ends_with("shot.apng")),
         "{failed}"

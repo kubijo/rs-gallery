@@ -27,8 +27,8 @@ impl Clock {
 
 /// A recording in progress, and what its frames have cost so far.
 pub(super) struct Recording {
-    sink: Recorder,
-    path: Utf8PathBuf,
+    /// One file per format, each fed every frame.
+    sinks: Vec<(VideoFormat, Utf8PathBuf, Recorder)>,
     fps: u16,
     /// Frames each step's end is held for.
     hold: u32,
@@ -40,9 +40,10 @@ pub(super) struct Recording {
     capture: Duration,
 }
 
-/// What a finished recording came to.
+/// What one of a finished recording's files came to.
 #[derive(Clone, Debug)]
 pub(super) struct VideoOutcome {
+    pub(super) format: VideoFormat,
     pub(super) path: Utf8PathBuf,
     pub(super) fps: u16,
     /// Frames drawn into it.
@@ -52,9 +53,9 @@ pub(super) struct VideoOutcome {
     /// Frames the file holds, a repeat having
     /// lengthened the frame before it instead.
     pub(super) written: u32,
-    /// Drawing the scene, all frames together.
+    /// Drawing the scene, all frames together; shared by every format's file.
     pub(super) draw: Duration,
-    /// Rendering each frame and reading it back.
+    /// Rendering each frame and reading it back; shared by every format's file.
     pub(super) capture: Duration,
     pub(super) encode: Duration,
     pub(super) deepest_queue: usize,
@@ -81,11 +82,11 @@ pub(super) fn animate(ctx: &egui::Context) {
     });
 }
 
-/// Start sending every frame drawn, on a canvas of `size`
-/// points at `scale`, to a recording at `path`.
+/// Start sending every frame drawn, on a canvas of `size` points
+/// at `scale`, to a recording beside `out` in each of its formats.
 ///
 /// # Errors
-/// When the file cannot be created, or the input overlay's harness cannot be opened.
+/// When a file cannot be created, or the input overlay's harness cannot be opened.
 pub(super) fn start(
     harness: &mut egui_kittest::Harness<'static, Canvas>,
     session: &Session,
@@ -93,18 +94,28 @@ pub(super) fn start(
     out: &Utf8Path,
     record: Record,
 ) -> Result<(), Diagnostic> {
-    let path = video_path(out, record.format);
     // It starts before the shot's PNG, whose writing would otherwise make the directory.
-    if let Some(dir) = path.parent() {
+    if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create `{dir}`: {e}"))?;
     }
+    let sinks = record
+        .formats
+        .iter()
+        .map(|format| {
+            let path = video_path(out, format);
+            Ok((
+                format,
+                landed(&path),
+                Recorder::create(&path, record.fps, format)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let input = record
         .input
         .map(|corner| InputOverlay::open(session, size, scale, record.fps, corner))
         .transpose()?;
     harness.state_mut().recording = Some(Recording {
-        sink: Recorder::create(&path, record.fps, record.format)?,
-        path: landed(&path),
+        sinks,
         fps: record.fps,
         hold: record.hold_frames(),
         drew_since_hold: false,
@@ -129,32 +140,43 @@ pub(super) fn hold(harness: &mut egui_kittest::Harness<'static, Canvas>) -> Resu
     if let Some(input) = recording.input.as_mut() {
         input.hold(recording.hold);
     }
-    recording.sink.hold(recording.hold)
+    for (_, _, sink) in &mut recording.sinks {
+        sink.hold(recording.hold)?;
+    }
+    Ok(())
 }
 
-/// Close the recording, if one is open.
+/// Close the recording, if one is open: a file per format,
+/// none when no recording was.
 ///
 /// # Errors
 /// When nothing was recorded,
-/// or the file could not be written.
+/// or a file could not be written.
 pub(super) fn finish(
     harness: &mut egui_kittest::Harness<'static, Canvas>,
-) -> Result<Option<VideoOutcome>, String> {
+) -> Result<Vec<VideoOutcome>, String> {
     let Some(recording) = harness.state_mut().recording.take() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let encoded = recording.sink.finish()?;
-    Ok(Some(VideoOutcome {
-        path: recording.path,
-        fps: recording.fps,
-        frames: encoded.frames,
-        held: encoded.held,
-        written: encoded.written,
-        draw: recording.draw,
-        capture: recording.capture,
-        encode: encoded.encode,
-        deepest_queue: encoded.deepest_queue,
-    }))
+    recording
+        .sinks
+        .into_iter()
+        .map(|(format, path, sink)| {
+            let encoded = sink.finish()?;
+            Ok(VideoOutcome {
+                format,
+                path,
+                fps: recording.fps,
+                frames: encoded.frames,
+                held: encoded.held,
+                written: encoded.written,
+                draw: recording.draw,
+                capture: recording.capture,
+                encode: encoded.encode,
+                deepest_queue: encoded.deepest_queue,
+            })
+        })
+        .collect()
 }
 
 /// Draw one frame: on the shot's clock when it records,
@@ -207,7 +229,13 @@ pub(super) fn step(harness: &mut egui_kittest::Harness<'static, Canvas>) -> Resu
     recording.draw += drew;
     recording.capture += captured;
     recording.drew_since_hold = true;
-    recording.sink.frame(image)
+    let Some(((_, _, last), others)) = recording.sinks.split_last_mut() else {
+        return Ok(());
+    };
+    for (_, _, sink) in others {
+        sink.frame(image.clone())?;
+    }
+    last.frame(image)
 }
 
 /// Record `frames` frames of a shot without a play,

@@ -31,6 +31,8 @@ pub(crate) enum VideoFormat {
 }
 
 impl VideoFormat {
+    const ALL: [Self; 2] = [Self::Apng, Self::Mp4];
+
     pub(crate) fn extension(self) -> &'static str {
         match self {
             Self::Apng => "apng",
@@ -58,6 +60,81 @@ impl std::str::FromStr for VideoFormat {
                 "`{raw}` is not a recording format: `apng` or `mp4`"
             )),
         }
+    }
+}
+
+/// The formats a shot records in, each once, written from the same frames.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct VideoFormats(u8);
+
+impl VideoFormats {
+    fn bit(format: VideoFormat) -> u8 {
+        1 << (format as u8)
+    }
+
+    /// `formats`, unless it names none.
+    pub(crate) fn of(formats: impl IntoIterator<Item = VideoFormat>) -> Option<Self> {
+        let set = formats
+            .into_iter()
+            .fold(0, |set, format| set | Self::bit(format));
+        (set != 0).then_some(Self(set))
+    }
+
+    pub(crate) fn iter(self) -> impl Iterator<Item = VideoFormat> {
+        VideoFormat::ALL
+            .into_iter()
+            .filter(move |&format| self.0 & Self::bit(format) != 0)
+    }
+}
+
+impl Default for VideoFormats {
+    fn default() -> Self {
+        Self(Self::bit(VideoFormat::default()))
+    }
+}
+
+impl From<VideoFormat> for VideoFormats {
+    fn from(format: VideoFormat) -> Self {
+        Self(Self::bit(format))
+    }
+}
+
+/// `apng`, or several joined by commas: `apng,mp4`.
+impl std::str::FromStr for VideoFormats {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, String> {
+        let formats = raw
+            .split(',')
+            .map(|one| one.trim().parse())
+            .collect::<Result<Vec<VideoFormat>, _>>()?;
+        Self::of(formats).ok_or_else(|| "no recording format given".to_owned())
+    }
+}
+
+/// One format, or a list of them: `"mp4"`, `["apng", "mp4"]`.
+impl<'de> serde::Deserialize<'de> for VideoFormats {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Strings parsed here rather than variants tried by serde,
+        // whose untagged miss would not say which formats there are.
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+        let names = match OneOrMany::deserialize(deserializer)? {
+            OneOrMany::One(name) => vec![name],
+            OneOrMany::Many(names) => names,
+        };
+        let formats = names
+            .iter()
+            .map(|name| name.parse())
+            .collect::<Result<Vec<VideoFormat>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        Self::of(formats).ok_or_else(|| {
+            serde::de::Error::custom("an empty list of recording formats records nothing")
+        })
     }
 }
 

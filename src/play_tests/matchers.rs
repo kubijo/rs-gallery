@@ -337,3 +337,135 @@ fn expect_action_waits_for_an_action_reported_frames_later() {
     }
     passed_shot(widgets, "reported", reported);
 }
+
+/// One widget in each state a matcher reads, none of them changing.
+/// Description, expanded and hidden come from the scene's own nodes, as egui reports none of them.
+fn states(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    let label = ui.label("Name");
+    let mut name = String::new();
+    ui.add(egui::TextEdit::singleline(&mut name).hint_text("Your name"))
+        .labelled_by(label.id);
+    let mut off = false;
+    ui.checkbox(&mut off, "Remember");
+    ui.add(egui::Checkbox::new(&mut off, "Some").indeterminate(true));
+    let mut level = 3.0;
+    ui.add(egui::Slider::new(&mut level, 0.0..=10.0).text("Level"));
+    _ = ui.selectable_label(true, "Chosen");
+    _ = ui.selectable_label(false, "Other");
+    let waiting = ui.add_enabled(false, egui::Button::new("Send"));
+    ui.ctx()
+        .accesskit_node_builder(waiting.id, |node| node.set_description("Needs a name"));
+    let disclosure = ui.button("Advanced");
+    ui.ctx()
+        .accesskit_node_builder(disclosure.id, |node| node.set_expanded(false));
+    let note = ui.label("Note");
+    ui.ctx()
+        .accesskit_node_builder(note.id, |node| node.set_hidden());
+    ui.label("Twin");
+    ui.label("Twin");
+}
+
+#[test]
+fn every_matcher_fails_saying_what_it_expected_and_what_it_found() {
+    let cases: [(&'static str, PlayFn, &str); 18] = [
+        (
+            "fails-to-exist",
+            |p| p.expect("Absent").within(0).to_exist(),
+            r#"expected "Absent" exists, got nothing matched"#,
+        ),
+        (
+            "fails-to-be-absent",
+            |p| p.expect("Name").within(0).to_be_absent(),
+            r#"expected "Name" is absent, got 1 widget matches"#,
+        ),
+        (
+            "fails-to-have-count",
+            |p| p.expect("Twin").within(0).to_have_count(3),
+            r#"expected "Twin" count is equal to 3, got 2 widgets match"#,
+        ),
+        (
+            "fails-to-have-value",
+            |p| p.expect("Name").within(0).to_have_value("Ada"),
+            r#"expected "Name" value is equal to "Ada", got """#,
+        ),
+        (
+            "fails-to-have-label",
+            |p| p.expect("Remember").within(0).to_have_label("Forget"),
+            r#"expected "Remember" label is equal to "Forget", got "Remember""#,
+        ),
+        (
+            "fails-to-have-description",
+            |p| p.expect("Send").within(0).to_have_description("Sends it"),
+            r#"expected "Send" description is equal to "Sends it", got "Needs a name""#,
+        ),
+        (
+            "fails-to-have-placeholder",
+            |p| p.expect("Name").within(0).to_have_placeholder("Full name"),
+            r#"expected "Name" placeholder is equal to "Full name", got "Your name""#,
+        ),
+        (
+            "fails-to-have-numeric-value",
+            |p| p.expect(By::slider()).within(0).to_have_numeric_value(5.0),
+            "expected slider number is equal to 5.0, got 3.0",
+        ),
+        (
+            "fails-to-be-focused",
+            |p| p.expect("Name").within(0).to_be_focused(),
+            r#"expected "Name" is focused, got not focused"#,
+        ),
+        (
+            "fails-to-be-disabled",
+            |p| p.expect("Advanced").within(0).to_be_disabled(),
+            r#"expected "Advanced" is disabled, got enabled"#,
+        ),
+        (
+            "fails-to-be-enabled",
+            |p| p.expect("Send").within(0).to_be_enabled(),
+            r#"expected "Send" is enabled, got disabled"#,
+        ),
+        (
+            "fails-to-be-checked",
+            |p| p.expect("Remember").within(0).to_be_checked(),
+            r#"expected "Remember" is checked, got unchecked"#,
+        ),
+        (
+            "fails-to-be-partially-checked",
+            |p| p.expect("Remember").within(0).to_be_partially_checked(),
+            r#"expected "Remember" is partially checked, got unchecked"#,
+        ),
+        (
+            "fails-to-be-selected",
+            |p| p.expect("Other").within(0).to_be_selected(),
+            r#"expected "Other" is selected, got not selected"#,
+        ),
+        (
+            "fails-to-be-expanded",
+            |p| p.expect("Advanced").within(0).to_be_expanded(),
+            r#"expected "Advanced" is expanded, got collapsed"#,
+        ),
+        (
+            "fails-to-be-visible",
+            |p| p.expect("Note").within(0).to_be_visible(),
+            r#"expected "Note" is visible, got hidden"#,
+        ),
+        (
+            "fails-to-be-hidden",
+            |p| p.expect("Name").within(0).to_be_hidden(),
+            r#"expected "Name" is hidden, got visible"#,
+        ),
+        (
+            "fails-negated",
+            |p| p.expect("Chosen").within(0).not().to_be_selected(),
+            r#"expected "Chosen" isn't selected, got selected"#,
+        ),
+    ];
+    let wrong: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, run, expected)| {
+            let failed = failed_shot(states, name, run);
+            let got = reason(&failed);
+            (got != expected).then(|| format!("{name}:\n  expected: {expected}\n  got:      {got}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 
-# `just demo::recordings`: on both backends, record an animated scene
-# in every video format and a play with its input shown, and check
-# each animation holds every frame its length asks for.
+# `just demo::recordings`: on both backends, record the studio and checks tours
+# in every video format, and check each file holds every frame its play drew
+# and pauses at the play's step ends.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 recipe="$repo/scripts/recordings.toml"
-# 60 fps for 2 s, as both orbit shots in the recipe ask.
-frames=120
 
 problems=()
 for backend in wgpu femtovg; do
@@ -18,22 +16,22 @@ for backend in wgpu femtovg; do
         problems+=("$backend: the capture failed")
         continue
     fi
-    tour="$out/studio-tour.apng"
-    held=$(jq '.shots[] | select(.name == "studio-tour") | .video.held' "$out/report.json")
-    if [ ! -s "$tour" ]; then
-        problems+=("$backend: no $tour")
-    elif [ "${held:-0}" -eq 0 ]; then
-        problems+=("$backend: $tour never paused at a step's end")
-    fi
-    for format in apng mp4; do
-        video="$out/orbit-$format.$format"
-        recorded=$(jq --arg name "orbit-$format" '.shots[] | select(.name == $name) | .video.frames' \
+    for tour in studio-tour checks-tour; do
+        played=$(jq --arg name "$tour" '.shots[] | select(.name == $name) | .play.frames' \
             "$out/report.json")
-        if [ ! -s "$video" ]; then
-            problems+=("$backend: no $video")
-        elif [ "$recorded" != "$frames" ]; then
-            problems+=("$backend: $video holds ${recorded:-no} frames, not $frames")
-        fi
+        for format in apng mp4; do
+            video="$out/$tour.$format"
+            read -r recorded held < <(jq -r --arg name "$tour" --arg format "$format" \
+                '.shots[] | select(.name == $name) | .videos[] | select(.format == $format)
+                    | "\(.frames) \(.held)"' "$out/report.json") || true
+            if [ ! -s "$video" ]; then
+                problems+=("$backend: no $video")
+            elif ! [[ ${recorded:-} =~ ^[0-9]+$ ]] || [ "$recorded" != "$played" ]; then
+                problems+=("$backend: $video holds ${recorded:-no} frames of the ${played:-?} its play drew")
+            elif [ "${held:-0}" -eq 0 ]; then
+                problems+=("$backend: $video never paused at a step's end")
+            fi
+        done
     done
 done
 
@@ -41,4 +39,4 @@ if [ "${#problems[@]}" -gt 0 ]; then
     printf 'demo-recordings: %s\n' "${problems[@]}" >&2
     exit 1
 fi
-echo "demo-recordings: every format recorded all $frames frames on both backends" >&2
+echo "demo-recordings: both tours recorded in every format on both backends" >&2

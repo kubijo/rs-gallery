@@ -205,7 +205,7 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
             }),
             record: cli.record.map(|record| {
                 let record = render::Record {
-                    format: cli.record_format.unwrap_or_default(),
+                    formats: cli.record_format.unwrap_or_default(),
                     hold: cli.record_hold,
                     input: cli.record_input,
                     ..record
@@ -282,10 +282,10 @@ struct Cli {
     )]
     record: Option<render::Record>,
 
-    /// The recording's format: `apng` (lossless, comparable) or `mp4` (small, seekable)
-    /// [default: apng]
-    #[arg(long, value_name = "FORMAT", requires = "record")]
-    record_format: Option<render::VideoFormat>,
+    /// The recording's format: `apng` (lossless, comparable) or `mp4` (small, seekable),
+    /// or both from one run as `apng,mp4` [default: apng]
+    #[arg(long, value_name = "FORMAT[,FORMAT]", requires = "record")]
+    record_format: Option<render::VideoFormats>,
 
     /// Seconds a play's recording pauses at each step's end,
     /// so a step can be followed; 0 for none [default: 0.5]

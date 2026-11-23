@@ -67,7 +67,7 @@ so a minor release may carry a breaking change.
   it holds, with `.not()`, `.because(…)` and `.within(frames)`. Values compare by equality or by googletest's matchers,
   re-exported as `gallery::matchers`; `p.expect_value` polls any computed value. A failure says what was expected and
   found. `Found` carries a widget's toggled, selected, expanded, numeric, hidden, read-only, required, description and
-  placeholder state.
+  placeholder state. The template's `checks` scene is a form whose play passes every matcher.
 
 - **A play's log shows as it runs.** Its steps, gestures and checks are redrawn in place on a terminal, a passing play
   folding to one line, and printed once each play is over anywhere else — a pipe, CI, `TERM=dumb`, an agent's harness.
@@ -97,8 +97,8 @@ so a minor release may carry a breaking change.
   `input = true` (`--record-input`) shows the play's keys, mouse buttons and pointer over it; the template's new
   `studio` scene carries a play touching it with every kind of input to show that on. Frame *n* is drawn at exactly *n*
   / fps. The default APNG is lossless and byte-identical between runs; `format = "mp4"` (`--record-format mp4`) writes a
-  seekable H.264 MP4. The report and the summary name each recording, and the report adds what a frame cost to draw,
-  capture and encode.
+  seekable H.264 MP4, and `format = ["apng", "mp4"]` (`--record-format apng,mp4`) both from one run. The report's
+  `videos` and the summary name each file, and the report adds what a frame cost to draw, capture and encode.
 
 - **Dependencies.** usvg 0.50 and notify 9.
 
