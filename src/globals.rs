@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{ChoiceStyle, Icon, Knob, Pad2D, Pad2DSpec, SceneRevision};
+use crate::{ChoiceStyle, Icon, KnobState, Pad2D, Pad2DSpec, SceneRevision};
 
 /// Consumer-owned state shared by a catalog's scenes.
 ///
@@ -124,7 +124,7 @@ pub(crate) struct Synced {
 
 /// Declares catalog controls and maps stable choice labels to typed values.
 pub struct GlobalControls<'a> {
-    knobs: &'a mut Vec<Knob>,
+    knobs: &'a mut Vec<KnobState>,
     cursor: usize,
     labels: HashSet<String>,
     error: Option<String>,
@@ -134,7 +134,7 @@ pub struct GlobalControls<'a> {
 }
 
 impl<'a> GlobalControls<'a> {
-    fn new(knobs: &'a mut Vec<Knob>, writes: Vec<GlobalWrite>) -> Self {
+    fn new(knobs: &'a mut Vec<KnobState>, writes: Vec<GlobalWrite>) -> Self {
         Self {
             knobs,
             cursor: 0,
@@ -222,9 +222,9 @@ impl<'a> GlobalControls<'a> {
     fn slot(
         &mut self,
         label: &str,
-        fresh: impl FnOnce() -> Knob,
-        keep: impl Fn(&Knob) -> bool,
-    ) -> &mut Knob {
+        fresh: impl FnOnce() -> KnobState,
+        keep: impl Fn(&KnobState) -> bool,
+    ) -> &mut KnobState {
         if !self.labels.insert(label.to_owned()) {
             self.reject(format!(
                 "global control label {label:?} is declared more than once"
@@ -257,13 +257,13 @@ impl<'a> GlobalControls<'a> {
     pub fn button(&mut self, label: &str, on_click: impl FnOnce()) -> bool {
         let clicked = match self.slot(
             label,
-            || Knob::Button {
+            || KnobState::Button {
                 label: label.to_owned(),
                 clicked: false,
             },
-            |knob| matches!(knob, Knob::Button { label: current, .. } if current == label),
+            |knob| matches!(knob, KnobState::Button { label: current, .. } if current == label),
         ) {
-            Knob::Button { clicked, .. } => std::mem::take(clicked),
+            KnobState::Button { clicked, .. } => std::mem::take(clicked),
             _ => false,
         };
         if clicked {
@@ -277,13 +277,13 @@ impl<'a> GlobalControls<'a> {
         let written = self.written::<String>(label);
         match self.slot(
             label,
-            || Knob::Text {
+            || KnobState::Text {
                 label: label.to_owned(),
                 value: default.to_owned(),
             },
-            |knob| matches!(knob, Knob::Text { label: current, .. } if current == label),
+            |knob| matches!(knob, KnobState::Text { label: current, .. } if current == label),
         ) {
-            Knob::Text { value, .. } => {
+            KnobState::Text { value, .. } => {
                 if let Some(written) = written {
                     *value = written;
                 }
@@ -314,16 +314,16 @@ impl<'a> GlobalControls<'a> {
         let written = self.finite(label, written, |value| value.is_finite());
         match self.slot(
             label,
-            || Knob::Slider {
+            || KnobState::Slider {
                 label: label.to_owned(),
                 value: default,
                 min,
                 max,
                 step,
             },
-            |knob| matches!(knob, Knob::Slider { label: current, .. } if current == label),
+            |knob| matches!(knob, KnobState::Slider { label: current, .. } if current == label),
         ) {
-            Knob::Slider {
+            KnobState::Slider {
                 value,
                 min: current_min,
                 max: current_max,
@@ -348,13 +348,13 @@ impl<'a> GlobalControls<'a> {
         let written = self.written::<bool>(label);
         match self.slot(
             label,
-            || Knob::Toggle {
+            || KnobState::Toggle {
                 label: label.to_owned(),
                 value: default,
             },
-            |knob| matches!(knob, Knob::Toggle { label: current, .. } if current == label),
+            |knob| matches!(knob, KnobState::Toggle { label: current, .. } if current == label),
         ) {
-            Knob::Toggle { value, .. } => {
+            KnobState::Toggle { value, .. } => {
                 if let Some(written) = written {
                     *value = written;
                 }
@@ -373,13 +373,13 @@ impl<'a> GlobalControls<'a> {
         let written = self.written::<egui::Color32>(label);
         match self.slot(
             label,
-            || Knob::Color {
+            || KnobState::Color {
                 label: label.to_owned(),
                 value: default,
             },
-            |knob| matches!(knob, Knob::Color { label: current, .. } if current == label),
+            |knob| matches!(knob, KnobState::Color { label: current, .. } if current == label),
         ) {
-            Knob::Color { value, .. } => {
+            KnobState::Color { value, .. } => {
                 if let Some(written) = written {
                     *value = written;
                 }
@@ -445,16 +445,16 @@ impl<'a> GlobalControls<'a> {
         let last = labels.len().saturating_sub(1);
         let knob = self.slot(
             label,
-            || Knob::IconButtons {
+            || KnobState::IconButtons {
                 label: label.to_owned(),
                 value: default_at.min(last),
                 options: labels.clone(),
                 icons: icons.clone(),
             },
-            |knob| matches!(knob, Knob::IconButtons { label: current, .. } if current == label),
+            |knob| matches!(knob, KnobState::IconButtons { label: current, .. } if current == label),
         );
         let selected = match knob {
-            Knob::IconButtons {
+            KnobState::IconButtons {
                 value,
                 options: current,
                 icons: current_icons,
@@ -499,16 +499,16 @@ impl<'a> GlobalControls<'a> {
         let last = labels.len().saturating_sub(1);
         let knob = self.slot(
             label,
-            || Knob::Select {
+            || KnobState::Select {
                 label: label.to_owned(),
                 value: default_at.min(last),
                 options: labels.clone(),
                 style,
             },
-            |knob| matches!(knob, Knob::Select { label: current, style: current_style, .. } if current == label && *current_style == style),
+            |knob| matches!(knob, KnobState::Select { label: current, style: current_style, .. } if current == label && *current_style == style),
         );
         let selected = match knob {
-            Knob::Select {
+            KnobState::Select {
                 value,
                 options: current,
                 ..
@@ -534,10 +534,10 @@ impl<'a> GlobalControls<'a> {
     pub fn group(&mut self, label: &str) {
         self.slot(
             label,
-            || Knob::Group {
+            || KnobState::Group {
                 label: label.to_owned(),
             },
-            |knob| matches!(knob, Knob::Group { label: current } if current == label),
+            |knob| matches!(knob, KnobState::Group { label: current } if current == label),
         );
     }
 
@@ -569,7 +569,7 @@ impl<'a> GlobalControls<'a> {
         let written = self.finite(label, written, |pad| pad.x.is_finite() && pad.y.is_finite());
         match self.slot(
             label,
-            || Knob::Pad2D {
+            || KnobState::Pad2D {
                 label: label.to_owned(),
                 x: spec.default_x,
                 y: spec.default_y,
@@ -579,9 +579,9 @@ impl<'a> GlobalControls<'a> {
                 max_y: spec.max_y,
                 invert_y: spec.invert_y,
             },
-            |knob| matches!(knob, Knob::Pad2D { label: current, .. } if current == label),
+            |knob| matches!(knob, KnobState::Pad2D { label: current, .. } if current == label),
         ) {
-            Knob::Pad2D {
+            KnobState::Pad2D {
                 x,
                 y,
                 min_x,
@@ -616,17 +616,17 @@ fn ordered(min: f32, max: f32) -> (f32, f32) {
     (min.min(max), min.max(max))
 }
 
-pub(crate) fn control_shape(knobs: &[Knob]) -> Vec<(u8, String, Vec<String>)> {
+pub(crate) fn control_shape(knobs: &[KnobState]) -> Vec<(u8, String, Vec<String>)> {
     knobs
         .iter()
         .map(|knob| {
             let (kind, label, options) = match knob {
-                Knob::Button { label, .. } => (0, label, Vec::new()),
-                Knob::Text { label, .. } => (1, label, Vec::new()),
-                Knob::Slider { label, .. } => (2, label, Vec::new()),
-                Knob::Toggle { label, .. } => (3, label, Vec::new()),
-                Knob::Color { label, .. } => (4, label, Vec::new()),
-                Knob::Select {
+                KnobState::Button { label, .. } => (0, label, Vec::new()),
+                KnobState::Text { label, .. } => (1, label, Vec::new()),
+                KnobState::Slider { label, .. } => (2, label, Vec::new()),
+                KnobState::Toggle { label, .. } => (3, label, Vec::new()),
+                KnobState::Color { label, .. } => (4, label, Vec::new()),
+                KnobState::Select {
                     label,
                     options,
                     style,
@@ -640,9 +640,9 @@ pub(crate) fn control_shape(knobs: &[Knob]) -> Vec<(u8, String, Vec<String>)> {
                     label,
                     options.clone(),
                 ),
-                Knob::IconButtons { label, options, .. } => (8, label, options.clone()),
-                Knob::Pad2D { label, .. } => (9, label, Vec::new()),
-                Knob::Group { label } => (10, label, Vec::new()),
+                KnobState::IconButtons { label, options, .. } => (8, label, options.clone()),
+                KnobState::Pad2D { label, .. } => (9, label, Vec::new()),
+                KnobState::Group { label } => (10, label, Vec::new()),
             };
             (kind, label.clone(), options)
         })
@@ -658,7 +658,7 @@ pub struct GlobalEntry {
     prepare: fn(&[u8], &mut egui::Ui) -> Result<(), String>,
 }
 
-type SyncFn = fn(&mut Vec<u8>, &mut Vec<Knob>, Vec<GlobalWrite>) -> Result<Synced, String>;
+type SyncFn = fn(&mut Vec<u8>, &mut Vec<KnobState>, Vec<GlobalWrite>) -> Result<Synced, String>;
 
 impl GlobalEntry {
     #[doc(hidden)]
@@ -677,7 +677,7 @@ impl GlobalEntry {
     fn sync(
         self,
         bytes: &mut Vec<u8>,
-        knobs: &mut Vec<Knob>,
+        knobs: &mut Vec<KnobState>,
         writes: Vec<GlobalWrite>,
     ) -> Result<Synced, String> {
         (self.sync)(bytes, knobs, writes)
@@ -697,7 +697,7 @@ fn defaults<T: CatalogGlobals>() -> Result<Vec<u8>, String> {
 
 fn sync<T: CatalogGlobals>(
     bytes: &mut Vec<u8>,
-    knobs: &mut Vec<Knob>,
+    knobs: &mut Vec<KnobState>,
     writes: Vec<GlobalWrite>,
 ) -> Result<Synced, String> {
     let mut globals: T = postcard::from_bytes(bytes)
@@ -724,7 +724,7 @@ pub(crate) struct GlobalState {
     entry: GlobalEntry,
     revision: SceneRevision,
     bytes: Vec<u8>,
-    knobs: Vec<Knob>,
+    knobs: Vec<KnobState>,
     writable: Vec<Writable>,
 }
 
@@ -807,11 +807,11 @@ impl GlobalState {
         &self.writable
     }
 
-    pub(crate) fn knobs(&self) -> &[Knob] {
+    pub(crate) fn knobs(&self) -> &[KnobState] {
         &self.knobs
     }
 
-    pub(crate) fn knobs_mut(&mut self) -> &mut [Knob] {
+    pub(crate) fn knobs_mut(&mut self) -> &mut [KnobState] {
         &mut self.knobs
     }
 
@@ -862,7 +862,7 @@ mod tests {
     fn typed_values_round_trip_through_the_wire_state() {
         let mut state = GlobalState::new(GlobalEntry::of::<Globals>(), SceneRevision::INITIAL)
             .expect("global state");
-        if let Knob::Select { value, .. } = &mut state.knobs[0] {
+        if let KnobState::Select { value, .. } = &mut state.knobs[0] {
             *value = 1;
         }
         state.sync().expect("selected state serializes");
@@ -888,7 +888,7 @@ mod tests {
 
         assert!(written.changed);
         assert!(written.missed.is_empty(), "{:?}", written.missed);
-        assert!(matches!(state.knobs[0], Knob::Select { value: 2, .. }));
+        assert!(matches!(state.knobs[0], KnobState::Select { value: 2, .. }));
         let globals: Globals = postcard::from_bytes(&state.bytes).expect("typed state");
         assert_eq!(globals.theme, Theme::Light);
         assert!(globals.enabled);
@@ -913,7 +913,10 @@ mod tests {
             written.missed,
             ["set_global(\"enabled\"): the written value has another type"]
         );
-        assert!(matches!(state.knobs[1], Knob::Toggle { value: false, .. }));
+        assert!(matches!(
+            state.knobs[1],
+            KnobState::Toggle { value: false, .. }
+        ));
     }
 
     #[test]
@@ -1057,7 +1060,7 @@ mod tests {
 
         let mut state = GlobalState::new(GlobalEntry::of::<Counter>(), SceneRevision::INITIAL)
             .expect("global state");
-        let Knob::Button { clicked, .. } = &mut state.knobs[0] else {
+        let KnobState::Button { clicked, .. } = &mut state.knobs[0] else {
             panic!("a button was declared")
         };
         *clicked = true;
@@ -1109,7 +1112,7 @@ mod tests {
 
         let mut state = GlobalState::new(GlobalEntry::of::<Globals>(), SceneRevision::INITIAL)
             .expect("global state");
-        if let Knob::Select { value, .. } = &mut state.knobs[0] {
+        if let KnobState::Select { value, .. } = &mut state.knobs[0] {
             *value = 1;
         }
         state.sync().expect("old state");
@@ -1147,10 +1150,10 @@ mod tests {
 
         let mut state = GlobalState::new(GlobalEntry::of::<Globals>(), SceneRevision::INITIAL)
             .expect("global state");
-        if let Knob::Select { value, .. } = &mut state.knobs[0] {
+        if let KnobState::Select { value, .. } = &mut state.knobs[0] {
             *value = 1;
         }
-        if let Knob::Toggle { value, .. } = &mut state.knobs[1] {
+        if let KnobState::Toggle { value, .. } = &mut state.knobs[1] {
             *value = true;
         }
         state.sync().expect("old state");
@@ -1232,7 +1235,7 @@ mod tests {
         let mut state = GlobalState::new(GlobalEntry::of::<OneWay>(), SceneRevision::INITIAL)
             .expect("the default round trips");
         let before = state.bytes.clone();
-        let Knob::Toggle { value, .. } = &mut state.knobs[0] else {
+        let KnobState::Toggle { value, .. } = &mut state.knobs[0] else {
             panic!("a toggle was declared")
         };
         *value = true;
@@ -1345,7 +1348,7 @@ mod tests {
         assert_eq!(value.pad, Pad2D { x: 1.0, y: -2.0 });
         assert!(matches!(
             state.knobs[0],
-            Knob::Slider {
+            KnobState::Slider {
                 min: -1.0,
                 max: 1.0,
                 ..
@@ -1353,7 +1356,7 @@ mod tests {
         ));
         assert!(matches!(
             state.knobs[1],
-            Knob::Pad2D {
+            KnobState::Pad2D {
                 min_x: -1.0,
                 max_x: 1.0,
                 min_y: -2.0,

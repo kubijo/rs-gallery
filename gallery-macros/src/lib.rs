@@ -165,9 +165,18 @@ pub fn scene(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote! {}
     };
+    let vis = &func.vis;
+    let key = scene_key_ident(ident);
     quote! {
         #func
         #adapter
+        // A display name means the key can't be derived from the function's name.
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        #vis const #key: ::gallery::SceneKey = ::gallery::SceneKey {
+            module_path: ::core::module_path!(),
+            name: #name,
+        };
         ::gallery::inventory::submit! {
             ::gallery::SceneEntry {
                 render: #render,
@@ -176,6 +185,60 @@ pub fn scene(attr: TokenStream, item: TokenStream) -> TokenStream {
                 default: #default,
                 order: #order,
                 source: #source,
+            }
+        }
+    }
+    .into()
+}
+
+fn scene_key_ident(scene: &Ident) -> Ident {
+    format_ident!("__gallery_scene_{scene}")
+}
+
+/// An interaction script for a scene: `#[play(scene_fn)]` on a `fn(&mut Play) -> PlayResult`.
+/// A scene can have several, each known by its function's name.
+/// The path is where the scene fn is defined: `#[scene]` puts its key there, not behind a `use`.
+#[proc_macro_attribute]
+pub fn play(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+    let mut scene = match syn::parse::<syn::Path>(attr) {
+        Ok(path) => path,
+        Err(e) => {
+            return syn::Error::new(
+                e.span(),
+                "`#[play]` names its scene's function: `#[play(scene_fn)]`",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+    let Some(last) = scene.segments.last_mut() else {
+        return syn::Error::new_spanned(&scene, "`#[play]` needs the scene's function")
+            .to_compile_error()
+            .into();
+    };
+    last.ident = scene_key_ident(&last.ident);
+    if func.sig.asyncness.is_some() {
+        return syn::Error::new_spanned(&func.sig, "a play cannot be async")
+            .to_compile_error()
+            .into();
+    }
+    let ident = &func.sig.ident;
+    let name = ident.to_string();
+    let guarded = format_ident!("__gallery_play_{ident}");
+    quote! {
+        #func
+        // Compiled into the scenes dylib, so the play's panics are caught by the `std` that raised them.
+        #[doc(hidden)]
+        fn #guarded(play: &mut ::gallery::Play<'_>) -> ::gallery::PlayResult {
+            ::gallery::__run_play(play, #ident)
+        }
+        ::gallery::inventory::submit! {
+            ::gallery::PlayEntry {
+                scene: #scene,
+                name: #name,
+                module_path: ::core::module_path!(),
+                run: #guarded,
             }
         }
     }

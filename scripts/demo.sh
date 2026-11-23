@@ -37,9 +37,14 @@ fi
 # template's own [workspace] then keeps the instance standalone.
 rm -rf "$demo"
 mkdir -p "$repo/.tmp"
-cargo generate --path "$repo/template" --destination "$repo/.tmp" --name "demo-$variant" --no-workspace \
-    --vcs none --silent --define gallery_git=LOCAL --define scene_globs='*.scene.rs' \
-    --define title="gallery demo ($variant)"
+# Held back unless it fails: `--silent` still leaves its progress lines,
+# with paths shortened to initials (`~/d/k/r/.tmp/demo-wgpu`).
+if ! generated=$(cargo generate --path "$repo/template" --destination "$repo/.tmp" \
+    --name "demo-$variant" --no-workspace --vcs none --silent --define gallery_git=LOCAL \
+    --define scene_globs='*.scene.rs' --define title="gallery demo ($variant)" 2>&1); then
+    printf '%s\n' "$generated" >&2
+    exit 1
+fi
 
 # Repoint the git-dep placeholders at this working tree so the demo exercises local changes.
 sed -i \
@@ -64,6 +69,14 @@ if [ "$variant" = femtovg ]; then
     cargo tree --manifest-path "$demo/Cargo.toml" 2>/dev/null \
         | grep -oE '\bglow v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | sed 's/^/  /' >&2
 fi
+
+# Scene files the template doesn't ship, for a run that needs them (`just demo-plays`).
+# One per line, so a path may hold spaces.
+while IFS= read -r scene; do
+    if [ -n "$scene" ]; then
+        cp "$scene" "$demo/"
+    fi
+done <<<"${GALLERY_DEMO_SCENES:-}"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/.tmp/target}/demo-$variant"
 

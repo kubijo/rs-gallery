@@ -21,9 +21,9 @@ const LEVELS: [(&str, egui::Color32); 3] = [
 /// however wide the pane gets.
 #[scene(default)]
 fn column(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
-    let width = ctx.slider("width", 280.0, 160.0, 640.0, 10.0);
-    let height = ctx.slider("height", 190.0, 140.0, 400.0, 10.0);
-    let count = ctx.slider("notices", 4.0, 1.0, 12.0, 1.0) as usize;
+    let width = ctx.slider("width", 280.0, 160.0, 640.0, 10.0).get();
+    let height = ctx.slider("height", 190.0, 140.0, 400.0, 10.0).get();
+    let count = ctx.slider("notices", 4.0, 1.0, 12.0, 1.0).get() as usize;
 
     for i in 0..count {
         let (level, tint) = LEVELS[i % LEVELS.len()];

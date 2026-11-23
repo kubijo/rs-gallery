@@ -15,8 +15,8 @@ thread_local! {
 /// and a folder whose own name matches shows everything under it.
 #[scene(default)]
 fn tree(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let filter = ctx.text("filter", "");
-    let fold = ctx.toggle("folders folded", false);
+    let filter = ctx.text("filter", "").get();
+    let fold = ctx.toggle("folders folded", false).get();
     let scenes = posed();
     let groups = vec![
         group("app::dial", "Components / Dial"),

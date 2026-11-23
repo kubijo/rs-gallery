@@ -50,10 +50,26 @@ regex = "1"
 anstream = "1"
 anstyle = "1"
 egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }
+# egui_kittest's query layer, used directly to search whatever tree a play's driver holds.
+kittest = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 glutin = { version = "0.32", default-features = false, features = ["egl"] }
 supports-hyperlinks = "3"
-percent-encoding = "2"
+# OSC 8 links; `file` builds a path's `file://` URL, host included so a link printed over SSH resolves there.
+anstyle-hyperlink = { version = "1", features = ["file"] }
+# Renders diagnostics, detecting colour, hyperlink, unicode and width support itself; no backtraces.
+# `syntect-highlighter` colours the source a failure points at, only when a report is drawn.
+miette = { version = "7", default-features = false, features = [
+   "fancy-no-backtrace",
+   "syntect-highlighter",
+] }
+# miette's wrapper, named only to tell it to break lines at spaces alone.
+textwrap = "0.16"
+# Lays out a capture's summary; `custom_styling` measures cells holding colour and links correctly.
+comfy-table = { version = "8", features = ["custom_styling"] }
+# How wide a line looks, and how wide the terminal is, for framing a report.
+unicode-width = "0.2"
+terminal_size = "0.4"
 binpack2d = "1"
 indoc = "2"
 pollster = "1"

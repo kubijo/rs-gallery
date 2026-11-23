@@ -13,8 +13,10 @@ const SIDE: f32 = 150.0;
 
 #[scene(default)]
 fn round_and_square(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let padding = ctx.slider("padding", 0.0, 0.0, 32.0, 1.0);
-    let tint = ctx.color("face", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
+    let padding = ctx.slider("padding", 0.0, 0.0, 32.0, 1.0).get();
+    let tint = ctx
+        .color("face", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8))
+        .get();
     #[expect(clippy::cast_possible_truncation, reason = "the slider stops at 32")]
     let padding = padding as i8;
 

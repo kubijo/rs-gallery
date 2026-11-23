@@ -10,12 +10,14 @@ scene_meta! { title: "Motion / Orbit" }
 
 #[scene(default)]
 fn orbit(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let animate = ctx.toggle("animate", true);
-    let count = ctx.slider("dots", 24.0, 1.0, 400.0, 1.0) as usize;
-    let speed = ctx.slider("speed", 1.0, 0.0, 4.0, 0.1);
-    let radius = ctx.slider("radius", 90.0, 10.0, 200.0, 1.0);
-    let dot = ctx.slider("dot size", 5.0, 1.0, 20.0, 0.5);
-    let accent = ctx.color("accent", egui::Color32::from_rgb(0x4C, 0xAF, 0x50));
+    let animate = ctx.toggle("animate", true).get();
+    let count = ctx.slider("dots", 24.0, 1.0, 400.0, 1.0).get() as usize;
+    let speed = ctx.slider("speed", 1.0, 0.0, 4.0, 0.1).get();
+    let radius = ctx.slider("radius", 90.0, 10.0, 200.0, 1.0).get();
+    let dot = ctx.slider("dot size", 5.0, 1.0, 20.0, 0.5).get();
+    let accent = ctx
+        .color("accent", egui::Color32::from_rgb(0x4C, 0xAF, 0x50))
+        .get();
 
     // Ask for the next frame and the shell keeps rendering; off, it falls back to rest.
     if animate {

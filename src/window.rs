@@ -529,7 +529,7 @@ mod tests {
         let observed_actions = actions.clone();
         let icons = Icons::load();
         let mut knobs = vec![
-            crate::Knob::IconButtons {
+            crate::KnobState::IconButtons {
                 label: "Theme".to_owned(),
                 value: 0,
                 options: vec!["Light".to_owned(), "Dark".to_owned()],
@@ -538,7 +538,7 @@ mod tests {
                     crate::Icon::from_svg(include_bytes!("../template/assets/theme-dark.svg")),
                 ],
             },
-            crate::Knob::IconButtons {
+            crate::KnobState::IconButtons {
                 label: "Language".to_owned(),
                 value: 0,
                 options: vec!["English".to_owned(), "Finnish".to_owned()],
@@ -559,7 +559,7 @@ mod tests {
                 let action = title_bar_with(ui, "gallery", false, None, &icons, |ui| {
                     crate::knobs::render_global_toolbar(ui, &mut knobs);
                 });
-                let crate::Knob::IconButtons { value, .. } = &knobs[0] else {
+                let crate::KnobState::IconButtons { value, .. } = &knobs[0] else {
                     unreachable!()
                 };
                 *observed.borrow_mut() = *value;

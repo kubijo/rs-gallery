@@ -36,6 +36,8 @@ jobs:
       # Through the wrapper: it carries mesa's software EGL, which is what lets the glow capture
       # tests render on a runner with no GPU.
       - run: nix develop --command gallery-test
+      # Plays through a scaffolded catalog's own scenes dylib, which the tests above cannot reach.
+      - run: nix develop --command just demo-plays
       - run: nix develop --command cargo llvm-cov report | tee coverage.txt
       # Surface coverage in the UI (run summary + sticky PR comment) — self-contained, no third party.
       - env:

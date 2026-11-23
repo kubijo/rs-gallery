@@ -5,6 +5,72 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Breaking: knob accessors return a `Knob<T>` handle.** `ctx.slider`, `toggle`, `text`, `color`, `select`, `radio`,
+  `buttons` and `pad2d` return a handle: `get()` reads it, `set(value)` writes it, snapped as its control would, from
+  anywhere in the frame, a change callback included. Migrating:
+
+  | Before                                                  | After                                                   |
+  | ------------------------------------------------------- | ------------------------------------------------------- |
+  | `let n = ctx.slider("n", 1.0, 0.0, 9.0, 1.0);`          | `let n = ctx.slider("n", 1.0, 0.0, 9.0, 1.0).get();`    |
+  | `ctx.set_slider`, `set_toggle`, `set_text`, `set_color` | `knob.set(value)` on the accessor's handle              |
+  | `ctx.set_select("mode", "auto")`                        | `mode.select("auto")`                                   |
+  | `ctx.set_select_index("mode", i)`                       | `mode.set(i)`                                           |
+  | `ctx.set_pad2d("aim", x, y)`                            | `aim.set(Pad2D { x, y })`                               |
+  | `gallery::Knob::Slider { .. }`, `&mut [Knob]`           | `gallery::KnobState::Slider { .. }`, `&mut [KnobState]` |
+
+  `set` returns `false` for a value the knob can't take, not for a missing label: it always reaches its own knob. A
+  handle is for its frame; kept longer, it refuses writes. In a capture, a knob the recipe or a play's `set_knob` holds
+  refuses them too, so the scene draws the held value and a `settle` shot settles; a catalog global it holds still takes
+  `set_global`.
+
+  A write stores what the panel's control would. A slider snaps as egui does, with no clamp after, so a step that
+  doesn't divide the range can land past `max`: `set(10.0)` on `0..=1` step `0.4` stores `1.2`, where `set_slider`
+  stored `1.0`. A colour goes through HSVA as the picker does, which changes only an invalid premultiplied colour.
+
+- **Knob ranges follow the accessor.** A slider's or pad's range now updates, clamping the value, when the scene
+  declares a new one, as a select's options already did. A recipe or `set_knob` value its knob can't take yet waits:
+  past the range, an option not offered, or a group or button where a knob of that label is hidden. So a range, an
+  option list or a knob that follows another knob replays. The value fails if its knob still refuses it at the end, or
+  if it never landed before its knob was hidden; a landed value whose knob is later hidden, group or not, passes.
+
+- **Fixed: fine slider steps.** A step of `1e-5` or less snapped every value to a whole number.
+
+- **Fixed: recipes refused every value for a reversed range** (`min > max`), which the panel takes either way round.
+
+- **Fixed: a knob sharing its label with a group or button was out of a recipe's reach.** Among the knobs a key matches
+  equally well, by exact label or by regex, one holding a value now wins over a group or button, and while that knob is
+  hidden the value waits for it.
+
+- **A recipe or play key stays on one knob.** A key that lands on one knob and later another, across a shot's settles
+  and its play, fails instead of setting both: one whose own knob is hidden, at first or later, reads as a regex that
+  can match another label. A regex key no longer follows a label that changes. A play's failure points at the `set_knob`
+  behind a bad value, says when a key's knob is hidden rather than missing, and a state it leaves that fails the shot
+  names the play.
+
+- **Plays: scripted interactions.** `#[play(scene_fn)] fn name(p: &mut Play) -> PlayResult` drives a scene the way a
+  person would — `click`, `hover`, `focus`, `fill`, `type_text`, `press`, `drag`, `scroll` — finding widgets by their
+  accessible label or role. Each gesture is a fixed sequence of frames, so a play draws the same frames anywhere.
+  `wait_for` draws frames until a condition holds; `step` names part of a script and takes the blame for a panic in it;
+  `expect_action` checks what the scene reported; `set_knob` holds a knob over the recipe.
+
+- **Captures run plays.** `[[shot]] play = "name"` and `--play NAME` capture the state a play leaves behind — hover,
+  focus, typed text, which no knob can set. The report lists each step and its frames. A failing play keeps a screenshot
+  per step beside the shot (`trace = "on"` keeps them always), and the instance justfile gains `just play`.
+
+- **A failed play does not stop the run.** The other shots still run; the summary marks each shot passed or failed, each
+  failure follows in a numbered panel pointing at the play's own line, and the run exits non-zero. The report's
+  `failed_shots` lists every failure step by step.
+
+- **Errors read as reports.** miette lays them out: what failed, why, the names in play, and what to do. Colour,
+  box-drawing, clickable paths and wrapping follow what the terminal supports, and a CI log keeps whole lines.
+  Screenshot folders, play steps and the run's report all show up, linked, in a capture's summary.
+
+- **Audit clean without exceptions.** The three AT-SPI advisory exceptions no longer match anything and are gone, and
+  the lock moves off the yanked async-executor 1.14.0.
+
+- **Fixed: the Actions panel heard nothing from a scenes dylib.** The dylib's copy of gallery kept actions to itself; it
+  now reports them to the shell.
+
 ## [0.16.0] - 2026-10-26
 
 - **Scenes can write catalog globals.** `SceneCtx::set_global(key, value)` keeps a story's own switcher and the window

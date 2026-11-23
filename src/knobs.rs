@@ -1,6 +1,6 @@
 //! Knob data and rendering.
 //!
-//! [`Knob`] is the pure-data model of one control — the shell renders it with [`render_knobs`], and no
+//! [`KnobState`] is the pure-data model of one control — the shell renders it with [`render_knobs`], and no
 //! egui widget state lives here. The declarative-by-use accessors that create and read knobs live on
 //! [`SceneCtx`](crate::SceneCtx).
 
@@ -10,7 +10,7 @@ use crate::Icon;
 
 /// One scene or catalog-global control.
 #[derive(Clone)]
-pub enum Knob {
+pub enum KnobState {
     /// A momentary action. `clicked` is set by the panel and consumed by the scene on its next
     /// [`SceneCtx::button`](crate::SceneCtx::button) call.
     Button {
@@ -68,7 +68,24 @@ pub enum Knob {
     },
 }
 
-/// How a [`Knob::Select`] renders. All three pick one option from a list; they differ only in shape:
+impl KnobState {
+    /// Every knob carries one, and it is its identity in the store.
+    pub(crate) fn label(&self) -> &str {
+        match self {
+            KnobState::Button { label, .. }
+            | KnobState::Text { label, .. }
+            | KnobState::Slider { label, .. }
+            | KnobState::Toggle { label, .. }
+            | KnobState::Color { label, .. }
+            | KnobState::Select { label, .. }
+            | KnobState::IconButtons { label, .. }
+            | KnobState::Pad2D { label, .. }
+            | KnobState::Group { label } => label,
+        }
+    }
+}
+
+/// How a [`KnobState::Select`] renders. All three pick one option from a list; they differ only in shape:
 /// `Dropdown` folds into a combo box, `Radio` stacks vertically, and `Buttons` lays out an inline
 /// segmented row — condensed and glance-readable, a good fit for two- or three-state knobs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -113,12 +130,51 @@ impl Default for Pad2DSpec {
     }
 }
 
+/// A slider's or pad axis's range as declared: either end may be the larger,
+/// and a NaN end is the scene's to declare.
+#[derive(Clone, Copy)]
+pub(crate) struct Span {
+    pub(crate) min: f32,
+    pub(crate) max: f32,
+}
+
+impl Span {
+    pub(crate) fn new(min: f32, max: f32) -> Self {
+        Self { min, max }
+    }
+
+    pub(crate) fn has_nan(self) -> bool {
+        self.min.is_nan() || self.max.is_nan()
+    }
+
+    pub(crate) fn contains(self, value: f32) -> bool {
+        (self.min.min(self.max)..=self.min.max(self.max)).contains(&value)
+    }
+
+    /// `value` clamped into the span, or `None` if it's not finite or the span has a NaN end.
+    pub(crate) fn clamp(self, value: f32) -> Option<f32> {
+        (value.is_finite() && !self.has_nan())
+            .then(|| value.clamp(self.min.min(self.max), self.min.max(self.max)))
+    }
+
+    /// Compared by bits: a NaN end is never `==` itself and would read as changed every frame.
+    pub(crate) fn same_bits(self, other: Self) -> bool {
+        self.min.to_bits() == other.min.to_bits() && self.max.to_bits() == other.max.to_bits()
+    }
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ..= {}", self.min, self.max)
+    }
+}
+
 /// Each scene's persistent knobs, keyed by scene identity (so switching scenes and reloading keep
 /// their own values).
-pub type KnobStore = HashMap<String, Vec<Knob>>;
+pub type KnobStore = HashMap<String, Vec<KnobState>>;
 
 /// Render a scene's knobs into the controls panel. Returns `true` if the user changed any value.
-pub fn render_knobs(ui: &mut egui::Ui, knobs: &mut [Knob]) -> bool {
+pub fn render_knobs(ui: &mut egui::Ui, knobs: &mut [KnobState]) -> bool {
     if knobs.is_empty() {
         ui.weak("This scene has no controls.");
         return false;
@@ -126,26 +182,26 @@ pub fn render_knobs(ui: &mut egui::Ui, knobs: &mut [Knob]) -> bool {
     render_knob_grid(ui, "gallery-scene-knobs", knobs.iter_mut())
 }
 
-pub(crate) fn has_panel_globals(knobs: &[Knob]) -> bool {
+pub(crate) fn has_panel_globals(knobs: &[KnobState]) -> bool {
     knobs
         .iter()
-        .any(|knob| !matches!(knob, Knob::IconButtons { .. }))
+        .any(|knob| !matches!(knob, KnobState::IconButtons { .. }))
 }
 
-pub(crate) fn render_panel_globals(ui: &mut egui::Ui, knobs: &mut [Knob]) -> bool {
+pub(crate) fn render_panel_globals(ui: &mut egui::Ui, knobs: &mut [KnobState]) -> bool {
     render_knob_grid(
         ui,
         "gallery-global-knobs",
         knobs
             .iter_mut()
-            .filter(|knob| !matches!(knob, Knob::IconButtons { .. })),
+            .filter(|knob| !matches!(knob, KnobState::IconButtons { .. })),
     )
 }
 
 fn render_knob_grid<'a>(
     ui: &mut egui::Ui,
     id_salt: &'static str,
-    knobs: impl Iterator<Item = &'a mut Knob>,
+    knobs: impl Iterator<Item = &'a mut KnobState>,
 ) -> bool {
     let mut changed = false;
     egui::Grid::new(ui.id().with(id_salt))
@@ -160,14 +216,14 @@ fn render_knob_grid<'a>(
     changed
 }
 
-pub(crate) fn render_global_toolbar(ui: &mut egui::Ui, knobs: &mut [Knob]) -> bool {
+pub(crate) fn render_global_toolbar(ui: &mut egui::Ui, knobs: &mut [KnobState]) -> bool {
     let mut changed = false;
     ui.spacing_mut().item_spacing.x = 2.0 / ui.ctx().pixels_per_point();
     ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
 
     let mut first = true;
     for knob in knobs.iter_mut().rev() {
-        let Knob::IconButtons {
+        let KnobState::IconButtons {
             label,
             value,
             options,
@@ -188,19 +244,17 @@ pub(crate) fn render_global_toolbar(ui: &mut egui::Ui, knobs: &mut [Knob]) -> bo
 }
 
 /// Fractional digits in `step`, so a slider's readout matches its increment.
-fn step_decimals(step: f32) -> usize {
-    let mut decimals = 0;
-    let mut scaled = step;
-    while (scaled - scaled.round()).abs() > 1e-5 && decimals < 10 {
-        scaled *= 10.0;
-        decimals += 1;
-    }
-    decimals
+pub(crate) fn step_decimals(step: f32) -> usize {
+    // `Display` prints an `f32` in the shortest decimal that reads back to it, never in exponent form.
+    let shortest = step.abs().to_string();
+    shortest
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len())
 }
 
-fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
+fn render_knob(ui: &mut egui::Ui, knob: &mut KnobState) -> bool {
     match knob {
-        Knob::Button { label, clicked } => {
+        KnobState::Button { label, clicked } => {
             // The label belongs on the button itself; the empty first cell keeps it aligned with
             // the widgets of value-carrying knobs without repeating the label beside it.
             ui.label("");
@@ -215,18 +269,18 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
                 false
             }
         }
-        Knob::Group { label } => {
+        KnobState::Group { label } => {
             ui.strong(label.as_str());
             ui.separator();
             false
         }
-        Knob::Text { label, value } => {
+        KnobState::Text { label, value } => {
             let label = ui.label(label.as_str());
             ui.text_edit_singleline(value)
                 .labelled_by(label.id)
                 .changed()
         }
-        Knob::Slider {
+        KnobState::Slider {
             label,
             value,
             min,
@@ -242,7 +296,7 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             }
             ui.add(widget).changed()
         }
-        Knob::Toggle { label, value } => {
+        KnobState::Toggle { label, value } => {
             let label = ui
                 .add(
                     egui::Label::new(label.as_str())
@@ -259,13 +313,13 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             }
             label.clicked() || checkbox.changed()
         }
-        Knob::Color { label, value } => {
+        KnobState::Color { label, value } => {
             ui.label(label.as_str());
             ui.color_edit_button_srgba(value)
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .changed()
         }
-        Knob::Select {
+        KnobState::Select {
             label,
             value,
             options,
@@ -323,7 +377,7 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             }
             changed
         }
-        Knob::IconButtons {
+        KnobState::IconButtons {
             label,
             value,
             options,
@@ -341,7 +395,7 @@ fn render_knob(ui: &mut egui::Ui, knob: &mut Knob) -> bool {
             });
             changed
         }
-        Knob::Pad2D {
+        KnobState::Pad2D {
             label,
             x,
             y,
@@ -511,7 +565,7 @@ mod tests {
     fn coloured_icon_buttons_keep_colours_across_interaction_states() {
         use egui_kittest::kittest::Queryable;
         let icon = Icon::from_svg_colored(include_bytes!("../tests/fixtures/two-colour.svg"));
-        let knobs = vec![Knob::IconButtons {
+        let knobs = vec![KnobState::IconButtons {
             label: "Language".into(),
             value: 0,
             options: vec!["First".into(), "Second".into()],
@@ -565,7 +619,7 @@ mod tests {
         harness.run();
         assert!(matches!(
             harness.state()[0],
-            Knob::IconButtons { value: 1, .. }
+            KnobState::IconButtons { value: 1, .. }
         ));
         let selected = harness.render().unwrap();
         assert_eq!(
@@ -580,7 +634,7 @@ mod tests {
     fn toggle_label_and_checkbox_each_toggle_once_and_show_pointer() {
         use egui_kittest::kittest::Queryable;
         let state = (
-            vec![Knob::Toggle {
+            vec![KnobState::Toggle {
                 label: "Alternate colour".into(),
                 value: false,
             }],
@@ -618,7 +672,7 @@ mod tests {
             harness.run();
             assert_eq!(harness.state().1, at + 1);
             assert!(
-                matches!(harness.state().0[0], Knob::Toggle { value, .. } if value == (at == 0))
+                matches!(harness.state().0[0], KnobState::Toggle { value, .. } if value == (at == 0))
             );
         }
         harness.state_mut().2 = false;
@@ -649,13 +703,13 @@ mod tests {
 
         let options: Vec<String> = (0..8).map(|i| format!("opt-{i}")).collect();
         let mut knobs = vec![
-            Knob::Select {
+            KnobState::Select {
                 label: "mode".to_owned(),
                 value: 0,
                 options: options.clone(),
                 style: ChoiceStyle::Buttons,
             },
-            Knob::Toggle {
+            KnobState::Toggle {
                 label: "after".to_owned(),
                 value: false,
             },
@@ -699,57 +753,57 @@ mod tests {
         let options = |a: &str, b: &str| vec![a.to_owned(), b.to_owned()];
         let icon = Icon::from_svg(include_bytes!("../assets/icons/app.svg"));
         let mut knobs = vec![
-            Knob::Button {
+            KnobState::Button {
                 label: "rebuild".to_owned(),
                 clicked: false,
             },
-            Knob::Group {
+            KnobState::Group {
                 label: "section".to_owned(),
             },
-            Knob::Text {
+            KnobState::Text {
                 label: "note".to_owned(),
                 value: "hello".to_owned(),
             },
-            Knob::Slider {
+            KnobState::Slider {
                 label: "size".to_owned(),
                 value: 2.0,
                 min: 0.0,
                 max: 4.0,
                 step: 0.5,
             },
-            Knob::Toggle {
+            KnobState::Toggle {
                 label: "enabled".to_owned(),
                 value: true,
             },
-            Knob::Color {
+            KnobState::Color {
                 label: "tint".to_owned(),
                 value: egui::Color32::from_rgb(0x6C, 0x9C, 0xD8),
             },
-            Knob::Select {
+            KnobState::Select {
                 label: "dropdown".to_owned(),
                 value: 0,
                 options: options("alpha", "beta"),
                 style: ChoiceStyle::Dropdown,
             },
-            Knob::Select {
+            KnobState::Select {
                 label: "radio".to_owned(),
                 value: 1,
                 options: options("gamma", "delta"),
                 style: ChoiceStyle::Radio,
             },
-            Knob::Select {
+            KnobState::Select {
                 label: "buttons".to_owned(),
                 value: 0,
                 options: options("epsilon", "zeta"),
                 style: ChoiceStyle::Buttons,
             },
-            Knob::IconButtons {
+            KnobState::IconButtons {
                 label: "icon buttons".to_owned(),
                 value: 0,
                 options: options("eta", "theta"),
                 icons: vec![icon.clone(), icon],
             },
-            Knob::Pad2D {
+            KnobState::Pad2D {
                 label: "aim".to_owned(),
                 x: 0.0,
                 y: 0.0,
@@ -803,7 +857,7 @@ mod tests {
     #[test]
     fn icon_buttons_paint_their_svg_inside_the_button() {
         fn render(icon: Icon) -> image::RgbaImage {
-            let mut knobs = vec![Knob::IconButtons {
+            let mut knobs = vec![KnobState::IconButtons {
                 label: "theme".to_owned(),
                 value: 0,
                 options: vec!["Light".to_owned()],
@@ -831,7 +885,7 @@ mod tests {
 
     #[test]
     fn catalog_and_scene_knob_grids_do_not_reuse_an_egui_id() {
-        let slider = |label: &str| Knob::Slider {
+        let slider = |label: &str| KnobState::Slider {
             label: label.to_owned(),
             value: 0.0,
             min: 0.0,
@@ -866,7 +920,7 @@ mod tests {
     #[test]
     fn repeated_raw_icon_labels_do_not_reuse_an_atom_id() {
         let icon = Icon::from_svg(include_bytes!("../assets/icons/app.svg"));
-        let mut knobs = vec![Knob::IconButtons {
+        let mut knobs = vec![KnobState::IconButtons {
             label: "theme".to_owned(),
             value: 0,
             options: vec!["same".to_owned(), "same".to_owned()],
@@ -905,13 +959,13 @@ mod tests {
 
         let clicked = Rc::new(RefCell::new(false));
         let observed = clicked.clone();
-        let mut knob = Knob::Button {
+        let mut knob = KnobState::Button {
             label: "Rebuild shaders".to_owned(),
             clicked: false,
         };
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
             render_knob(ui, &mut knob);
-            if let Knob::Button { clicked, .. } = &knob {
+            if let KnobState::Button { clicked, .. } = &knob {
                 *observed.borrow_mut() = *clicked;
             }
         });
@@ -946,5 +1000,8 @@ mod tests {
         assert_eq!(step_decimals(0.1), 1);
         assert_eq!(step_decimals(0.25), 2);
         assert_eq!(step_decimals(0.01), 2);
+        assert_eq!(step_decimals(1e-5), 5);
+        assert_eq!(step_decimals(1e-6), 6);
+        assert_eq!(step_decimals(1.0 / 3.0), 8);
     }
 }

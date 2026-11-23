@@ -4,7 +4,7 @@
 //! so a scene can call it from inside a callback it hands a component,
 //! where `SceneCtx` is already borrowed or out of reach entirely.
 
-use std::{cell::RefCell, collections::VecDeque, fmt::Display, time::Instant};
+use std::{cell::RefCell, collections::VecDeque, fmt::Display, sync::OnceLock, time::Instant};
 
 /// How many lines the shell keeps.
 const MOST: usize = 200;
@@ -20,13 +20,35 @@ thread_local! {
 /// picker(ui, |row| gallery::action(format!("picked {}", row.name)));
 /// ```
 ///
-/// Only heard while a scene renders — from a spawned thread or a headless capture it goes nowhere.
+/// Only heard while a scene renders — from a spawned thread it goes nowhere.
 pub fn action(what: impl Display) {
+    match HOST.get() {
+        Some(host) => host(what.to_string()),
+        None => hear(what.to_string()),
+    }
+}
+
+/// Set in a scenes dylib's copy of gallery to the host's [`hear`].
+/// The host arms its own [`SINK`], never the dylib's copy.
+static HOST: OnceLock<fn(String)> = OnceLock::new();
+
+fn hear(line: String) {
     SINK.with_borrow_mut(|sink| {
         if let Some(log) = sink.as_mut() {
-            log.push(what.to_string());
+            log.push(line);
         }
     });
+}
+
+/// This copy's [`hear`], for a scenes dylib to report into.
+pub(crate) fn host_sink() -> fn(String) {
+    hear
+}
+
+/// Send this copy's actions to `host` rather than to its own sink.
+#[doc(hidden)]
+pub fn report_actions_to(host: fn(String)) {
+    _ = HOST.set(host);
 }
 
 /// Run `render` with [`action`] listening, and return the actions it reported.

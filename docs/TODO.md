@@ -95,8 +95,6 @@ past a handful of images, and a structural target beside the pixel one.
   text-diffable in a PR, no GPU or antialiasing to pin at all. A `snapshot!` API would pick per use.
 - [ ] The wgpu path has no equivalent pin, so only glow captures are reference-tested. Lavapipe via `VK_ICD_FILENAMES`
   would give wgpu a deterministic rasteriser too, if a wgpu-rendered reference is ever wanted.
-- [ ] Design a record-replay layer for pointer interactions, informed by jest snapshot ergonomics. Knob state no longer
-  needs it; hover, drag and focus still do.
 - [ ] Storage location: default to **co-located with the file of origin**, derived by the `snapshot!` macro itself from
   `file!()` + `module_path!()` + its label, so a path is never written by hand. Overriding the *root* is then the only
   config needed, and it should be strongly-typed Rust in the snapshot harness — the harness is a test binary, so its
@@ -118,3 +116,11 @@ past a handful of images, and a structural target beside the pixel one.
 - [ ] Auto-re-sync an instance's scaffolded files (`justfile` / `build.rs` / `main.rs`) from upstream as the template
   evolves. Hard to do safely — it must not clobber consumer edits — so `just update`'s "you're behind, here's what
   changed" is the lightweight stand-in for now.
+- [ ] A panic in gallery's own host code under a dylib play, e.g. inside egui_kittest's `step`, aborts the process after
+  printing its message. A panic is only catchable by the `std` that raised it, and catching on the host would also catch
+  the scene's panics, raised by the dylib's `std`, and abort on those instead.
+- [ ] A play's pointer gesture aims at a widget's centre even when that lies outside the visible canvas, e.g. a row
+  scrolled away, so it lands on nothing. Catching it needs the canvas's visible rect through the `PlayDriver`.
+- [ ] A play failure's source snippet reads the file at the path `Location::file` gives, relative to the workspace the
+  play was built in. Run from elsewhere it can miss and the report names the line instead, or show an unrelated file
+  that sits at the same relative path.

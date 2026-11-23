@@ -88,6 +88,7 @@ pub fn launch(
     }
     let manifest = source.manifest();
     let globals = source.globals();
+    let plays = source.plays();
 
     // Everything above is how scenes get here at all, so a headless run branches only where the window
     // would have opened — before any watcher, which nothing would be left to shut down.
@@ -95,6 +96,7 @@ pub fn launch(
         return match render::render_with_globals(
             &manifest,
             globals,
+            &plays,
             settings.renderer,
             &setup,
             &capture,
@@ -164,7 +166,7 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
         let mut capture =
             render::read_recipe(&recipe, cli.out.as_deref()).unwrap_or_else(|reason| fail(&reason));
         for shot in &mut capture.shots {
-            render::merge_overrides(&mut shot.globals, &cli.global);
+            shot.globals.extend(cli.global.iter().cloned());
         }
         return Some(capture);
     }
@@ -184,14 +186,18 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
                 .map_or(Ok(render::DEFAULT_SIZE), render::parse_size)
                 .unwrap_or_else(|reason| fail(&reason.into())),
             scale,
-            knobs: render::merged_overrides(&cli.knob),
-            globals: render::merged_overrides(&cli.global),
+            knobs: cli.knob.iter().cloned().collect(),
+            globals: cli.global.iter().cloned().collect(),
             frames: cli.frames,
             trim: !cli.no_trim,
             // A recipe option: one shot on the command line is drawn as asked.
             settle: false,
             list: cli.list_knobs,
             template: cli.init_capture,
+            play: cli.play.clone().map(|name| render::ShotPlay {
+                name,
+                trace: render::Trace::default(),
+            }),
         }],
         // Both gather a recipe's shots; one shot on the command line has nothing to gather.
         sheet: None,
@@ -238,6 +244,15 @@ struct Cli {
     /// Set a scene knob; repeat for more controls (capture knobs belong in the recipe)
     #[arg(long, value_name = "LABEL=VALUE", value_parser = render::parse_assignment, requires = "headless", conflicts_with = "capture")]
     knob: Vec<render::KnobOverride>,
+
+    /// Run one of the scene's plays before rendering it (capture plays belong in the recipe)
+    #[arg(
+        long,
+        value_name = "NAME",
+        requires = "render",
+        conflicts_with_all = ["init_capture", "capture"]
+    )]
+    play: Option<String>,
 
     /// Canvas size to render at [default: 1280x720]
     #[arg(long, value_name = "WxH")]
@@ -547,12 +562,12 @@ mod tests {
             "Language=Finnish",
         ]);
         assert_eq!(
-            shot.knobs,
-            vec![render::parse_assignment("Scale=2").unwrap()]
+            shot.knobs[..],
+            [render::parse_assignment("Scale=2").unwrap()]
         );
         assert_eq!(
-            shot.globals,
-            vec![render::parse_assignment("Language=Finnish").unwrap()]
+            shot.globals[..],
+            [render::parse_assignment("Language=Finnish").unwrap()]
         );
     }
 
@@ -571,6 +586,7 @@ mod tests {
             Some(crate::GlobalEntry::of::<
                 crate::scaffold_scenes::globals::Globals,
             >()),
+            &crate::Linked.plays(),
             crate::Renderer::Wgpu,
             &|_| {},
             &capture,

@@ -125,6 +125,11 @@ impl HotDylib {
         // — the `inventory` registrations behind `__gallery_manifest`.
         let library =
             unsafe { Library::new(copy.path()) }.map_err(|e| format!("open `{copy_path}`: {e}"))?;
+        // SAFETY: emitted by `scenes_dylib!` from the same gallery version as the manifest.
+        let report = unsafe { library.get::<fn(fn(String))>(b"__gallery_report_actions_to\0") };
+        if let Ok(report) = report {
+            report(crate::actions::host_sink());
+        }
 
         self.loaded.push(library);
         self.from = Some(written);
@@ -250,6 +255,15 @@ impl SceneSource for HotDylib {
         // SAFETY: emitted by `scenes_dylib!` from the same gallery version as the manifest.
         let entry = unsafe { library.get::<fn() -> Option<GlobalEntry>>(b"__gallery_globals\0") };
         entry.ok().and_then(|globals| globals())
+    }
+
+    fn plays(&mut self) -> Vec<crate::PlayEntry> {
+        let Some(library) = self.loaded.last() else {
+            return Vec::new();
+        };
+        // SAFETY: emitted by `scenes_dylib!` from the same gallery version as the manifest.
+        let entry = unsafe { library.get::<fn() -> Vec<crate::PlayEntry>>(b"__gallery_plays\0") };
+        entry.map_or_else(|_| Vec::new(), |plays| plays())
     }
 }
 

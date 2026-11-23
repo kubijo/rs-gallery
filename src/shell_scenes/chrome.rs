@@ -10,7 +10,7 @@ scene_meta! { title: "Shell / Chrome" }
 /// The slim bar each panel opens with: a title, and whatever the panel puts on the right.
 #[scene(default)]
 fn header(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let title = ctx.text("title", "Controls");
+    let title = ctx.text("title", "Controls").get();
     ctx.stage(ui, egui::vec2(420.0, 28.0), |ui| {
         let mut bar = header_bar(ui);
         bar.label(header_title(&title));
@@ -47,7 +47,7 @@ fn carets(ctx: &mut SceneCtx, ui: &mut Ui) {
 /// Clicking it opens a panel that is not there in a scene, so it vanishes; the knob puts it back.
 #[scene("rail", order = 2)]
 fn rail(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let mut folded = !ctx.toggle("panel open", false);
+    let mut folded = !ctx.toggle("panel open", false).get();
     ctx.stage(ui, egui::vec2(240.0, 80.0), |ui| {
         collapsed_panel(
             ui,

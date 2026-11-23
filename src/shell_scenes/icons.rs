@@ -12,7 +12,7 @@ thread_local! {
 /// long before it does at twelve points.
 #[scene(default)]
 fn sizes(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let tint = ctx.color("tint", crate::MUTED);
+    let tint = ctx.color("tint", crate::MUTED).get();
     ICONS.with(|icons| {
         for (name, icon) in [
             ("folder", &icons.folder),

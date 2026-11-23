@@ -110,11 +110,24 @@ with the staging left to the caller, for a cell that needs the context back — 
 host added to `SceneCtx` itself.
 
 On the context, `ctx.slider(...)`, `ctx.toggle(...)`, `ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare
-**controls** (knobs). Calling one registers the control in the right-hand panel *and* returns its current value, so
-tweaking it re-renders the scene — [`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. A momentary action
-uses `ctx.button("Reset", || reset())`; its callback runs once per click and carries no state into capture recipes. The
-`ctx.set_slider(...)` family writes a value back by label, so content that does its own hit-testing — a slider drawn
-inside the preview, a rendered button — drives the panel too.
+**controls** (knobs). Calling one registers the control in the right-hand panel *and* returns a `Knob` handle to it:
+`get()` reads the current value, so tweaking it re-renders the scene, and `set(value)` writes it back, snapped as the
+control itself would. [`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. A momentary action uses
+`ctx.button("Reset", || reset())`; its callback runs once per click and carries no state into capture recipes.
+
+A handle is a cheap `Clone` that needs no `ctx` to write, so a fully controlled component reacts to interactions by
+writing its change event back. The scene plays the parent that owns the state, and the panel follows:
+
+```rust
+let power = ctx.toggle("power", false);
+stage!(ctx, ui, Stage::Fit, |ui| {
+    Switch::new(power.get())
+        .on_change({ let power = power.clone(); move |on| { power.set(on); } })
+        .show(ui);
+});
+```
+
+A write lands in the knob store when the scene returns. A handle kept past its frame refuses writes.
 
 Define catalog-wide controls with `CatalogGlobals`. Gallery renders the controls and passes their typed value to scenes;
 the consumer decides how the value affects the preview. The generated demo has the runnable version in
@@ -353,8 +366,13 @@ recipe edits. Quote the whole assignment when its label contains spaces. `--init
 overridden values too. With `--init-capture`, listings and image summaries go to stderr so stdout stays TOML.
 
 A knob or global-control key is its label, or a regex over the labels — the exact label wins, so punctuation like
-`width (chars)` needs no escaping. Choices take an option label, colours a hex string. `just knobs <scene>` prints
-global controls first when the catalog declares them, followed by scene knobs, ready to paste:
+`width (chars)` needs no escaping, and a knob holding a value wins over a group or button of its label. Choices take an
+option label, colours a hex string. A value its knob can't take yet — a number past the range, an option not offered, a
+group or button standing in for a hidden knob of its label — waits, in case another knob brings it, and fails the shot
+if it never lands. A key that lands on one knob and later on another — a key whose own knob is hidden at first, or
+hidden later by a play, reads as a regex — fails too. Anchor it as `^…$` and escape its punctuation, even for an exact
+label; a key can't follow a label that changes, so give each label its own key. `just knobs <scene>` prints global
+controls first when the catalog declares them, followed by scene knobs, ready to paste:
 
 ```text
 buttons "body style" = "sedan"  (sedan | suv | hatch)
@@ -389,6 +407,59 @@ content. That needs an EGL driver present; without one the run stops and says so
 picture the window would never show. Under `Renderer::Wgpu` the capture carries the render state a window does, so a
 scene painting through a wgpu callback is captured rather than left out of the PNG.
 
+## Driving a scene with plays
+
+Knobs set a scene's inputs; they cannot hover a button, focus a field or type into it. A play does that, the way a
+person would, finding widgets by their accessible label or role rather than by where they happen to be drawn:
+
+```rust
+#[play(form)]
+fn saves_after_a_moment(p: &mut Play) -> PlayResult {
+    p.fill("Name", "Ada")?;
+    p.click("Count")?;
+    p.expect_action("counted 1")?;
+    p.click(By::new().role(egui::accesskit::Role::Button).label("Save"))?;
+    p.step("the save lands", |p| {
+        p.wait_for(|p| p.query_by_label("Saved Ada").is_some())
+    })
+}
+```
+
+A bare string is a label; `By` narrows by role, a label fragment or a value when that alone is ambiguous. A gesture
+waits, a frame at a time, for exactly one widget to match, and fails naming what was on screen if none does. Each
+gesture is a fixed sequence of frames — a click is a move, a press, a release and a frame to settle — so a play draws
+the same frames on any machine. `wait_for` draws frames until its condition holds, `step` names part of the script and
+takes the blame for any panic in it, `expect_action` checks what the scene reported through `gallery::action`, and
+`set_knob` holds a knob over whatever the recipe set. A held scene knob, the recipe's or the play's, refuses the scene's
+own `set`; a `set_knob` value that never lands fails the play. A scene can have several plays, each known by its
+function's name.
+
+A shot captures the state a play leaves behind:
+
+```bash
+just play form saves_after_a_moment /tmp/saved.png
+```
+
+```toml
+[[shot]]
+name = "saved"
+scene = "form"
+play = "saves_after_a_moment"
+trace = "on" # optional; "retain-on-failure" unless set
+```
+
+The report lists the play's steps and the frames each drew. A play that fails does not stop the run: the other shots
+still run, the summary marks each shot passed or failed, and each failure follows in a panel that names the step and
+shows the play's own failing line. A failed play keeps a screenshot after every step in a directory beside the shot,
+`renders/saved.steps/01-fill-name.png` and on, which `trace = "on"` keeps for a passing play too. The run exits
+non-zero, and the report's `failed_shots` lists every failure step by step.
+
+Screenshots show the pointer where the play left it, as `egui_kittest` draws it. It stays in the final shot too: the
+hover it marks is the state a hover play exists to capture.
+
+[`form.scene.rs`](template/form.scene.rs) and [`keyboard.scene.rs`](template/keyboard.scene.rs) carry plays to start
+from.
+
 ## How it works
 
 `#[scene]` self-registers through [`inventory`]; `build.rs` reads `gallery.toml` and compiles in the scene files its
@@ -396,16 +467,13 @@ globs match; `launch!` reads the same file, builds them into the crate's dylib a
 down once and both go to them, so a bare `cargo build` — a CI type-check, an editor — finds the scenes a run finds. The
 dylib is what `--hot` swaps without restarting — still one crate.
 
-Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` proc-macro), `gallery-build` (the
-`build.rs` helper).
+Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` and `#[play]` proc-macros),
+`gallery-build` (the `build.rs` helper).
 
-## Dependency compatibility and accessibility advisories
+## Dependency compatibility
 
 Gallery and scenes use compatible egui 0.36 dependencies. Native accessibility uses `eframe/accesskit`, and runtime
-capture uses `egui_kittest`. `gallery-build` has no accessibility stack.
-
-The unresolved RUSTSEC-2026-0370, RUSTSEC-2026-0371 and RUSTSEC-2026-0372 have documented exceptions in `deny.toml`,
-pending an upstream AccessKit/AT-SPI migration to zbus 6. Accessibility and checks for other findings remain enabled.
+capture uses `egui_kittest`. `gallery-build` has no accessibility stack. `just audit` runs with no advisory exceptions.
 
 ## Cutting a release
 

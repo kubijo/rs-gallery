@@ -19,6 +19,10 @@ in-shell +cmd:
 demo-wgpu *args:
     @scripts/demo.sh wgpu {{ args }}
 
+# Run the demo's plays through its scenes dylib, plus one that fails on purpose, into .tmp/plays/.
+demo-plays:
+    @scripts/demo-plays.sh
+
 # Scaffold + run the glow/femtovg demo into .tmp/demo-femtovg/.
 demo-femtovg *args:
     @scripts/demo.sh femtovg {{ args }}
@@ -35,9 +39,10 @@ profile SCENE="" REPORT="00-latest" FRAMES="600":
 format *args:
     @nix run .#format -- {{ args }}
 
-# Validate the crate: formatting, repo lint, clippy, and tests under coverage.
+# Validate the crate: formatting, repo lint, clippy, tests under coverage, and plays through a real scenes dylib.
 validate:
     @just in-shell validate
+    @just demo-plays
 
 # Take the current renders as the committed references in `tests/snapshots/` — look at them first.
 snapshots:

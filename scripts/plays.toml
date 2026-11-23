@@ -1,0 +1,72 @@
+# `just demo-plays`: plays that pass, captured through the demo's scenes dylib.
+# No `out`: the script passes one under .tmp/plays/.
+size = "560x520"
+report = "report.json"
+
+[[shot]]
+name = "form-saved"
+scene = "form"
+play = "saves_after_a_moment"
+
+[[shot]]
+name = "keyboard-tabs"
+scene = "keyboard"
+play = "tab_counts_while_focused"
+
+[[shot]]
+name = "tasks-filtered"
+scene = "todo"
+play = "adds_completes_and_filters"
+trace = "on"
+
+[[shot]]
+name = "tasks-sorted"
+scene = "todo"
+play = "sorts_by_name_from_the_menu"
+
+[[shot]]
+name = "tasks-priority"
+scene = "todo"
+play = "drags_the_priority_up"
+
+[[shot]]
+name = "tasks-scrolled"
+scene = "todo"
+play = "scrolls_to_the_end_of_a_long_list"
+trace = "on"
+
+[[shot]]
+name = "tasks-cleared"
+scene = "todo"
+play = "clears_done_tasks"
+
+# Each of these fails on purpose, in its own way; see their doc comments in plays.scene.rs.
+[[shot]]
+name = "fails-ambiguous-label"
+scene = "todo"
+play = "removes_by_an_ambiguous_label"
+
+[[shot]]
+name = "fails-wrong-action"
+scene = "todo"
+play = "expects_the_wrong_action"
+
+[[shot]]
+name = "fails-wrong-count"
+scene = "todo"
+play = "counts_the_wrong_number_left"
+
+[[shot]]
+name = "fails-wrong-order"
+scene = "todo"
+play = "asserts_the_wrong_order"
+
+[[shot]]
+name = "fails-never-saved"
+scene = "todo"
+play = "waits_for_a_save_that_never_comes"
+
+[[shot]]
+name = "fails-outside-a-step"
+scene = "todo"
+play = "panics_outside_a_step"

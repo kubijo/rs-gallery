@@ -21,6 +21,10 @@ update:
 render SCENE OUT SIZE="1280x720":
     cargo run --quiet -- --scene {{ SCENE }} --render {{ OUT }} --size {{ SIZE }}
 
+# Run one of SCENE's plays and render where it leaves off; a failure keeps a screenshot per step.
+play SCENE PLAY OUT SIZE="1280x720":
+    cargo run --quiet -- --scene {{ SCENE }} --play {{ PLAY }} --render {{ OUT }} --size {{ SIZE }}
+
 # Render every shot in a capture recipe (render with knobs set).
 capture FILE="capture.toml" OUT="":
     cargo run --quiet -- --capture {{ FILE }} {{ if OUT == "" { "" } else { "--out " + OUT } }}

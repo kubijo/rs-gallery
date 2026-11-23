@@ -4,7 +4,7 @@ use gallery::prelude::*;
 
 use crate::{
     actions::{Log, render_actions},
-    knobs::{ChoiceStyle, Knob, render_knobs},
+    knobs::{ChoiceStyle, KnobState, render_knobs},
     perf::{PERF_WINDOW_SIZE, PerfStats, render_performance},
     render_source_view,
 };
@@ -92,51 +92,51 @@ fn source_view(ctx: &mut SceneCtx, ui: &mut Ui) {
 }
 
 /// One of each, at values that show what the widget does with them.
-fn every_kind() -> Vec<Knob> {
+fn every_kind() -> Vec<KnobState> {
     vec![
-        Knob::Button {
+        KnobState::Button {
             label: "Run action".to_owned(),
             clicked: false,
         },
-        Knob::Text {
+        KnobState::Text {
             label: "name".to_owned(),
             value: "world".to_owned(),
         },
-        Knob::Slider {
+        KnobState::Slider {
             label: "size".to_owned(),
             value: 24.0,
             min: 12.0,
             max: 64.0,
             step: 1.0,
         },
-        Knob::Slider {
+        KnobState::Slider {
             label: "smooth".to_owned(),
             value: 0.4,
             min: 0.0,
             max: 1.0,
             step: 0.0,
         },
-        Knob::Toggle {
+        KnobState::Toggle {
             label: "uppercase".to_owned(),
             value: false,
         },
-        Knob::Color {
+        KnobState::Color {
             label: "accent".to_owned(),
             value: crate::SCENE_TINT,
         },
-        Knob::Select {
+        KnobState::Select {
             label: "weight".to_owned(),
             value: 1,
             options: ["light", "regular", "bold"].map(str::to_owned).to_vec(),
             style: ChoiceStyle::Buttons,
         },
-        Knob::Select {
+        KnobState::Select {
             label: "align".to_owned(),
             value: 0,
             options: ["start", "centre", "end"].map(str::to_owned).to_vec(),
             style: ChoiceStyle::Radio,
         },
-        Knob::Select {
+        KnobState::Select {
             label: "step".to_owned(),
             // Long enough to wrap onto a second row, which is the case that reserves its height.
             value: 3,
