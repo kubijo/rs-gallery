@@ -1,5 +1,5 @@
 # cargo-deny dependency policy — https://embarkstudios.github.io/cargo-deny/
-# `just audit` (and the CI `report (audit)` job) runs advisories + bans + licenses + sources.
+# `just dev::audit` (and the CI `report (audit)` job) runs advisories + bans + licenses + sources.
 
 [graph]
 all-features = true
@@ -7,6 +7,15 @@ all-features = true
 [advisories]
 version = 2
 unused-ignored-advisory = "deny"
+# Stated rather than left to the default, which cargo-deny 0.22 narrowed: the dev shell's and a newer one agree.
+unmaintained = "all"
+# Unmaintained only: merged into zbus 6. egui 0.36's AT-SPI stack (accesskit_unix → atspi → zbus 5) pins them,
+# and they go with the egui upgrade `outdated.toml` defers, at which point these entries stop matching and fail.
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zvariant, through egui 0.36's accesskit_unix; goes with the egui upgrade" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names, through egui 0.36's accesskit_unix; goes with the egui upgrade" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, through egui 0.36's accesskit_unix; goes with the egui upgrade" },
+]
 
 [licenses]
 version = 2

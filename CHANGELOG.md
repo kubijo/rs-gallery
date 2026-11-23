@@ -76,6 +76,14 @@ so a minor release may carry a breaking change.
   `just demo::wgpu`, `femtovg`, `plays` and `shell-scenes`; `just tag` and `just release-check` are `just release::tag`
   and `just release::check`.
 
+- **Dependencies.** usvg 0.50 and notify 9, and the lockfile refreshed. kittest stays on 0.4 until the egui upgrade, as
+  egui_kittest 0.36 is built on it.
+
+- **A failing play's source line is no longer syntax-coloured.** miette's syntect highlighter brought in bincode and
+  yaml-rust, both now flagged unmaintained; the line still shows, marked where it failed. The audit excuses zbus's
+  merged-away crates until the egui upgrade replaces them, and states its unmaintained scope so cargo-deny versions
+  agree.
+
 ## [0.16.0] - 2026-10-26
 
 - **Scenes can write catalog globals.** `SceneCtx::set_global(key, value)` keeps a story's own switcher and the window

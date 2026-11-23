@@ -31,12 +31,12 @@ gallery-build = { path = "gallery-build" }
 libloading = "0.9"
 # Atomic temporary names keep concurrent gallery processes off each other's mapped dylibs.
 tempfile = "3"
-notify = "8"
+notify = "9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 toml = "1"
-usvg = { version = "0.49", default-features = false }
+usvg = { version = "0.50", default-features = false }
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 sublime_fuzzy = "0.7"
 process-wrap = { version = "10", features = ["std"] }
@@ -58,11 +58,7 @@ supports-hyperlinks = "3"
 # OSC 8 links; `file` builds a path's `file://` URL, host included so a link printed over SSH resolves there.
 anstyle-hyperlink = { version = "1", features = ["file"] }
 # Renders diagnostics, detecting colour, hyperlink, unicode and width support itself; no backtraces.
-# `syntect-highlighter` colours the source a failure points at, only when a report is drawn.
-miette = { version = "7", default-features = false, features = [
-   "fancy-no-backtrace",
-   "syntect-highlighter",
-] }
+miette = { version = "7", default-features = false, features = ["fancy-no-backtrace"] }
 # miette's wrapper, named only to tell it to break lines at spaces alone.
 textwrap = "0.16"
 # Lays out a capture's summary; `custom_styling` measures cells holding colour and links correctly.
