@@ -37,7 +37,9 @@ fn shot(scene: &str, out: &Utf8Path, play: &str, trace: Trace) -> Shot {
         play: Some(ShotPlay {
             name: play.to_owned(),
             trace,
+            steps: false,
         }),
+        record: None,
     }
 }
 
@@ -1161,4 +1163,200 @@ fn a_scroll_moves_the_content_under_the_widget() {
         None,
     )
     .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+fn switch(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    let on = ctx.toggle("on", false).get();
+    ui.label(if on { "ON" } else { "off" });
+}
+
+fn flip(p: &mut Play<'_>) -> PlayResult {
+    p.step("before", |p| p.idle(2))?;
+    p.set_knob("on", true);
+    p.step("after", |p| p.idle(3))
+}
+
+fn flip_then_fail(p: &mut Play<'_>) -> PlayResult {
+    p.idle(2)?;
+    Err(PlayError::new("it was never going to pass"))
+}
+
+fn nested(p: &mut Play<'_>) -> PlayResult {
+    p.step("outer", |p| p.step("inner", |p| p.idle(2)))
+}
+
+fn tab_then_hover(p: &mut Play<'_>) -> PlayResult {
+    p.step("tab", |p| p.press(egui::Key::Tab))?;
+    p.step("hover", |p| p.hover("off"))
+}
+
+/// Every file in `dir`, by name, with its bytes.
+fn files(dir: &Utf8Path) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<_> = dir
+        .read_dir_utf8()
+        .expect("the directory")
+        .map(|entry| {
+            let entry = entry.expect("an entry");
+            (
+                entry.file_name().to_owned(),
+                std::fs::read(entry.path()).expect("the file"),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn a_plays_input_shows_on_its_recording_and_nowhere_else() {
+    let record = |input| crate::render::Record {
+        fps: 30,
+        seconds: None,
+        keep: Trace::On,
+        format: crate::render::VideoFormat::Apng,
+        hold: None,
+        input,
+    };
+    let (plain, _) = record_play("input-off", tab_then_hover, Trace::On, record(None));
+    let (shown, _) = record_play(
+        "input-on",
+        tab_then_hover,
+        Trace::On,
+        record(Some(crate::render::Corner::BottomLeft)),
+    );
+    let png = |video: &Utf8Path| std::fs::read(video.with_extension("png")).expect("the PNG");
+    assert_eq!(
+        png(&plain),
+        png(&shown),
+        "the shot's PNG never shows the input"
+    );
+    let steps = |video: &Utf8Path| files(&video.with_extension("steps"));
+    assert_eq!(steps(&plain), steps(&shown), "nor do its step screenshots");
+
+    let last = |video: &Utf8Path| {
+        let (_, frames) = crate::video::decode(video);
+        frames.last().expect("a frame").image.clone()
+    };
+    let (plain, shown) = (last(&plain), last(&shown));
+    let (width, height) = shown.dimensions();
+    let bottom_left = |image: &image::RgbaImage| {
+        image::imageops::crop_imm(image, 0, height / 2, width / 2, height / 2).to_image()
+    };
+    assert_ne!(
+        bottom_left(&plain),
+        bottom_left(&shown),
+        "the Tab pressed a second ago is listed in the bottom-left corner"
+    );
+}
+
+/// A play shot recording at 30 fps, kept as `keep` says
+/// and pausing `hold` seconds at step ends;
+/// the recording and the run's report.
+fn recorded_play(
+    name: &'static str,
+    run: PlayFn,
+    keep: Trace,
+    hold: Option<f32>,
+) -> (Utf8PathBuf, serde_json::Value) {
+    record_play(
+        name,
+        run,
+        Trace::RetainOnFailure,
+        crate::render::Record {
+            fps: 30,
+            seconds: None,
+            keep,
+            format: crate::render::VideoFormat::Apng,
+            hold,
+            input: None,
+        },
+    )
+}
+
+/// A play shot recorded as `record` says, its step screenshots
+/// kept as `trace` says; the recording and the run's report.
+fn record_play(
+    name: &'static str,
+    run: PlayFn,
+    trace: Trace,
+    record: crate::render::Record,
+) -> (Utf8PathBuf, serde_json::Value) {
+    let (manifest, plays) = catalog(switch, &[(name, run)]);
+    let dir = scratch(name);
+    let report = dir.join("capture.json");
+    let mut recorded = shot("plays::scene", &dir.join("shot.png"), name, trace);
+    recorded.record = Some(record);
+    _ = capture(&manifest, &plays, recorded, Some(report.clone()));
+    let json = serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    (dir.join("shot.apng"), json)
+}
+
+/// How many frames a recording runs, every written frame's delay added up.
+fn recorded_frames(video: &Utf8Path) -> u64 {
+    let (_, shown) = crate::video::decode(video);
+    shown.iter().map(|frame| u64::from(frame.delay.0)).sum()
+}
+
+#[test]
+fn a_recorded_play_holds_every_frame_the_play_drew() {
+    let (video, report) = recorded_play("flip", flip, Trace::On, Some(0.0));
+    let shot = &report["shots"][0];
+    let played = shot["play"]["frames"].as_u64().expect("the play's frames");
+    assert_eq!(shot["video"]["frames"].as_u64(), Some(played));
+    assert_eq!(shot["video"]["held"].as_u64(), Some(0));
+    assert_eq!(
+        recorded_frames(&video),
+        played,
+        "with no hold, the recording lasts the play, frame for frame"
+    );
+    let (_, shown) = crate::video::decode(&video);
+    assert!(shown.len() >= 2, "the label's change is in it");
+}
+
+#[test]
+fn a_recorded_play_pauses_at_each_steps_end() {
+    let (video, report) = recorded_play("flip-held", flip, Trace::On, None);
+    let shot = &report["shots"][0];
+    let played = shot["play"]["frames"].as_u64().expect("the play's frames");
+    assert_eq!(
+        shot["video"]["held"].as_u64(),
+        Some(30),
+        "two steps, each held half a second at 30 fps"
+    );
+    assert_eq!(shot["video"]["frames"].as_u64(), Some(played));
+    assert_eq!(recorded_frames(&video), played + 30);
+}
+
+#[test]
+fn a_step_ending_with_the_one_around_it_pauses_once() {
+    let (video, report) = recorded_play("nested-held", nested, Trace::On, None);
+    let shot = &report["shots"][0];
+    let played = shot["play"]["frames"].as_u64().expect("the play's frames");
+    assert_eq!(shot["video"]["held"].as_u64(), Some(15));
+    assert_eq!(recorded_frames(&video), played + 15);
+}
+
+#[test]
+fn a_passing_play_drops_a_recording_kept_only_on_failure() {
+    let (video, report) = recorded_play("flip-kept-on-failure", flip, Trace::RetainOnFailure, None);
+    assert!(!video.exists(), "the play passed, so `{video}` is gone");
+    assert!(report["shots"][0].get("video").is_none());
+}
+
+#[test]
+fn a_failing_play_keeps_its_recording_and_the_report_points_at_it() {
+    let (video, report) = recorded_play(
+        "fail-recorded",
+        flip_then_fail,
+        Trace::RetainOnFailure,
+        None,
+    );
+    assert!(video.exists(), "the play failed, so `{video}` stays");
+    let failed = &report["failed_shots"][0];
+    assert!(
+        failed["video"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("shot.apng")),
+        "{failed}"
+    );
 }

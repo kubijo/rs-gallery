@@ -448,17 +448,81 @@ play = "saves_after_a_moment"
 trace = "on" # optional; "retain-on-failure" unless set
 ```
 
-The report lists the play's steps and the frames each drew. A play that fails does not stop the run: the other shots
-still run, the summary marks each shot passed or failed, and each failure follows in a panel that names the step and
-shows the play's own failing line. A failed play keeps a screenshot after every step in a directory beside the shot,
-`renders/saved.steps/01-fill-name.png` and on, which `trace = "on"` keeps for a passing play too. The run exits
-non-zero, and the report's `failed_shots` lists every failure step by step.
+The report lists the play's steps and the frames each drew, and the terminal does too under the summary — always for a
+single `--play`, and for every play of a recipe with `--steps` — as a tree with the failing step marked. A play that
+fails does not stop the run: the other shots still run, the summary marks each shot passed or failed, and each failure
+follows in a panel that names the step and shows the play's own failing line. A failed play keeps a screenshot after
+every step in a directory beside the shot, `renders/saved.steps/01-fill-name.png` and on, which `trace = "on"` keeps for
+a passing play too. The run exits non-zero, and the report's `failed_shots` lists every failure step by step.
 
 Screenshots show the pointer where the play left it, as `egui_kittest` draws it. It stays in the final shot too: the
 hover it marks is the state a hover play exists to capture.
 
 [`form.scene.rs`](template/form.scene.rs) and [`keyboard.scene.rs`](template/keyboard.scene.rs) carry plays to start
 from.
+
+## Recording
+
+A shot can record what it draws beside its PNG, as `saved.apng` or `saved.mp4`:
+
+```toml
+[[shot]]
+name = "orbit"
+scene = "orbit"
+record = { fps = 60, seconds = 2 } # optional; `format = "mp4"` for a video
+
+[[shot]]
+name = "saved"
+scene = "form"
+play = "saves_after_a_moment"
+record = { fps = 30 } # a play shot records the whole play, so it takes no `seconds`
+video = "retain-on-failure" # optional; "on" unless set
+# `hold = 0.5` is the default: seconds the recording pauses at each step's end, 0 for none
+# `input = true` shows the play's keys and mouse, bottom-left; or `input = "top-right"`, etc.
+```
+
+```bash
+gallery --scene orbit --render orbit.png --record 60:2 --record-format mp4
+```
+
+Time is set, not measured: frame *n* is drawn at exactly *n* / fps, so a recording comes out the same however fast the
+machine renders. egui's own animations and the text cursor's blink, off for stills, play in a recording.
+
+A play clicks in a couple of frames, too fast to follow, so its recording pauses on each step's last frame for `hold`
+seconds (`--record-hold`). The pause is only in the file: the play draws the same frames whether it records or not.
+
+With `input` (`--record-input [CORNER]`), a play's recording shows its input as a tutorial's screencast would: the keys
+pressed in the last moment and a mouse with its pressed button lit, in a panel in one corner, and a ring where the
+pointer is. It is laid over the recorded frames only; the shot's PNG and step screenshots are drawn without it.
+[`studio.scene.rs`](template/studio.scene.rs) is a scene to watch it on: a play that clicks, types, presses shortcuts,
+drags and scrolls across a scene filling its stage.
+
+- **APNG**, the default: lossless and byte-identical between runs, so a recording can itself be compared. A frame that
+  repeats lengthens the one before it, and only the rectangle that changed is written.
+- **MP4** (H.264): small, and seekable and pausable in any player, with a keyframe every second. Encoded by OpenH264,
+  which builds from bundled C++, so a first build needs a C++ compiler.
+
+The report's `video` holds the path, the frames drawn, held and written, and what a frame cost on average: drawing the
+scene, rendering and reading it back, and encoding it.
+
+## Testing a catalog
+
+`tests/scenes.rs`, declared with `harness = false`, turns every scene and play into a test:
+
+```rust
+gallery::test_main!(gallery::Renderer::Wgpu);
+```
+
+```bash
+just test        # or `cargo test --test scenes`
+just test play:: # only the plays; `--list` lists them all
+```
+
+`smoke::<scene>` draws a scene at its defaults until it settles and fails on an error or a panic;
+`play::<scene>::<name>` runs a play and fails as the play does. The scenes come from the same dylib the window loads, so
+a test crosses the boundary the window does. A panic is caught where the scene raised it, so it fails only that scene's
+test and names the scene's own line; in the window, the canvas shows it in place of the scene. nextest runs the same
+binary.
 
 ## How it works
 

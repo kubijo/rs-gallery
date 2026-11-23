@@ -25,6 +25,7 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
                 motion: Motion::Settled,
             },
             play: None,
+            video: None,
         },
         OutputFile {
             path: "/tmp/a-much-longer-name.png".into(),
@@ -40,6 +41,7 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
                 motion: Motion::Settled,
             },
             play: None,
+            video: None,
         },
     ];
     let ran = Ran {
@@ -49,11 +51,7 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
         findings: &[],
         sheet: None,
     };
-    let table = crate::style::plain(&table(
-        ran,
-        Some(Utf8Path::new("/tmp")),
-        style::Stream::Stdout,
-    ));
+    let table = crate::style::plain(&table(ran, style::Stream::Stdout));
     let columns: Vec<_> = table
         .lines()
         .filter(|line| line.contains('×'))
@@ -61,6 +59,76 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
         .collect();
     assert_eq!(columns.len(), 2, "a row per image:\n{table}");
     assert_eq!(columns[0], columns[1], "the sizes line up:\n{table}");
+}
+
+#[test]
+fn a_plays_steps_list_as_a_tree_with_the_failing_branch_marked() {
+    let step = |label: &str, frames: std::ops::Range<u32>| StepOutcome {
+        label: label.to_owned(),
+        frames,
+        trace: None,
+    };
+    // As a play records them: each as it ends, so the inner ones come first.
+    // "ready" draws nothing, so it begins on the frame "save" does.
+    let steps = [
+        step("open", 0..3),
+        step("ready", 3..3),
+        step("save › type the name", 3..5),
+        step("save › wait for it", 5..65),
+        step("save", 3..65),
+    ];
+    let list = crate::style::plain(&step_list(
+        "form",
+        "saves",
+        &steps,
+        Err(Some("save › wait for it")),
+    ));
+    let lines: Vec<&str> = list.lines().collect();
+    assert_eq!(lines[0], "form · saves");
+    let rows: Vec<(char, &str)> = lines[1..]
+        .iter()
+        .map(|line| {
+            let line = line.trim_start();
+            let mark = line.chars().next().expect("a mark");
+            let text = line[mark.len_utf8()..].trim_start();
+            (mark, text.split("  ").next().expect("a label"))
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ('✓', "open"),
+            ('✓', "ready"),
+            ('×', "save"),
+            ('✓', "type the name"),
+            ('×', "wait for it")
+        ],
+        "a step before those inside it, and the failure marked up its branch:\n{list}"
+    );
+    let column: Vec<_> = lines[1..]
+        .iter()
+        .map(|line| line.chars().count() - "frames".len())
+        .collect();
+    assert!(
+        column.windows(2).all(|pair| pair[0] == pair[1]),
+        "the frame counts line up:\n{list}"
+    );
+}
+
+#[test]
+fn a_play_failing_outside_its_steps_says_so_after_them() {
+    let steps = [StepOutcome {
+        label: "open".to_owned(),
+        frames: 0..3,
+        trace: None,
+    }];
+    let list = crate::style::plain(&step_list("form", "saves", &steps, Err(None)));
+    let last = list.lines().last().expect("a line");
+    assert!(
+        last.trim_start().starts_with("× failed outside any step"),
+        "{list}"
+    );
+    assert!(list.contains("✓ open"), "the step itself passed:\n{list}");
 }
 
 #[test]
@@ -112,6 +180,7 @@ fn a_run_reports_what_it_wrote_and_whether_each_shot_settled() {
             list: false,
             template: false,
             play: None,
+            record: None,
         }],
         sheet: None,
         report: Some(report.clone()),
@@ -183,6 +252,7 @@ fn a_run_that_fails_partway_reports_what_it_managed_and_what_stopped_it() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let capture = Capture {
         shots: vec![
@@ -254,6 +324,7 @@ fn a_report_names_the_sheet_it_gathered() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let capture = Capture {
         // Two, since a sheet of one panel is that panel and is skipped.

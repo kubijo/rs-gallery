@@ -3,8 +3,10 @@
 mod capture;
 mod globals;
 mod offscreen;
+mod overlay;
 mod overrides;
 mod recipe;
+mod record;
 mod reference;
 mod report;
 
@@ -87,6 +89,7 @@ fn staged_harness(
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size)
         .expect("the scene draws")

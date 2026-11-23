@@ -49,6 +49,8 @@ pub struct SceneCtx<'a> {
     pinned: Vec<Pin>,
     /// Whether an accessor changed a knob's range or options this frame.
     reshaped: bool,
+    /// The scene's panic, caught in the copy of gallery it was raised in.
+    panicked: Option<ScenePanic>,
     globals: Option<&'a [u8]>,
     global_writable: &'a [Writable],
     global_writes: Vec<GlobalWrite>,
@@ -60,6 +62,41 @@ pub struct SceneCtx<'a> {
     gl: Option<GlDeps<'a>>,
     wgpu: Option<WgpuDeps<'a>>,
     stage_styles: Option<StageStyles>,
+}
+
+/// A scene's panic, caught where it was raised and handed back to the host.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct ScenePanic {
+    pub(crate) message: String,
+    /// The scene's own line that panicked.
+    pub(crate) at: Option<crate::play::SourceAt>,
+}
+
+impl std::fmt::Display for ScenePanic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.at {
+            Some(at) => write!(f, "{} (at {}:{})", self.message, at.file, at.line),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
+/// Run a scene, keeping its panic on `ctx` rather than unwinding it into the host.
+///
+/// `#[scene]` registers a wrapper calling this, so it runs in the scenes dylib's copy of gallery:
+/// a panic is only catchable by the `std` that raised it.
+#[doc(hidden)]
+pub fn __run_scene(
+    ctx: &mut SceneCtx<'_>,
+    ui: &mut egui::Ui,
+    render: fn(&mut SceneCtx<'_>, &mut egui::Ui),
+) {
+    if let Err(error) = crate::play::caught(|| render(ctx, ui)) {
+        ctx.panicked = Some(ScenePanic {
+            message: error.reason().to_owned(),
+            at: error.at().cloned(),
+        });
+    }
 }
 
 /// A knob an override holds, by label, kind and rank among knobs of both,
@@ -322,6 +359,7 @@ impl<'a> SceneCtx<'a> {
             handles: Vec::new(),
             pinned: Vec::new(),
             reshaped: false,
+            panicked: None,
             globals: globals.map(|globals| globals.parts().1),
             global_writable: globals.map_or(&[], GlobalState::writable),
             global_writes: Vec::new(),
@@ -940,6 +978,10 @@ impl<'a> SceneCtx<'a> {
                 ))
                 .sense(sense),
         )
+    }
+
+    pub(crate) fn take_panic(&mut self) -> Option<ScenePanic> {
+        self.panicked.take()
     }
 
     pub(crate) fn take_global_writes(&mut self) -> Vec<GlobalWrite> {

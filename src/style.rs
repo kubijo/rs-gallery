@@ -86,12 +86,7 @@ pub(crate) use supports_hyperlinks::Stream;
 
 /// A path in output bound for `stream`: coloured as a path, and clickable where that stream does OSC 8.
 pub(crate) fn path(path: &Utf8Path, stream: Stream) -> String {
-    path_as(path, &relative(path), stream)
-}
-
-/// [`path`] showing `text` in place of the path, for a row beneath a heading that names the directory.
-pub(crate) fn path_as(path: &Utf8Path, text: &str, stream: Stream) -> String {
-    paint(PATH, &linked(path, text, stream))
+    paint(PATH, &linked(path, &relative(path), stream))
 }
 
 /// [`path`] in a diagnostic, which goes to stderr.

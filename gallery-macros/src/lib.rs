@@ -167,9 +167,16 @@ pub fn scene(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let vis = &func.vis;
     let key = scene_key_ident(ident);
+    let caught = format_ident!("__gallery_caught_{ident}");
     quote! {
         #func
         #adapter
+        // Compiled into the scenes dylib, so the scene's
+        // panics are caught by the `std` that raised them.
+        #[doc(hidden)]
+        fn #caught(ctx: &mut ::gallery::SceneCtx<'_>, ui: &mut ::gallery::egui::Ui) {
+            ::gallery::__run_scene(ctx, ui, #render);
+        }
         // A display name means the key can't be derived from the function's name.
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
@@ -179,7 +186,7 @@ pub fn scene(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
         ::gallery::inventory::submit! {
             ::gallery::SceneEntry {
-                render: #render,
+                render: #caught,
                 name: #name,
                 module_path: ::core::module_path!(),
                 default: #default,

@@ -53,6 +53,7 @@ fn each_offscreen_call_in_a_scene_keeps_its_own_target() {
             list: false,
             template: false,
             play: None,
+            record: None,
         }],
         sheet: None,
         report: None,
@@ -166,6 +167,7 @@ fn every_shot_in_a_run_draws_even_when_the_scene_caches_against_the_context() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let capture = Capture {
         shots: vec![shot("one"), shot("two"), shot("three")],
@@ -309,6 +311,7 @@ fn an_adopted_texture_stages_upright_with_its_slack_hidden() {
             list: false,
             template: false,
             play: None,
+            record: None,
         }],
         sheet: None,
         report: None,
@@ -399,6 +402,7 @@ fn an_offscreen_decodes_what_is_written_unless_the_scene_encodes_it() {
             list: false,
             template: false,
             play: None,
+            record: None,
         }],
         sheet: None,
         report: None,
@@ -490,6 +494,7 @@ fn a_shot_override_reaches_the_pixels_an_offscreen_scene_draws() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     // Two shots rather than one: the default and the override in a single run,
     // so the pair also says a later shot's knobs are its own.
@@ -629,6 +634,7 @@ fn a_scene_that_stops_staging_an_image_keeps_the_target_for_its_return() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let mut harness = draw(
         manifest.scenes[0],
@@ -706,6 +712,7 @@ fn a_regrown_capture_keeps_the_gl_the_scene_cached_against() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let harness = draw(
         manifest.scenes[0],

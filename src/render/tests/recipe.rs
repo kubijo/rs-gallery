@@ -465,3 +465,143 @@ fn a_recipe_that_could_not_do_what_it_says_is_rejected() {
         assert!(recipe(why, text, None).is_err(), "`{why}` is not a recipe");
     }
 }
+
+#[test]
+fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
+    // One shot, with `extra` as the rest of its table.
+    let shot = |extra: &str| {
+        indoc::formatdoc! {r#"
+            out = "r"
+            size = "10x10"
+
+            [[shot]]
+            name = "a"
+            scene = "s"
+            {extra}
+        "#}
+    };
+    let cases = [
+        (
+            "seconds-on-a-play",
+            indoc! {r#"
+                play = "p"
+                record = { fps = 30, seconds = 2 }
+            "#},
+            "records its play",
+        ),
+        (
+            "no-seconds-without-a-play",
+            indoc! {r"
+                record = { fps = 30 }
+            "},
+            "needs `seconds`",
+        ),
+        (
+            "no-frames-a-second",
+            indoc! {r"
+                record = { fps = 0, seconds = 1 }
+            "},
+            "1 to 240",
+        ),
+        (
+            "a-negative-length",
+            indoc! {r"
+                record = { fps = 30, seconds = -1 }
+            "},
+            "above 0",
+        ),
+        (
+            "a-hold-without-a-play",
+            indoc! {r"
+                record = { fps = 30, seconds = 1, hold = 1 }
+            "},
+            "takes no `hold`",
+        ),
+        (
+            "input-without-a-play",
+            indoc! {r"
+                record = { fps = 30, seconds = 1, input = true }
+            "},
+            "takes no `input`",
+        ),
+        (
+            "a-negative-hold",
+            indoc! {r#"
+                play = "p"
+                record = { fps = 30, hold = -0.5 }
+            "#},
+            "0, for none, or more",
+        ),
+        (
+            "video-without-a-record",
+            indoc! {r#"
+                video = "on"
+            "#},
+            "has no `record`",
+        ),
+        (
+            "an-unknown-format",
+            indoc! {r#"
+                record = { fps = 30, seconds = 1, format = "gif" }
+            "#},
+            "gif",
+        ),
+    ];
+    for (why, extra, says) in cases {
+        let error = recipe(why, &shot(extra), None)
+            .err()
+            .unwrap_or_else(|| panic!("`{why}` is refused"))
+            .summary();
+        assert!(error.contains(says), "`{why}`: {error}");
+    }
+    let mp4 = indoc! {r#"
+        record = { fps = 24, seconds = 1.5, format = "mp4" }
+    "#};
+    let taken = recipe("an-mp4", &shot(mp4), None).expect("a recording that can be made");
+    assert_eq!(
+        taken.shots[0].record,
+        Some(Record {
+            fps: 24,
+            seconds: Some(1.5),
+            keep: Trace::On,
+            format: VideoFormat::Mp4,
+            hold: None,
+            input: None,
+        })
+    );
+}
+
+#[test]
+fn a_plays_input_is_shown_in_the_corner_asked_for_or_bottom_left() {
+    let input = |value: &str| {
+        let shot = indoc::formatdoc! {r#"
+            out = "r"
+            size = "10x10"
+
+            [[shot]]
+            name = "a"
+            scene = "s"
+            play = "p"
+            record = {{ fps = 30, input = {value} }}
+        "#};
+        recipe(&format!("input-{}", value.trim_matches('"')), &shot, None)
+            .unwrap_or_else(|e| panic!("`input = {value}`: {}", e.summary()))
+            .shots[0]
+            .record
+            .expect("a recording")
+            .input
+    };
+    assert_eq!(input("true"), Some(Corner::BottomLeft));
+    assert_eq!(input("false"), None);
+    assert_eq!(input(r#""top-right""#), Some(Corner::TopRight));
+}
+
+#[test]
+fn record_on_the_command_line_takes_fps_with_or_without_seconds() {
+    let only = parse_record("30").expect("FPS alone");
+    assert_eq!((only.fps, only.seconds), (30, None));
+    let timed = parse_record("60:2.5").expect("FPS:SECONDS");
+    assert_eq!((timed.fps, timed.seconds), (60, Some(2.5)));
+    assert!(parse_record("fast").is_err());
+    assert!(parse_record("30:soon").is_err());
+}

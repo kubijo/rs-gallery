@@ -1,0 +1,22 @@
+# `just demo::recordings`: an animated scene in every video format, and a play with its input shown.
+# No `out`: the script passes one per backend under .tmp/recordings/.
+size = "320x320"
+report = "report.json"
+
+[[shot]]
+name = "orbit-apng"
+scene = "orbit"
+record = { fps = 60, seconds = 2 }
+
+[[shot]]
+name = "orbit-mp4"
+scene = "orbit"
+record = { fps = 60, seconds = 2, format = "mp4" }
+
+# A play touching a full-stage scene with every kind of input, shown over it.
+[[shot]]
+name = "studio-tour"
+scene = "studio"
+size = "960x540"
+play = "tours_every_kind_of_input"
+record = { fps = 30, input = true }

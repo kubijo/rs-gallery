@@ -358,6 +358,7 @@ fn a_recipe_outlives_a_scene_writing_its_own_knob() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let harness = draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size)
         .expect("the shot draws")
@@ -402,6 +403,7 @@ fn a_scene_correcting_a_recipe_held_knob_still_settles_on_the_recipe() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let drawn =
         draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size).expect("the shot draws");
@@ -447,6 +449,7 @@ fn a_recipe_value_waits_for_a_range_that_follows_another_knob() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let reached = shot("8");
     let drawn = draw(
@@ -509,6 +512,7 @@ fn a_recipe_value_waits_for_an_option_or_knob_another_knob_brings() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let reached = shot(&[("pro", "true"), ("mode", "Advanced"), ("size", "7")]);
     let drawn = draw(
@@ -566,6 +570,7 @@ fn a_recipe_value_that_never_lands_fails_even_once_hidden_and_after_a_typo() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let failure = |shot: &Shot| {
         draw(scene, &glow(), &|_: &egui::Context| {}, shot, shot.size)
@@ -611,6 +616,7 @@ fn a_recipe_key_that_moves_to_another_knob_fails() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let error = draw(scene, &glow(), &|_: &egui::Context| {}, &shot, shot.size)
         .err()

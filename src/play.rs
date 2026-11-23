@@ -65,7 +65,7 @@ pub struct PlayError {
     on_screen: Vec<String>,
 }
 
-/// A line in a play's source.
+/// A line in a play's or a scene's source.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct SourceAt {
     pub(crate) file: String,
@@ -323,6 +323,12 @@ pub(crate) trait PlayDriver {
     /// # Errors
     /// When the screenshot cannot be taken or written.
     fn trace(&mut self, index: usize, label: &str) -> Result<Option<Utf8PathBuf>, String>;
+
+    /// A step has ended: a recording pauses on it, so the step can be followed.
+    ///
+    /// # Errors
+    /// When the recording has failed.
+    fn end_step(&mut self) -> Result<(), String>;
 }
 
 /// [`PlayDriver::query`] over a tree; host code only.
@@ -582,6 +588,9 @@ impl Play<'_> {
                 None
             }
         };
+        if let Err(failed) = self.driver.end_step() {
+            outcome = outcome.and(Err(PlayError::new(failed)));
+        }
         self.steps.push(StepRecord {
             label: label.clone(),
             frames: start..self.frame,
@@ -990,7 +999,7 @@ thread_local! {
 /// Generic, so it is compiled into whichever copy of gallery calls it.
 /// A scenes dylib can carry its own `std`, with its own panic hook,
 /// and the hook has to be armed in the copy whose code panics.
-fn caught<T>(body: impl FnOnce() -> T) -> Result<T, PlayError> {
+pub(crate) fn caught<T>(body: impl FnOnce() -> T) -> Result<T, PlayError> {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         let previous = panic::take_hook();

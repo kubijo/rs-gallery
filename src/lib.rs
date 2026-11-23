@@ -74,14 +74,18 @@ mod sheet;
 mod shell_scenes;
 mod style;
 mod svg;
+mod testing;
 mod tree;
 mod update;
+mod video;
 mod watch;
 mod window;
 pub use actions::action;
 #[doc(hidden)]
 pub use actions::report_actions_to as __report_actions_to;
 use actions::{Log, collecting, render_actions};
+#[doc(hidden)]
+pub use context::__run_scene;
 pub use context::{Checkerboard, PADDING, SceneCtx, SceneRevision, Stage, StageSpec};
 pub use globals::{CatalogGlobals, GlobalControls, GlobalEntry, GlobalKey, GlobalLabel};
 use globals::{GlobalState, GlobalWrite};
@@ -97,7 +101,6 @@ pub use offscreen::{ImageInput, Offscreen, Pointer, StageTexture};
 pub use pass::ScenePass;
 use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
-#[doc(hidden)]
 pub use play::__run_play;
 pub use play::{
     By, DEFAULT_WAIT_FRAMES, DRAG_FRAMES, Found, Play, PlayEntry, PlayError, PlayResult,
@@ -105,6 +108,7 @@ pub use play::{
 };
 use svg::Icons;
 pub use svg::{Icon, IconError};
+pub use testing::__test_main;
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
 use watch::{HotStatus, SceneWatcher, render_build_bar, render_hot_chip};
 
@@ -1300,7 +1304,7 @@ fn render_canvas_with(
             // The canvas edge abuts shell panels, so only nested scene scrollers need a fade.
             ui.spacing_mut().scroll.fade = scene_fade;
             let scope = PaintScope::begin(ui);
-            let ((declared, written), global_writes) = egui::Frame::new()
+            let ((declared, written), global_writes, panicked) = egui::Frame::new()
                 .inner_margin(egui::Margin::same(16))
                 .show(ui, |ui| {
                     let mut ctx = SceneCtx::with_globals(
@@ -1316,7 +1320,14 @@ fn render_canvas_with(
                     );
                     ctx.pin(pinned);
                     (scene.render)(&mut ctx, ui);
-                    (ctx.finish(), ctx.take_global_writes())
+                    let panicked = ctx.take_panic();
+                    if let Some(panic) = &panicked {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            format!("The scene panicked: {panic}"),
+                        );
+                    }
+                    (ctx.finish(), ctx.take_global_writes(), panicked)
                 })
                 .inner;
             if written {
@@ -1324,23 +1335,25 @@ fn render_canvas_with(
             }
             // Drop knobs the scene stopped declaring this frame.
             store.truncate(declared);
-            (scope.finish(ui.ctx()), global_writes)
+            (scope.finish(ui.ctx()), global_writes, panicked)
         });
-        let (painted, global_writes) = output.inner;
+        let (painted, global_writes, panicked) = output.inner;
         prepared.clip(ui.ctx(), output.inner_rect);
         painted.clip(ui.ctx(), output.inner_rect);
         Rendered {
             size: output.content_size,
             global_writes,
+            panicked,
         }
     })
     .inner
 }
 
-/// A rendered canvas: its content size, and the catalog globals its scene wrote.
+/// A rendered canvas: its content size, the catalog globals its scene wrote, and its panic.
 pub(crate) struct Rendered {
     pub(crate) size: egui::Vec2,
     pub(crate) global_writes: Vec<GlobalWrite>,
+    pub(crate) panicked: Option<context::ScenePanic>,
 }
 
 struct PreviewContextStyleGuard {

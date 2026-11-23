@@ -36,16 +36,21 @@ use crate::{
     tree::{resolve_scene, scene_key},
 };
 
+pub(crate) use crate::video::VideoFormat;
+
+mod overlay;
 mod overrides;
 mod play_driver;
 mod recipe;
+mod record;
 mod report;
 mod session;
 mod shot;
 #[cfg(test)]
 mod tests;
 
-use self::play_driver::*;
+pub(crate) use self::overlay::Corner;
+use self::{overlay::InputOverlay, play_driver::*, record::*};
 pub(crate) use self::{overrides::*, recipe::*, report::*, session::*, shot::*};
 
 /// One scene, in one state, at one size — what a single capture produces.
@@ -82,6 +87,132 @@ pub(crate) struct Shot {
     /// A play to run once the scene settles;
     /// the shot captures where it leaves off.
     pub(crate) play: Option<ShotPlay>,
+    /// An animated PNG to record beside the shot's own.
+    pub(crate) record: Option<Record>,
+}
+
+/// A shot's recording: the whole play on a play shot,
+/// else `seconds` once the scene settles.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Record {
+    pub(crate) fps: u16,
+    pub(crate) seconds: Option<f32>,
+    /// `RetainOnFailure` drops a play's recording once the play passes.
+    pub(crate) keep: Trace,
+    pub(crate) format: VideoFormat,
+    /// Seconds a play's recording shows each step's last frame for, beyond its own;
+    /// [`DEFAULT_HOLD`] when unset.
+    pub(crate) hold: Option<f32>,
+    /// Show the play's keys, mouse buttons and pointer on the recording,
+    /// with the panel in this corner.
+    pub(crate) input: Option<Corner>,
+}
+
+/// The highest frame rate a recording takes.
+/// A typo like `600` would otherwise render ten times
+/// the frames anyone wanted before anything checked.
+const MAX_FPS: u16 = 240;
+
+/// A play runs a click in a few frames, so its recording
+/// pauses at each step's end long enough to see what the step did.
+pub(crate) const DEFAULT_HOLD: f32 = 0.5;
+
+impl Record {
+    /// Refuse a recording that cannot be made as asked.
+    ///
+    /// # Errors
+    /// For a frame rate of 0 or past [`MAX_FPS`], a length
+    /// that is not a positive number, a length on a play shot
+    /// (which records the play), or none on a shot without a play;
+    /// a hold on a shot without a play, which has no steps, or one below 0.
+    pub(crate) fn check(self, has_play: bool) -> Result<(), String> {
+        if self.fps == 0 || self.fps > MAX_FPS {
+            return Err(format!(
+                "a recording at {} fps: it takes 1 to {MAX_FPS} frames a second",
+                self.fps
+            ));
+        }
+        match (self.hold, has_play) {
+            (Some(_), false) => {
+                return Err(
+                    "a recording without a play has no steps, so it takes no `hold`".to_owned(),
+                );
+            }
+            (Some(hold), true) if !(hold.is_finite() && hold >= 0.0) => {
+                return Err(format!(
+                    "a hold of {hold} seconds: it takes 0, for none, or more"
+                ));
+            }
+            _ => {}
+        }
+        if self.input.is_some() && !has_play {
+            return Err(
+                "a recording without a play has no input to show, so it takes no `input`"
+                    .to_owned(),
+            );
+        }
+        match (self.seconds, has_play) {
+            (Some(_), true) => {
+                Err("a play shot records its play, so it takes no `seconds`".to_owned())
+            }
+            (None, false) => {
+                Err("a recording without a play needs `seconds` to know how long".to_owned())
+            }
+            (Some(seconds), false) if !(seconds.is_finite() && seconds > 0.0) => Err(format!(
+                "a recording of {seconds} seconds: it takes a number above 0"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// How many frames a recording without a play draws.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "`check` keeps `seconds` positive and finite; a frame count past u32 is not a recording"
+    )]
+    pub(crate) fn frames(self) -> u32 {
+        let seconds = self.seconds.unwrap_or(0.0);
+        ((seconds * f32::from(self.fps)).round() as u32).max(1)
+    }
+
+    /// How many frames a play's recording holds each step's last frame for.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "`check` keeps `hold` at 0 or more and finite; a hold past u32 frames is not one"
+    )]
+    pub(crate) fn hold_frames(self) -> u32 {
+        (self.hold.unwrap_or(DEFAULT_HOLD) * f32::from(self.fps)).round() as u32
+    }
+}
+
+/// `FPS` or `FPS:SECONDS`, as `--record` takes it;
+/// kept whatever the play does.
+///
+/// # Errors
+/// When either part is not a number.
+pub(crate) fn parse_record(raw: &str) -> Result<Record, String> {
+    let (fps, seconds) = match raw.split_once(':') {
+        Some((fps, seconds)) => (fps, Some(seconds)),
+        None => (raw, None),
+    };
+    let fps = fps
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("`{raw}` is not FPS or FPS:SECONDS"))?;
+    let seconds = seconds
+        .map(|seconds| seconds.trim().parse::<f32>())
+        .transpose()
+        .map_err(|_| format!("`{raw}` is not FPS or FPS:SECONDS"))?;
+    Ok(Record {
+        fps,
+        seconds,
+        keep: Trace::On,
+        format: VideoFormat::default(),
+        hold: None,
+        input: None,
+    })
 }
 
 /// The play a shot runs before it is captured.
@@ -89,6 +220,8 @@ pub(crate) struct ShotPlay {
     /// A [`PlayEntry::name`] registered for the shot's scene.
     pub(crate) name: String,
     pub(crate) trace: Trace,
+    /// List the play's steps under the run's summary.
+    pub(crate) steps: bool,
 }
 
 /// When a play's per-step screenshots are written beside the shot.
@@ -335,6 +468,23 @@ pub(crate) fn render_with_globals(
     outcome
 }
 
+/// One shot drawn for a test: nothing printed,
+/// nothing reported, only whether it failed.
+///
+/// # Errors
+/// What a capture would report for the shot,
+/// a failed play or a panicking scene included.
+pub(crate) fn check_shot(
+    manifest: &Manifest,
+    globals: Option<GlobalEntry>,
+    plays: &[PlayEntry],
+    session: &Session,
+    setup: &impl Fn(&egui::Context),
+    shot: &Shot,
+) -> Result<(), Diagnostic> {
+    shoot_with_globals(manifest, globals, plays, session, setup, shot, &mut None).map(drop)
+}
+
 /// What one invocation asks for.
 pub(crate) struct Capture {
     pub(crate) shots: Vec<Shot>,
@@ -363,6 +513,7 @@ fn gather(
         scale: DEFAULT_SCALE,
         globals: BTreeMap::new(),
         play: None,
+        video: None,
         bytes: std::fs::metadata(out).map(|file| file.len()).unwrap_or(0),
         // A sheet is drawn once from images already taken;
         // there is nothing for it to settle.

@@ -42,6 +42,9 @@ fn global_overrides_resolve_conditional_control_chains_before_drawing() {
         wanted: egui::Vec2::ZERO,
         global_write_error: None,
         actions: None,
+        clock: None,
+        recording: None,
+        scene_panic: None,
     };
     let overrides = knobs(&[("first", "true"), ("second", "true"), ("third", "true")]);
     let mut unmatched: Vec<&KnobOverride> = overrides.iter().collect();
@@ -74,6 +77,7 @@ fn global_shot(globals: Overrides) -> Shot {
         list: false,
         template: false,
         play: None,
+        record: None,
     }
 }
 
@@ -201,6 +205,9 @@ fn global_overrides_are_rechecked_after_choice_options_change() {
         wanted: egui::Vec2::ZERO,
         global_write_error: None,
         actions: None,
+        clock: None,
+        recording: None,
+        scene_panic: None,
     };
     let overrides = knobs(&[("choice", "Target"), ("expanded", "true")]);
     let mut unmatched: Vec<&KnobOverride> = overrides.iter().collect();
@@ -235,6 +242,7 @@ fn a_shot_applies_typed_globals_before_render_and_the_next_shot_starts_fresh() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
 
     let mut dark = draw_with_globals(

@@ -30,6 +30,11 @@ pub(super) fn draw_with_globals(
     size: egui::Vec2,
 ) -> Result<SceneFrame, Diagnostic> {
     let wgpu_session = matches!(session, Session::Wgpu(_));
+    // A shot with nowhere to write records nothing either.
+    let recorded = shot
+        .record
+        .filter(|_| shot.out.is_some())
+        .map(|record| record.fps);
     let globals = globals
         .map(|entry| GlobalState::new(entry, crate::SceneRevision::INITIAL))
         .transpose()
@@ -57,8 +62,14 @@ pub(super) fn draw_with_globals(
             wanted: egui::Vec2::ZERO,
             global_write_error: None,
             actions: None,
+            clock: recorded.map(Clock::new),
+            recording: None,
+            scene_panic: None,
         }
     })?;
+    if recorded.is_some() {
+        animate(&harness.ctx);
+    }
     let frames = settle(&mut harness, shot, &shot.knobs)?;
     Ok(SceneFrame { harness, frames })
 }
@@ -121,7 +132,7 @@ fn settle_with(
 ) -> Result<Frames, Diagnostic> {
     let mut unmatched_globals: Vec<&KnobOverride> = shot.globals.iter().collect();
     apply_globals(harness.state_mut(), &shot.globals, &mut unmatched_globals)?;
-    harness.run_steps(1);
+    step(harness).map_err(Diagnostic::new)?;
     let mut ledger = Ledger::new(knobs.clone());
     let mut quiet = 0;
     let mut drawn = 1;
@@ -130,7 +141,7 @@ fn settle_with(
     for _ in 1..shot.frames.unwrap_or(DEFAULT_FRAMES).max(MIN_FRAMES) {
         apply_globals(harness.state_mut(), &shot.globals, &mut unmatched_globals)?;
         ledger.apply(harness.state_mut())?;
-        harness.run_steps(1);
+        step(harness).map_err(Diagnostic::new)?;
         drawn += 1;
         if shot.settle {
             quiet = if harness.ctx.has_requested_repaint() {
@@ -224,8 +235,10 @@ pub(super) fn shoot_with_globals(
         &mut frames,
     )?;
 
-    let played = match &shot.play {
-        None => None,
+    // A shot with nowhere to write records nothing either.
+    let recording = shot.record.zip(shot.out.as_ref());
+    let (played, mut video) = match &shot.play {
+        None => (None, None),
         Some(play) => {
             let entry = find_play(plays, &scene, &play.name)?;
             let trace_dir = shot.out.as_ref().map(|out| steps_dir(out));
@@ -241,6 +254,9 @@ pub(super) fn shoot_with_globals(
                 }
             }
             harness.state_mut().actions = Some(Vec::new());
+            if let Some((record, out)) = recording {
+                start(&mut harness, session, (size, shot.scale), out, record)?;
+            }
             let mut driver = HeadlessDriver {
                 harness: &mut harness,
                 globals: &shot.globals,
@@ -253,8 +269,11 @@ pub(super) fn shoot_with_globals(
             let mut run = crate::play::run(entry, &mut driver);
             let ledger = driver.ledger;
             harness.state_mut().actions = None;
-            // Reported before anything else is drawn: settling again could fail on the very thing
-            // the play did, and that would stop the run instead of reporting the play.
+            let video = finish(&mut harness)?;
+            let video_path = video.as_ref().map(|video| video.path.clone());
+            // Reported before anything else is drawn: settling again
+            // could fail on the very thing the play did, and that
+            // would stop the run instead of reporting the play.
             if let Some(failure) = &run.failure {
                 let at = failure
                     .step()
@@ -283,12 +302,19 @@ pub(super) fn shoot_with_globals(
                         crate::style::path_on_stderr(&landed(dir))
                     ));
                 }
+                if let Some(path) = &video_path {
+                    report = report.hint(format!(
+                        "the play is recorded in {}",
+                        crate::style::path_on_stderr(path)
+                    ));
+                }
                 *failed = Some(FailedShot::of(
                     shot,
                     &scene,
                     play,
                     failure.clone(),
                     &mut run,
+                    video_path,
                 ));
                 return Err(report);
             }
@@ -316,7 +342,9 @@ pub(super) fn shoot_with_globals(
                     play.name, scene.name
                 ))
                 .cause(report.summary());
-                *failed = Some(FailedShot::of(shot, &scene, play, error, &mut run));
+                *failed = Some(FailedShot::of(
+                    shot, &scene, play, error, &mut run, video_path,
+                ));
                 return Err(report);
             }
             // Only now has the shot passed, so only now are its step screenshots let go.
@@ -328,8 +356,23 @@ pub(super) fn shoot_with_globals(
                     step.trace = None;
                 }
             }
-            Some(PlayOutcome {
+            let video = match (video, shot.record) {
+                (
+                    Some(video),
+                    Some(Record {
+                        keep: Trace::RetainOnFailure,
+                        ..
+                    }),
+                ) => {
+                    std::fs::remove_file(&video.path)
+                        .map_err(|e| format!("remove the passing play's `{}`: {e}", video.path))?;
+                    None
+                }
+                (video, _) => video,
+            };
+            let outcome = PlayOutcome {
                 name: play.name.clone(),
+                listed: play.steps,
                 frames: run.frames,
                 steps: run
                     .steps
@@ -340,9 +383,17 @@ pub(super) fn shoot_with_globals(
                         trace: step.trace,
                     })
                     .collect(),
-            })
+            };
+            (Some(outcome), video)
         }
     };
+    if shot.play.is_none()
+        && let Some((record, out)) = recording
+    {
+        start(&mut harness, session, (size, shot.scale), out, record)?;
+        record_frames(&mut harness, shot, record.frames())?;
+        video = finish(&mut harness)?;
+    }
 
     if shot.list {
         let print = |line: &str| {
@@ -410,6 +461,7 @@ pub(super) fn shoot_with_globals(
                 .as_ref()
                 .map_or_else(BTreeMap::new, |global| control_values(global.knobs())),
             play: played,
+            video,
         };
         return Ok(Some(ShotOutput { written, image }));
     }
@@ -544,8 +596,16 @@ pub(super) struct Canvas {
     pub(super) wanted: egui::Vec2,
     /// The first scene write to a catalog global that could not land, failing the shot.
     pub(super) global_write_error: Option<String>,
-    /// Actions reported since a play last took them; `None` while no play listens.
+    /// Actions reported since a play last took them;
+    /// `None` while no play listens.
     pub(super) actions: Option<Vec<String>>,
+    /// The clock every frame is drawn on,
+    /// while the shot records.
+    pub(super) clock: Option<Clock>,
+    /// Where frames go while a recording is open.
+    pub(super) recording: Option<Recording>,
+    /// The first panic the scene raised, failing the shot.
+    pub(super) scene_panic: Option<crate::context::ScenePanic>,
 }
 
 impl eframe::App for Canvas {
@@ -566,6 +626,9 @@ impl eframe::App for Canvas {
             wanted,
             global_write_error,
             actions,
+            clock: _,
+            recording: _,
+            scene_panic,
         } = self;
         let gl_deps = match (loader.clone(), gl.as_deref(), painter.as_ref()) {
             (Some(loader), Some(gl), Some(painter)) => Some(GlDeps {
@@ -603,6 +666,9 @@ impl eframe::App for Canvas {
                 }
                 let rendered = rendered.expect("`collecting` runs the render it is handed");
                 *wanted = rendered.size;
+                if scene_panic.is_none() {
+                    *scene_panic = rendered.panicked;
+                }
                 if let Some(globals) = globals
                     && !rendered.global_writes.is_empty()
                 {

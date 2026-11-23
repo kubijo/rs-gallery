@@ -41,3 +41,17 @@ if [ "$status" -ne 1 ] || [ "${#missing[@]}" -gt 0 ] || [ "${#unexpected[@]}" -g
 fi
 echo >&2
 echo "demo-plays: as meant, the passing plays passed and the failing plays failed" >&2
+
+# The same catalog's own tests: each `/// Fails:` above fails its trial,
+# a panic only its own, and every other scene and play passes.
+# A crash would leave no summary line to count.
+tests_status=0
+tests=$(cd "$repo/.tmp/demo-wgpu" && cargo test --quiet --test scenes 2>&1) || tests_status=$?
+failed=$(grep -oE '[0-9]+ failed' <<<"$tests" | grep -oE '[0-9]+' || echo none)
+meant=$(grep -c '^/// Fails:' "$repo/scripts/plays.scene.rs")
+if [ "$tests_status" -eq 0 ] || [ "$failed" != "$meant" ]; then
+    echo "$tests" >&2
+    echo "demo-plays: expected the catalog's tests to fail exactly $meant trials; exit $tests_status, failed: $failed" >&2
+    exit 1
+fi
+echo "demo-plays: as meant, the catalog's tests failed only the $meant trials meant to fail" >&2

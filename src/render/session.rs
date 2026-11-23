@@ -24,12 +24,7 @@ pub(crate) fn open<A: eframe::App + 'static>(
     app: impl FnOnce(&eframe::CreationContext<'_>, Option<GlPainter>) -> A,
 ) -> Result<egui_kittest::Harness<'static, A>, Diagnostic> {
     session.validate_target(size, scale)?;
-    let builder = egui_kittest::Harness::builder()
-        .with_size(size)
-        .with_pixels_per_point(scale)
-        // The predictable options a snapshot wants — software texture filtering, no dithering —
-        // with the sample count spelled from the one place the window reads it too.
-        .with_render_options(wgpu_render_options());
+    let builder = builder(size, scale);
     let (painter, builder) = match session {
         #[cfg(not(target_vendor = "apple"))]
         Session::Glow(capture) => (Some(capture.painter()), builder.renderer(capture.clone())),
@@ -43,6 +38,40 @@ pub(crate) fn open<A: eframe::App + 'static>(
         install_context(cc, setup);
         app(cc, painter)
     }))
+}
+
+/// [`open`] for an app drawn alongside a shot that shares nothing with it:
+/// under glow, through a painter of its own, so its textures cannot replace the shot's.
+/// A wgpu harness already has a renderer of its own.
+///
+/// # Errors
+/// As [`open`], or when glow's second painter cannot be made.
+pub(crate) fn open_apart<A: eframe::App + 'static>(
+    size: egui::Vec2,
+    scale: f32,
+    session: &Session,
+    app: impl FnOnce(&eframe::CreationContext<'_>) -> A,
+) -> Result<egui_kittest::Harness<'static, A>, Diagnostic> {
+    session.validate_target(size, scale)?;
+    let builder = builder(size, scale);
+    let builder = match session {
+        #[cfg(not(target_vendor = "apple"))]
+        Session::Glow(capture) => builder.renderer(capture.with_own_painter()?),
+        Session::Wgpu(capture) => builder.renderer(capture.renderer()?),
+    };
+    Ok(builder.build_eframe(|cc| app(cc)))
+}
+
+fn builder<A>(size: egui::Vec2, scale: f32) -> egui_kittest::HarnessBuilder<A> {
+    egui_kittest::Harness::builder()
+        .with_size(size)
+        .with_pixels_per_point(scale)
+        // The predictable options a snapshot wants
+        //  - software texture filtering
+        //  - no dithering
+        //
+        // …with the sample count spelled from the one place the window reads it too.
+        .with_render_options(wgpu_render_options())
 }
 
 /// The GL a run paints through, opened once and lent to every shot.

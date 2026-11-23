@@ -15,6 +15,12 @@ crate-type = ["dylib"]
 name = "gallery"
 path = "main.rs"
 
+# Every scene drawn and every play run, as `cargo test` trials; `gallery::test_main!` brings its own harness.
+[[test]]
+name = "scenes"
+path = "tests/scenes.rs"
+harness = false
+
 [dependencies]
 gallery = { git = "{{gallery_git}}" }
 serde = { version = "1", features = ["derive"] }

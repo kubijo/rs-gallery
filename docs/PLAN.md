@@ -15,30 +15,19 @@ any run can be recorded. It is built from existing parts rather than invented he
 The work is sliced so every slice is checked headlessly — tests in `just dev::validate`, artifacts under `.tmp/` — and
 the in-window panel, the one part a person would otherwise have to click through, comes last.
 
+Plays (slice 1), recording with MP4 folded in (slices 2 and 4), and slice 3's catalog runner have landed; what they left
+undone is in `TODO.md`.
+
 ### What is reused
 
-| Need                       | Taken from                                      | What stays ours                     |
-| -------------------------- | ----------------------------------------------- | ----------------------------------- |
-| Queries, input             | `egui_kittest` 0.36 queries and input           | queries behind `PlayDriver`         |
-| Play functions, steps      | Storybook `play()`, several tests per story     | `#[play]` and the step log          |
-| Waiting                    | Playwright's retrying web-first assertions      | `wait_for`, budgeted in frames      |
-| Spies                      | Storybook `fn()`                                | `gallery::action`, armed headlessly |
-| Runner                     | Storybook's move to Vitest; `libtest-mimic` 0.8 | trial enumeration                   |
-| Structural snapshots       | `insta` 1.49; Playwright `toMatchAriaSnapshot`  | AccessKit tree to stable text       |
-| Verdicts, report, gestures | a GPL-3.0 wasm-runtime harness, designs only    | all of the code                     |
-| Video (APNG, MP4)          | `png` 0.18; `openh264` 0.9, `muxide` 0.5        | frame diffing and timing            |
-
-Kittest supplies `get_by_label`/`_role`, `click`, `hover`, `type_text`, `focus`, `key_*`, `drag_at` and `scroll_*`.
-Storybook's play function is `play({ canvas, userEvent, step })`; the harness's designs are re-implemented, no code
-taken.
+| Need                 | Taken from                                     | What stays ours               |
+| -------------------- | ---------------------------------------------- | ----------------------------- |
+| Queries, input       | `egui_kittest` 0.36 queries and input          | queries behind `PlayDriver`   |
+| Structural snapshots | `insta` 1.49; Playwright `toMatchAriaSnapshot` | AccessKit tree to stable text |
+| Verdicts, report     | a GPL-3.0 wasm-runtime harness, designs only   | all of the code               |
 
 From the wasm-runtime harness, as designs:
 
-- Time is virtual. Frame *n* sits at an exact time and nothing reads the wall clock.
-- Interactions name an element — here an AccessKit label or role — never a coordinate. Each gesture is a fixed frame
-  sequence (click: press, frame, release, frame; drag: ten frames; scroll: five moves), so a script yields the same
-  frames on every machine.
-- Settle, then shoot. `settle()` stopping once `has_requested_repaint` goes quiet is already the egui form of it.
 - Verdicts are `pass | tolerated | diff | missing | new`: a colour threshold, plus a budget of differing pixels inside
   which a diff is *tolerated* — kept and reported, not failed. Rasterisers flip steep antialiased edges at full
   contrast, which no colour threshold absorbs; the budget is what lets llvmpipe and a GPU share references. A missing or
@@ -47,57 +36,37 @@ From the wasm-runtime harness, as designs:
   verdict was reached. Animated results sit side by side as two APNGs; nothing is re-encoded to compare them.
 - CI uploads the artifacts before a separate step fails on them.
 
-Left out of it: its event recorder (no recorder for now), network and device fixtures, and archived baselines, which pay
-off only past the reference count this repo has.
+Left out of it: its event recorder, network and device fixtures, and archived baselines, which pay off only past the
+reference count this repo has.
 
-### Video format
+### Slice 4 — assertions that report themselves (next, ahead of slice 3)
 
-APNG by default. Pure Rust, lossless, byte-identical between runs — so a recording can itself be a test — and it plays
-inline wherever an image does. Encode cost is held down by `Compression::Fast` and by writing only the rectangle that
-changed since the previous frame; a frame with no change writes nothing and lengthens the one before it. Frames reach
-the encoder through a channel two or three deep, which bounds memory and overlaps encoding with rendering.
+A play asserts today with Rust's `assert!`, `wait_for` and `expect_action`: a failure carries whatever message its
+author wrote, and a passing check leaves no trace. The model is Playwright's `expect(locator)`: matchers that retry
+until they hold and fail with what was expected and what was found.
 
-An MP4 behind a `video-h264` feature (`openh264` and `muxide`) for small, lossy files with no external binary; it
-compiles bundled C++, hence opt-in.
+- `p.expect(by)` returns the matchers: `to_have_value`, `to_have_label`, `to_be_focused`, `to_be_disabled`,
+  `to_be_checked`, `to_exist` and `to_be_absent`, with `p.expect_count(by, n)` beside them and `expect_action` joining
+  the family. Each retries within the play's frame budget, so none needs a `wait_for` around it.
+- Every check is recorded, passing or not, as data rather than a message: subject, matcher, expected, actual, frame.
+  That one record is what the terminal's step list, the JSON report, the HTML report, the step screenshots and slice 5's
+  panel all show, each in its own form.
+- `Found` gains a toggle's state, which `to_be_checked` reads; it has none to read today.
+- A plain `assert!` still works, and is reported as its step's failure without an expected or actual.
 
-Frame timing holds by construction: frame *n* gets `RawInput.time = n / fps` set outright rather than accumulated, and
-APNG stores delays as the fraction `1/fps`, summed exactly when frames merge. How fast a frame renders or encodes cannot
-move it.
+It comes first because slice 3's snapshots are assertions too — Playwright's `toHaveScreenshot` and
+`toMatchAriaSnapshot` — so they land as two more matchers, recorded and reported as every other check is.
 
-Ruled out: an `ffmpeg` subprocess (an external binary), `rav1e` (AV1 encode cost), animated WebP (C libwebp, slower, no
-gain over APNG with changed-rectangle frames), GIF (256 colours), `gifski` (AGPL), the `webm` muxer (MPL-2.0).
+### Slice 3 — verdicts for catalogs
 
-Slice 1, play functions run headlessly, has landed; what it left undone is in `TODO.md`.
-
-### Slice 2 — recording
-
-- `src/video.rs`: a `VideoSink` with one implementation, APNG, on an encoder thread. The frame count `acTL` declares is
-  known only once the stream ends, so the chunk — fixed-size — is patched in place with its CRC on close.
-- A recording steps at `1/fps` with the time set per frame, and restores the animation time and cursor blink kittest
-  zeroes; stills keep both off.
-- `record = { fps = 60, seconds = 2 }` on a shot; on a play shot, `record = { fps = 60 }` records the whole play, its
-  steps as frame ranges in the report. `video = "on" | "retain-on-failure"`; `--record FPS:SECONDS`.
-- Tests decode the result: frame count, delays summing exactly to the duration, every frame equal to a still rendered at
-  its time, a static scene collapsing to one frame, the same bytes twice.
-- The report carries per-frame render, readback and encode time and the deepest the queue got.
-
-### Slice 3 — a runner for catalogs
-
-- `gallery::test_main!()` over `libtest-mimic` for a `harness = false` test in the template, linking scenes through
-  `Linked`: `smoke::<scene>` (renders without panicking; never settling warns) and `play::<scene>::<name>`. Filtering,
-  `--list` and nextest come with it. The glow session is `Rc`, so each test thread opens its own.
-- Pixel comparison behind a `verify` feature, keeping dify's MPL-2.0 corner opt-in: `p.snapshot("label")` and
-  `--capture --verify`, with the verdicts above. If kittest's result does not expose the pixel count *tolerated* needs,
-  dify is called directly — the first thing to find out. References go in a co-located `__snapshots__/`, named
+- Pixel comparison behind a `verify` feature, keeping dify's MPL-2.0 corner opt-in: `p.expect_screenshot("label")` and
+  `--capture --verify`, with the verdicts above. kittest's result drops the pixel count of a difference within budget,
+  so dify is called directly. References go in a co-located `__snapshots__/`, named
   `<file-stem>__<module_path>__<label>`; `UPDATE_SNAPSHOTS=1` takes a change.
-- Verdicts in the JSON report, and the HTML report.
-- `p.aria_snapshot("label")`: the AccessKit tree (role, label, value, focus, toggled) as text, through `insta`.
-- A `test` recipe in the template justfile.
-
-### Slice 4 — MP4
-
-`openh264` and `muxide` as a second `VideoSink` behind `video-h264`; `video_format = "apng" | "mp4"`. A test reads the
-file back with `mp4` (a dev-dependency) for its sample count and an unchanging sample duration.
+- Verdicts in the JSON report, and the HTML report. Partial-frame APNGs decode at well over real time in ffmpeg (and so
+  mpv); how browsers play them is judged there. The terminal summary drops its empty columns and gives a recording's
+  length beside its frame count.
+- `p.expect_aria_snapshot("label")`: the AccessKit tree (role, label, value, focus, toggled) as text, through `insta`.
 
 ### Slice 5 — an interactions panel driving the live canvas
 
@@ -113,4 +82,6 @@ file back with `mp4` (a dev-dependency) for its sample count and an unchanging s
 
 ### Open
 
-- An APNG of many partial frames may play slowly in some viewers; to be judged on slice 2's output.
+- Whether `verify` keeps its feature gate. MP4's gate was dropped for leaving `--record-format mp4` failing in catalogs
+  that had not turned it on; the same would hold for `--verify`, against keeping MPL-2.0 out of a catalog that never
+  compares images.

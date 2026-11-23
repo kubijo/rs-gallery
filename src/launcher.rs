@@ -167,6 +167,9 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
             render::read_recipe(&recipe, cli.out.as_deref()).unwrap_or_else(|reason| fail(&reason));
         for shot in &mut capture.shots {
             shot.globals.extend(cli.global.iter().cloned());
+            if let Some(play) = &mut shot.play {
+                play.steps = cli.steps;
+            }
         }
         return Some(capture);
     }
@@ -197,6 +200,19 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
             play: cli.play.clone().map(|name| render::ShotPlay {
                 name,
                 trace: render::Trace::default(),
+                steps: true,
+            }),
+            record: cli.record.map(|record| {
+                let record = render::Record {
+                    format: cli.record_format.unwrap_or_default(),
+                    hold: cli.record_hold,
+                    input: cli.record_input,
+                    ..record
+                };
+                record
+                    .check(cli.play.is_some())
+                    .unwrap_or_else(|reason| fail(&reason.into()));
+                record
             }),
         }],
         // Both gather a recipe's shots; one shot on the command line has nothing to gather.
@@ -254,6 +270,39 @@ struct Cli {
     )]
     play: Option<String>,
 
+    /// Record beside the render: `FPS:SECONDS`
+    /// once the scene settles, or `FPS` with `--play` to record the play
+    #[arg(
+        long,
+        value_name = "FPS[:SECONDS]",
+        value_parser = render::parse_record,
+        requires = "render",
+        conflicts_with_all = ["init_capture", "capture"]
+    )]
+    record: Option<render::Record>,
+
+    /// The recording's format: `apng` (lossless, comparable) or `mp4` (small, seekable)
+    /// [default: apng]
+    #[arg(long, value_name = "FORMAT", requires = "record")]
+    record_format: Option<render::VideoFormat>,
+
+    /// Seconds a play's recording pauses at each step's end,
+    /// so a step can be followed; 0 for none [default: 0.5]
+    #[arg(long, value_name = "SECONDS", requires = "record")]
+    record_hold: Option<f32>,
+
+    /// Show a play's keys, mouse buttons and pointer on its recording,
+    /// the panel in CORNER: `bottom-left`, `bottom-right`, `top-left`
+    /// or `top-right` [default: bottom-left]
+    #[arg(
+        long,
+        value_name = "CORNER",
+        num_args = 0..=1,
+        default_missing_value = "bottom-left",
+        requires = "record"
+    )]
+    record_input: Option<render::Corner>,
+
     /// Canvas size to render at [default: 1280x720]
     #[arg(long, value_name = "WxH")]
     size: Option<String>,
@@ -279,6 +328,10 @@ struct Cli {
     #[arg(long, value_name = "PATH", conflicts_with_all = ["render", "scene", "list_knobs", "init_capture", "size", "scale", "no_trim"])]
     capture: Option<Utf8PathBuf>,
 
+    /// List each play's steps under the summary (a single `--play` always does)
+    #[arg(long, requires = "capture")]
+    steps: bool,
+
     /// Where --capture writes, overriding the recipe's own `out`
     #[arg(long, value_name = "DIR", requires = "capture")]
     out: Option<Utf8PathBuf>,
@@ -288,7 +341,7 @@ struct Cli {
 ///
 /// A headless run's entire output is the paths it wrote, which a screen of `Compiling` lines
 /// buries. `--quiet` drops that progress and still lets errors through.
-fn build_lib(manifest_dir: &str, config: &Utf8Path, quiet: bool) {
+pub(crate) fn build_lib(manifest_dir: &str, config: &Utf8Path, quiet: bool) {
     let mut command = build_command(manifest_dir, config);
     if quiet {
         command.arg("--quiet");
@@ -344,8 +397,8 @@ fn build_command(manifest_dir: &str, config: &Utf8Path) -> Command {
 /// under any other profile it lands somewhere nothing reads, and the cold compile that produced it is
 /// pure cost.
 fn host_profile() -> Option<String> {
-    let exe = Utf8PathBuf::from_path_buf(std::env::current_exe().ok()?).ok()?;
-    let dir = exe.parent()?.file_name()?;
+    let dir = crate::hot::profile_dir().ok()?;
+    let dir = dir.file_name()?;
     Some(if dir == "debug" { "dev" } else { dir }.to_owned())
 }
 

@@ -17,6 +17,10 @@ hot:
 update:
     cargo run -- --check-updates
 
+# Test the catalog: every scene drawn and every play run; ARGS filter, e.g. `play::` or `--list`.
+test *ARGS:
+    cargo test --test scenes -- {{ ARGS }}
+
 # Render SCENE's canvas to OUT as a PNG, at its default knobs — no window.
 render SCENE OUT SIZE="1280x720":
     cargo run --quiet -- --scene {{ SCENE }} --render {{ OUT }} --size {{ SIZE }}

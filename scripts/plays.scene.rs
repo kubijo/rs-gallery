@@ -290,3 +290,10 @@ fn panics_outside_a_step(p: &mut Play) -> PlayResult {
     p.get_by_label("Nowhere");
     Ok(())
 }
+
+/// Fails: the scene itself panics, which its `smoke::`
+/// test reports as that scene's failure alone.
+#[scene("Panics")]
+fn panics(_ctx: &mut SceneCtx, _ui: &mut Ui) {
+    panic!("this scene panics on every frame");
+}

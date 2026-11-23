@@ -1,12 +1,13 @@
 use super::*;
 
-/// The pixels a shot writes have to be the ones its overrides produced, for content drawn
-/// The same recipe twice is the same bytes twice, which is what lets an unattended run diff
-/// today's captures against yesterday's and believe a difference.
+/// The same recipe twice is the same bytes twice,
+/// which is what lets an unattended run diff today's
+/// captures against yesterday's and believe a difference.
 ///
-/// A capture's frame times come from the harness's fixed `step_dt` rather than from the clock,
-/// and the scene here reads them — so a wall-clock frame time shows up as a difference between
-/// two runs rather than as anything a reader would notice in one.
+/// A capture's frame times come from the harness's fixed `step_dt` rather
+/// than from the clock, and the scene here reads them so a wall-clock
+/// frame time shows up as a difference between two runs rather than
+/// as anything a reader would notice in one.
 #[cfg(not(target_vendor = "apple"))]
 #[test]
 fn two_runs_of_one_recipe_write_the_same_bytes() {
@@ -53,6 +54,7 @@ fn two_runs_of_one_recipe_write_the_same_bytes() {
                 list: false,
                 template: false,
                 play: None,
+                record: None,
             }],
             sheet: None,
             report: None,
@@ -136,8 +138,10 @@ fn a_shot_captures_the_same_whether_or_not_another_scene_ran_first() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
-    // Cleared between the runs, since the two are standing in for two separate processes.
+    // Cleared between the runs, since the two are
+    // standing in for two separate processes.
     let run = |shots: Vec<Shot>, out: &Utf8PathBuf| {
         DRAWN.with_borrow_mut(std::collections::HashMap::clear);
         let capture = Capture {
@@ -226,6 +230,7 @@ fn a_settling_shot_stops_when_the_scene_goes_quiet_rather_than_at_the_frame_coun
         list: false,
         template: false,
         play: None,
+        record: None,
     };
 
     let session = Session::open(Renderer::Wgpu).expect("headless wgpu session");
@@ -293,6 +298,7 @@ fn a_scene_too_big_for_the_size_asked_for_is_captured_whole() {
             list: false,
             template: false,
             play: None,
+            record: None,
         }],
         sheet: None,
         report: None,
@@ -429,6 +435,7 @@ fn a_shot_is_cropped_to_what_it_drew_unless_trim_is_off() {
         list: false,
         template: false,
         play: None,
+        record: None,
     };
     let capture = Capture {
         shots: vec![shot("cropped", true), shot("whole", false)],
@@ -509,6 +516,7 @@ fn wgpu_shot(
             list: false,
             template: false,
             play: None,
+            record: None,
         }],
         sheet: None,
         report: None,
@@ -794,6 +802,7 @@ fn a_capture_ends_in_canvas_under_a_fixed_scrolling_stage() {
             list: false,
             template: false,
             play: None,
+            record: None,
         }],
         sheet: None,
         report: None,
@@ -814,4 +823,61 @@ fn a_capture_ends_in_canvas_under_a_fixed_scrolling_stage() {
             image.height()
         );
     }
+}
+
+/// A scene that panics fails its own shot, naming its line, and the run goes on to report it.
+#[cfg(not(target_vendor = "apple"))]
+#[test]
+fn a_panicking_scene_fails_its_shot_naming_the_line_that_panicked() {
+    fn boom(ctx: &mut crate::SceneCtx<'_>, _: &mut egui::Ui) {
+        if ctx.toggle("armed", true).get() {
+            panic!("boom");
+        }
+    }
+    // What `#[scene]` registers: the scene, run where its panic can be caught.
+    fn caught_boom(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+        crate::__run_scene(ctx, ui, boom);
+    }
+    let manifest = Manifest {
+        scenes: vec![SceneEntry {
+            render: caught_boom,
+            name: "boom",
+            module_path: "reference",
+            default: true,
+            order: 0,
+            source: "",
+        }],
+        groups: Vec::new(),
+    };
+    let capture = Capture {
+        shots: vec![Shot {
+            scene: "boom".to_owned(),
+            out: Some(
+                Utf8PathBuf::from_path_buf(std::env::temp_dir())
+                    .expect("a UTF-8 temp dir")
+                    .join("gallery-scene-panic/boom.png"),
+            ),
+            size: egui::vec2(120.0, 60.0),
+            knobs: Overrides::default(),
+            globals: Overrides::default(),
+            frames: None,
+            trim: true,
+            settle: false,
+            scale: DEFAULT_SCALE,
+            list: false,
+            template: false,
+            play: None,
+            record: None,
+        }],
+        sheet: None,
+        report: None,
+    };
+    let failure = render(&manifest, Renderer::Glow, &|_: &egui::Context| {}, &capture)
+        .expect_err("the scene panicked")
+        .summary();
+    assert!(failure.contains("scene `boom` panicked: boom"), "{failure}");
+    assert!(
+        failure.contains("capture.rs:"),
+        "names the scene's own line: {failure}"
+    );
 }

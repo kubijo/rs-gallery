@@ -15,6 +15,15 @@ femtovg *args:
 plays:
     @scripts/demo-plays.sh
 
+# Record a scene headlessly into .tmp/record/<backend>/, e.g. `just demo::record femtovg mp4`.
+record backend='wgpu' format='apng' scene='orbit' rate='60:2':
+    @scripts/demo.sh {{ backend }} --scene {{ scene }} \
+        --render .tmp/record/{{ backend }}/{{ scene }}.png --record {{ rate }} --record-format {{ format }}
+
+# Record an animation in every video format, and the studio tour with its input shown, on both backends.
+recordings:
+    @scripts/demo-recordings.sh
+
 # Browse the shell's own components — every state of the chrome gallery draws around a scene.
 shell-scenes *args:
     @cargo run --example shell-scenes --features shell-scenes {{ args }}

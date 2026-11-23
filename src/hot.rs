@@ -37,6 +37,25 @@ const LIVE: Duration = Duration::from_millis(100);
 /// where it cannot hard-link it, and a copy is not atomic.
 const SETTLE: Duration = Duration::from_millis(200);
 
+/// The directory cargo builds the running executable's
+/// profile into, where the scenes dylib lands.
+/// A test binary sits a level down, in `deps/`.
+///
+/// # Errors
+/// If the executable path can't be read, has no parent, or is not UTF-8.
+pub(crate) fn profile_dir() -> Result<camino::Utf8PathBuf, Box<dyn std::error::Error>> {
+    let exe = camino::Utf8PathBuf::from_path_buf(std::env::current_exe()?)
+        .map_err(|_| "executable path is not UTF-8")?;
+    let dir = exe
+        .parent()
+        .ok_or("current executable has no parent directory")?;
+    Ok(match dir.file_name() {
+        Some("deps") => dir.parent().unwrap_or(dir),
+        _ => dir,
+    }
+    .to_owned())
+}
+
 /// A [`SceneSource`] reading scenes from the dylib the launcher builds: it exports
 /// `__gallery_manifest() -> Manifest`, and a rebuild is opened over it. The dylib directory comes
 /// from the running executable, so it follows any `CARGO_TARGET_DIR`. Both sides must share one
@@ -92,11 +111,7 @@ impl HotDylib {
     /// # Errors
     /// If the executable path can't be read, or the dylib can't be opened from that directory.
     pub fn new(lib_name: &str, watching: bool) -> Result<Self, Box<dyn std::error::Error>> {
-        let exe = std::env::current_exe()?;
-        let dir = exe
-            .parent()
-            .ok_or("current executable has no parent directory")?;
-        let dir = camino::Utf8Path::from_path(dir).ok_or("executable path is not UTF-8")?;
+        let dir = profile_dir()?;
         let mut scenes = Self {
             loaded: ManuallyDrop::new(Vec::new()),
             dylib: dir.join(format!("{PREFIX}{lib_name}.{EXTENSION}")),

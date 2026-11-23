@@ -46,7 +46,7 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
         }
         self.harness.input_mut().events.extend(events);
         // With nothing queued on the harness, `step` draws exactly one frame.
-        self.harness.step();
+        step(self.harness)?;
         match self.harness.state_mut().global_write_error.take() {
             Some(error) => Err(error),
             None => Ok(()),
@@ -111,6 +111,10 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
         let path = dir.join(format!("{:02}-{}.png", index + 1, step_file_stem(label)));
         write_png(&image, &path)?;
         Ok(Some(landed(&path)))
+    }
+
+    fn end_step(&mut self) -> Result<(), String> {
+        hold(self.harness)
     }
 }
 

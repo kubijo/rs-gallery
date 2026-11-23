@@ -125,6 +125,43 @@ pub(super) struct RecipeShot {
     /// A play to run on the scene before it is captured.
     play: Option<String>,
     trace: Option<Trace>,
+    /// A recording beside the shot's PNG.
+    record: Option<RecipeRecord>,
+    /// When to keep a play's recording: `on` unless set.
+    video: Option<Trace>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipeRecord {
+    fps: u16,
+    /// How long a shot without a play records;
+    /// a play shot records the play.
+    seconds: Option<f32>,
+    #[serde(default)]
+    format: VideoFormat,
+    /// Seconds a play's recording pauses at each step's end.
+    hold: Option<f32>,
+    /// The play's input on the recording: `true`,
+    /// or the corner its panel sits in.
+    input: Option<RecipeInput>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum RecipeInput {
+    On(bool),
+    In(Corner),
+}
+
+impl RecipeInput {
+    fn corner(&self) -> Option<Corner> {
+        match self {
+            Self::On(true) => Some(Corner::default()),
+            Self::On(false) => None,
+            Self::In(corner) => Some(*corner),
+        }
+    }
 }
 
 /// Read a capture recipe into the shots it describes,
@@ -182,6 +219,28 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
             }
             let scale = shot.scale.or(recipe.scale).unwrap_or(DEFAULT_SCALE);
             check_scale(scale).map_err(|e| format!("shot `{}`: {e}", shot.name))?;
+            if shot.video.is_some() && shot.record.is_none() {
+                return Err(format!(
+                    "shot `{}` sets `video`, which keeps a recording, but has no `record`",
+                    shot.name
+                ));
+            }
+            let record = shot
+                .record
+                .as_ref()
+                .map(|record| {
+                    let record = Record {
+                        fps: record.fps,
+                        seconds: record.seconds,
+                        keep: shot.video.unwrap_or(Trace::On),
+                        format: record.format,
+                        hold: record.hold,
+                        input: record.input.as_ref().and_then(RecipeInput::corner),
+                    };
+                    record.check(shot.play.is_some()).map(|()| record)
+                })
+                .transpose()
+                .map_err(|e| format!("shot `{}`: {e}", shot.name))?;
             Ok(Shot {
                 scene: shot.scene.clone(),
                 out: Some(base.join(format!("{}.png", shot.name))),
@@ -217,7 +276,9 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                 play: shot.play.clone().map(|name| ShotPlay {
                     name,
                     trace: shot.trace.or(recipe.trace).unwrap_or_default(),
+                    steps: false,
                 }),
+                record,
             })
         })
         .collect::<Result<Vec<_>, String>>()

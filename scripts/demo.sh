@@ -63,11 +63,6 @@ if [ "$variant" = femtovg ]; then
     sed -i -e '/^\[dependencies\]/a femtovg = "0.20.4"' -e '/^\[dependencies\]/a glow = "0.16"' \
         "$demo/Cargo.toml"
     cp "$repo/scripts/offscreen.scene.rs" "$demo/offscreen.scene.rs"
-
-    # Surface the mismatch before launching: every glow version the dependency graph resolved.
-    echo "demo: glow versions in this binary, bridged only by the GL loader:" >&2
-    cargo tree --manifest-path "$demo/Cargo.toml" 2>/dev/null \
-        | grep -oE '\bglow v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | sed 's/^/  /' >&2
 fi
 
 # Scene files the template doesn't ship, for a run that needs them (`just demo::plays`).

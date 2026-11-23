@@ -54,8 +54,9 @@ so a minor release may carry a breaking change.
   `expect_action` checks what the scene reported; `set_knob` holds a knob over the recipe.
 
 - **Captures run plays.** `[[shot]] play = "name"` and `--play NAME` capture the state a play leaves behind — hover,
-  focus, typed text, which no knob can set. The report lists each step and its frames. A failing play keeps a screenshot
-  per step beside the shot (`trace = "on"` keeps them always), and the instance justfile gains `just play`.
+  focus, typed text, which no knob can set. The report lists each step and its frames, and so does the terminal, under
+  the summary: for a single `--play` always, for a recipe's plays with `--steps`. A failing play keeps a screenshot per
+  step beside the shot (`trace = "on"` keeps them always), and the instance justfile gains `just play`.
 
 - **A failed play does not stop the run.** The other shots still run; the summary marks each shot passed or failed, each
   failure follows in a numbered panel pointing at the play's own line, and the run exits non-zero. The report's
@@ -76,6 +77,15 @@ so a minor release may carry a breaking change.
   `just demo::wgpu`, `femtovg`, `plays` and `shell-scenes`; `just tag` and `just release-check` are `just release::tag`
   and `just release::check`.
 
+- **Recordings.** A shot's `record = { fps, seconds }`, or `--record FPS:SECONDS`, writes what it draws beside its PNG;
+  on a play shot, `record = { fps }` records the whole play, and `video = "retain-on-failure"` keeps it only when the
+  play fails, while pausing `hold` seconds (0.5 unless set) on each step's end so it can be followed, and with
+  `input = true` (`--record-input`) shows the play's keys, mouse buttons and pointer over it; the template's new
+  `studio` scene carries a play touching it with every kind of input to show that on. Frame *n* is drawn at exactly *n*
+  / fps. The default APNG is lossless and byte-identical between runs; `format = "mp4"` (`--record-format mp4`) writes a
+  seekable H.264 MP4. The report and the summary name each recording, and the report adds what a frame cost to draw,
+  capture and encode.
+
 - **Dependencies.** usvg 0.50 and notify 9, and the lockfile refreshed. kittest stays on 0.4 until the egui upgrade, as
   egui_kittest 0.36 is built on it.
 
@@ -83,6 +93,15 @@ so a minor release may carry a breaking change.
   yaml-rust, both now flagged unmaintained; the line still shows, marked where it failed. The audit excuses zbus's
   merged-away crates until the egui upgrade replaces them, and states its unmaintained scope so cargo-deny versions
   agree.
+
+- **Catalog tests.** `gallery::test_main!(renderer)` in a `harness = false` test makes every scene a `smoke::<scene>`
+  test and every play a `play::<scene>::<name>` test, run through the same scenes dylib the window loads; `just test` in
+  the template runs them. To add it to an existing instance, copy `tests/scenes.rs` and its `[[test]]` entry from the
+  template.
+
+- **A panicking scene no longer takes everything down.** `#[scene]` catches the panic in the scenes dylib, where it was
+  raised: the window shows it in place of the scene, a capture fails just that shot, and a test just that scene's test,
+  each naming the scene's own line.
 
 ## [0.16.0] - 2026-10-26
 
