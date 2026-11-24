@@ -11,6 +11,9 @@ format *args:
 validate:
     @just in-shell validate
     @just demo::plays
+    @if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then on='{{ BOLD + GREEN }}' off='{{ NORMAL }}'; fi; \
+        printf '\n%s✓ validate passed%s: formatting, lint, clippy, tests and the demo plays\n' "${on:-}" "${off:-}" >&2; \
+        printf '  the failures shown above are the plays meant to fail, and each failed as meant\n' >&2
 
 # Take the current renders as the committed references in `tests/snapshots/` — look at them first.
 snapshots:

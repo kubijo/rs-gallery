@@ -312,7 +312,8 @@ The image is the canvas alone — no sidebar, controls or header — so it stays
 
 A size is where the scene lays itself out, not a crop of the result. A scene that comes out bigger than the size asked
 for — a wide table, a tall list — is captured whole, at the size it turned out to need, rather than cut off at the edge
-the way the window would scroll it.
+the way the window would scroll it. The popups and windows over it count as drawn too, so a menu left open is in the
+picture.
 
 A size is in points, the unit a window lays out in; `scale` says how many device pixels go to one of them, as a
 display's scale factor does. `--scale 2` is what a HiDPI screen shows: the same layout at four times the pixels. It
@@ -465,6 +466,8 @@ anything else is one of googletest's matchers, re-exported as `gallery::matchers
 report an action through `gallery::action`. A failure says what was expected, what was found, and points at the line; a
 plain `assert!` still fails its step, without the two.
 
+### Capturing a play
+
 A shot captures the state a play leaves behind:
 
 ```bash
@@ -492,11 +495,102 @@ screenshot after every step in a directory beside the shot, `renders/saved.steps
 `trace = "on"` keeps for a passing play too. The run exits non-zero. The report's `play` gives its `steps` and its whole
 `log`, each check with what it expected and found; `failed_shots` adds the `check` that failed.
 
+A capture makes pictures and recordings, at whatever size, scale and knobs its shots ask for. What a play expects still
+has to hold, as that is also how a play waits; its [snapshots](#comparing-screenshots) are not compared, and its log
+says so.
+
 Screenshots show the pointer where the play left it, as `egui_kittest` draws it. It stays in the final shot too: the
 hover it marks is the state a hover play exists to capture.
 
 [`form.scene.rs`](template/form.scene.rs) and [`keyboard.scene.rs`](template/keyboard.scene.rs) carry plays to start
 from.
+
+### Comparing screenshots
+
+In the [catalog's tests](#testing-a-catalog), `p.expect(Canvas)` checks the canvas against a reference image — the
+scene's content and any popup or window over it. A canvas too small for them grows to hold them, and the play goes on
+with it grown:
+
+```rust
+p.expect(Canvas).to_match_screenshot("saved")?;
+p.expect(Canvas).to_match_screenshot(Screenshot::named("menu-open").tolerance(400))?;
+```
+
+References sit beside the play's file, by module, play and the check's name, one per renderer, since wgpu and glow never
+draw a pixel alike: `__snapshots__/form/saves_after_a_moment/saved.wgpu.png`. The check's name is lower-cased and
+dashed, `"Menu open"` as `menu-open`; the module and the play are as written. Of two scene files with one name the
+second in the build is numbered, as `form_1`, so adding or renaming one can move the other's references. The tests run
+every play at 1280×720 and scale 1 with the scene's own knobs, so a reference means one thing.
+
+A canvas that already matches passes without drawing a frame. Otherwise frames are drawn until the scene stops asking
+for them, as a shot's `settle` does, and that frame is judged. A canvas not settled when the wait budget runs out is
+judged as it is, says so, and is never taken as a reference: a scene that animates for ever can only pass against one it
+already has.
+
+A check with no reference yet fails, as does one that differs past its budget, and leaves what it saw as
+`saved.wgpu.new.png`, with a `.diff.png` marking each pixel that differs in red over the reference in grey. Look at it,
+then take it with `UPDATE_SNAPSHOTS=1 just test`; `UPDATE_SNAPSHOTS=force` retakes every reference that differs at all,
+within budget or not. The variable takes the values `egui_kittest` gives it. A catalog ignores the leftovers with
+`**/__snapshots__/**/*.new.*` and `**/__snapshots__/**/*.diff.*` in its `.gitignore`.
+
+The budget is set once in `gallery.toml`, and per renderer over it; a check's own `Screenshot` outranks both:
+
+```toml
+[snapshots]
+threshold = 0.1 # how far apart two pixels' colours may be and still count as alike, 0 to 1; the default
+tolerance = 0 # how many pixels may differ; the default
+
+[snapshots.wgpu]
+tolerance = 200 # GPUs differ from each other and from CI's software Vulkan
+```
+
+A pixel that differs only as antialiasing does is not counted, and is yellow in the diff; `threshold = 0` counts every
+pixel. A failure says what the comparison came to, `312 pixels differ, 400 allowed`, and lists the reference, what was
+seen and the diff.
+
+### Comparing what a scene says
+
+An AccessKit snapshot compares the accessibility tree instead: what the scene says rather than how it is drawn. Colours,
+fonts and drivers leave it alone, and a change reads as lines in a review. It is of the canvas, or of one widget and
+what is inside it:
+
+```rust
+p.expect(Canvas).to_match_accesskit_snapshot("saved")?;
+p.expect("Settings").to_match_accesskit_snapshot("settings")?; // a window, by its title
+```
+
+The reference is JSON in the shape `egui_inspection_tools` gives a tree for `egui_mcp`, without its ids and with the
+states it leaves out, named as AccessKit names them:
+
+```json
+[
+  {
+    "role": "TextInput",
+    "label": "Name",
+    "value": "Ada",
+    "focused": true
+  },
+  {
+    "role": "Window",
+    "label": "Settings",
+    "children": [
+      {
+        "role": "CheckBox",
+        "label": "Newsletter",
+        "toggled": "True"
+      }
+    ]
+  }
+]
+```
+
+A widget may also have `numeric_value` with its `min_` and `max_`, `selected`, `expanded`, `disabled`, `read_only`,
+`required`, `placeholder` and `description`. What groups others and says nothing itself, what is hidden, and a window's
+resize handles are left out.
+
+It waits, fails and is taken as a screenshot is, into `saved.accesskit.json`, one for both renderers; a formatter may
+lay it out as it likes. A failure shows the lines that changed, and `.diff.txt` keeps them. `.not()` has no meaning for
+it and fails.
 
 ## Recording
 

@@ -40,6 +40,12 @@ name = "tasks-cleared"
 scene = "todo"
 play = "clears_done_tasks"
 
+# Its snapshot differs, which is the business of the catalog's tests and not of a capture.
+[[shot]]
+name = "tasks-not-compared"
+scene = "todo"
+play = "differs_from_its_reference"
+
 # Each of these fails on purpose, in its own way; see their doc comments in plays.scene.rs.
 [[shot]]
 name = "fails-ambiguous-label"

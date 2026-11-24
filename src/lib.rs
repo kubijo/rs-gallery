@@ -103,8 +103,8 @@ use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
 pub use play::__run_play;
 pub use play::{
-    By, DEFAULT_WAIT_FRAMES, DRAG_FRAMES, Expect, Expected, Found, Numeric, Play, PlayEntry,
-    PlayError, PlayResult, SCROLL_FRAMES, SceneKey,
+    By, Canvas, DEFAULT_WAIT_FRAMES, DRAG_FRAMES, Expect, ExpectCanvas, Expected, Found, Numeric,
+    Play, PlayEntry, PlayError, PlayResult, SCROLL_FRAMES, SceneKey, Screenshot, Subject,
 };
 
 /// googletest's matchers, for what a play expects of a value: `eq`, `contains_substring`,
@@ -127,10 +127,10 @@ pub mod prelude {
     pub use egui::{Key, Modifiers, accesskit::Role};
 
     pub use crate::{
-        By, CatalogGlobals, Checkerboard, GlobalControls, GlobalKey, Icon, ImageInput, Knob,
-        MSAA_SAMPLES, Offscreen, PADDING, Pad2D, Pad2DSpec, Play, PlayResult, Pointer, SceneCtx,
-        SceneEntry, ScenePass, SceneRevision, Stage, StageSpec, StageTexture, action, egui, play,
-        scene, scene_meta, stage,
+        By, Canvas, CatalogGlobals, Checkerboard, GlobalControls, GlobalKey, Icon, ImageInput,
+        Knob, MSAA_SAMPLES, Offscreen, PADDING, Pad2D, Pad2DSpec, Play, PlayResult, Pointer,
+        SceneCtx, SceneEntry, ScenePass, SceneRevision, Screenshot, Stage, StageSpec, StageTexture,
+        action, egui, play, scene, scene_meta, stage,
     };
 }
 

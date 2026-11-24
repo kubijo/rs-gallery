@@ -302,6 +302,7 @@ fn reference_plays() -> Vec<PlayEntry> {
         },
         name: "hover_it",
         module_path: "reference",
+        file: file!(),
         run: hover_it,
     }]
 }

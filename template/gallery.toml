@@ -5,3 +5,11 @@ scene_globs = ["{{scene_globs}}"]
 # Extra hot-reload files or directories, relative to this file.
 # hot_watch_paths = ["../shared/assets"]
 title = "{{title}}"
+
+# How far a play's screenshot may stray from its reference: `threshold` is how far apart two pixels' colours may be and
+# still count as alike (0 to 1), `tolerance` how many pixels may differ. A table per renderer sets its own over these.
+# [snapshots]
+# threshold = 0.1
+# tolerance = 0
+# [snapshots.wgpu]
+# tolerance = 200

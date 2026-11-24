@@ -245,6 +245,7 @@ pub fn play(attr: TokenStream, item: TokenStream) -> TokenStream {
                 scene: #scene,
                 name: #name,
                 module_path: ::core::module_path!(),
+                file: ::core::file!(),
                 run: #guarded,
             }
         }

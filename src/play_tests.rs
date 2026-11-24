@@ -14,6 +14,7 @@ use crate::{
 };
 
 mod matchers;
+mod screenshots;
 
 /// A fresh directory of this test's own.
 fn scratch(name: &str) -> Utf8PathBuf {
@@ -96,6 +97,7 @@ fn catalog(
             },
             name,
             module_path: "plays",
+            file: file!(),
             run,
         })
         .collect();
@@ -1062,6 +1064,99 @@ fn a_play_writes_the_same_bytes_twice() {
         run("same-once") == run("same-twice"),
         "two runs of one play differ"
     );
+}
+
+/// A block of 60×20 pixels in a grey nothing else here is drawn in.
+fn marker(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(60.0, 20.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 0.0, egui::Color32::from_rgb(1, 200, 77));
+}
+
+/// Whether the PNG at `path` holds the whole [`marker`].
+fn holds_the_marker(path: &Utf8Path) -> bool {
+    let image = image::open(path).expect("a PNG").to_rgba8();
+    let marked = image
+        .pixels()
+        .filter(|pixel| pixel.0 == [1, 200, 77, 255])
+        .count();
+    marked == 60 * 20
+}
+
+#[test]
+fn a_popup_a_play_leaves_open_is_whole_in_the_shot_and_its_step_screenshots() {
+    fn menu(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.menu_button("Menu", |ui| {
+            _ = ui.button("Open");
+            marker(ui);
+        });
+    }
+    fn opens(p: &mut Play<'_>) -> PlayResult {
+        p.click("Menu")?;
+        p.step("the menu is open", |p| p.expect("Open").to_exist())
+    }
+    let (manifest, plays) = catalog(menu, &[("opens", opens)]);
+    let dir = scratch("popup");
+    let out = dir.join("shot.png");
+    capture(
+        &manifest,
+        &plays,
+        shot("plays::scene", &out, "opens", Trace::On),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    assert!(holds_the_marker(&out), "the shot");
+    let steps = dir.join("shot.steps");
+    let last = trace_files(&steps).pop().expect("a step");
+    assert!(holds_the_marker(&steps.join(&last)), "{last}");
+}
+
+#[test]
+fn a_window_is_captured_whole_where_it_stands_and_past_the_canvas() {
+    fn aside(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        egui::Window::new("Aside")
+            .fixed_pos([150.0, 120.0])
+            .show(ui.ctx(), marker);
+    }
+    fn tall(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        egui::Window::new("Tall")
+            .fixed_pos([0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.add_space(300.0);
+                marker(ui);
+            });
+    }
+    for (name, scene) in [("aside", aside as SceneFn), ("tall", tall)] {
+        let (manifest, plays) = catalog(scene, &[]);
+        let out = scratch(&format!("window-{name}")).join("shot.png");
+        let still = Shot {
+            play: None,
+            ..shot("plays::scene", &out, "", Trace::On)
+        };
+        capture(&manifest, &plays, still, None)
+            .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+        assert!(holds_the_marker(&out), "{name}");
+    }
+}
+
+#[test]
+fn a_window_parked_off_the_canvas_is_left_there() {
+    fn parked(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.label("Here");
+        egui::Area::new(egui::Id::new("parked"))
+            .fixed_pos([50_000.0, 50_000.0])
+            .constrain(false)
+            .show(ui.ctx(), |ui| ui.label("Away"));
+    }
+    let (manifest, plays) = catalog(parked, &[]);
+    let out = scratch("window-parked").join("shot.png");
+    let still = Shot {
+        play: None,
+        ..shot("plays::scene", &out, "", Trace::On)
+    };
+    capture(&manifest, &plays, still, None).unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let image = image::open(&out).expect("a PNG");
+    assert!(image.width() < 320, "{}×{}", image.width(), image.height());
 }
 
 #[test]

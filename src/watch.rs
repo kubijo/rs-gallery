@@ -425,12 +425,22 @@ fn watch_roots(paths: &[Utf8PathBuf]) -> Vec<WatchRoot> {
 ///
 /// Out: what cargo wrote (a directory the build writes into is one it would rebuild for ever),
 /// a repository's bookkeeping, which `git status` alone stirs,
+/// the references plays' snapshots are compared with, which no build reads,
 /// and what an editor leaves beside the file it is saving.
 ///
 /// Everything else rebuilds, `.rs` or not: a shader or an `include_bytes!` asset is a source too,
 /// a spare build costs a moment, and an edit that silently does nothing is what this exists to end.
 fn rebuilds_for(path: &Utf8Path) -> bool {
-    !gallery_build::build_output(path) && !repository(path) && !editor_debris(path)
+    !gallery_build::build_output(path)
+        && !repository(path)
+        && !references(path)
+        && !editor_debris(path)
+}
+
+/// Whether the path is inside a directory of references, or is one.
+fn references(path: &Utf8Path) -> bool {
+    path.components()
+        .any(|part| part.as_str() == crate::play::snapshot::DIR)
 }
 
 /// Whether the path is inside a version control system's own storage.
@@ -916,6 +926,13 @@ mod tests {
                  would rebuild for itself"
             );
         }
+    }
+
+    #[test]
+    fn a_reference_taken_by_a_test_rebuilds_nothing() {
+        let taken = "src/__snapshots__/form/saves/saved.wgpu.new.png";
+        assert!(!rebuilds_for(Utf8Path::new(taken)));
+        assert!(!rebuilds_for(Utf8Path::new("src/__snapshots__")));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! One shot: draw the scene, settle it under its overrides, run its play, fit and capture it.
 
 use super::*;
+use crate::style::Stream;
 
 /// Draw `scene` at `size`, applying the shot's knobs as the frames go by.
 ///
@@ -90,12 +91,13 @@ pub(crate) struct Frames {
     pub(crate) motion: Motion,
 }
 
-/// Frames that must ask for no repaint before a `settle` shot calls the scene still.
+/// Frames that must ask for no repaint before a `settle` shot
+/// or a snapshot check calls the scene still.
 ///
 /// More than one because the signal belongs to the egui context rather than to the scene:
 /// a one-shot repaint from anything on the canvas would end the wait early on a scene
 /// still moving. Two consecutive quiet frames cost a frame and take that away.
-const QUIET_FRAMES: u32 = 2;
+pub(super) const QUIET_FRAMES: u32 = 2;
 
 /// Draw the frames a shot asks for, applying its overrides as they go by.
 ///
@@ -223,11 +225,21 @@ pub(super) struct Watch<'a> {
     pub(super) view: &'a mut LogView,
     /// What a play that stopped the shot did, for the run's report.
     pub(super) failed: Option<FailedShot>,
+    /// How to judge the play's snapshot checks. `None` in a capture, which makes pictures
+    /// at any size, scale and knobs: no reference means one of those.
+    pub(super) snapshots: Option<&'a Snapshots>,
+    /// Where a failure is reported.
+    pub(super) stream: Stream,
 }
 
 impl<'a> Watch<'a> {
     pub(super) fn new(view: &'a mut LogView) -> Self {
-        Self { view, failed: None }
+        Self {
+            view,
+            failed: None,
+            snapshots: None,
+            stream: Stream::Stderr,
+        }
     }
 }
 
@@ -287,6 +299,11 @@ pub(super) fn shoot_with_globals(
                 trace_dir: trace_dir.clone(),
                 bad_knob: None,
                 view: watch.view,
+                session,
+                size: &mut size,
+                looks: watch
+                    .snapshots
+                    .map(|snapshots| Looks::new(snapshots, session.renderer_name())),
             };
             let name = shot
                 .out
@@ -324,13 +341,22 @@ pub(super) fn shoot_with_globals(
                                 "found {}",
                                 check.actual.as_deref().unwrap_or("nothing matched")
                             ));
-                        match &check.explanation {
-                            Some(explanation) => report.cause(explanation),
+                        if let Some(explanation) = &check.explanation {
+                            report = report.cause(explanation);
+                        }
+                        match &check.kept {
+                            Some(kept) => with_kept(report, kept, watch.stream),
                             None => report,
                         }
                     }
                     None => report.cause(failure.reason()),
                 };
+                for path in run.log.iter().filter_map(Entry::taken) {
+                    report = report.hint(format!(
+                        "taken as a reference before it failed: {}",
+                        crate::style::path(path, watch.stream)
+                    ));
+                }
                 if !failure.on_screen().is_empty() {
                     report = report.cause(on_screen(failure.on_screen()));
                 }
@@ -351,13 +377,13 @@ pub(super) fn shoot_with_globals(
                 {
                     report = report.hint(format!(
                         "screenshots of each step are in {}",
-                        crate::style::path_on_stderr(&landed(dir))
+                        crate::style::path(&landed(dir), watch.stream)
                     ));
                 }
                 if !video_paths.is_empty() {
                     let paths: Vec<String> = video_paths
                         .iter()
-                        .map(|path| crate::style::path_on_stderr(path))
+                        .map(|path| crate::style::path(path, watch.stream))
                         .collect();
                     report =
                         report.hint(format!("the play is recorded in {}", paths.join(" and ")));
@@ -486,7 +512,7 @@ pub(super) fn shoot_with_globals(
         );
     }
     if let Some(out) = &shot.out {
-        let drawn = harness.state().wanted;
+        let drawn = drawn(&harness);
         let image = harness
             .render()
             .map_err(|reason| format!("render `{}`: {reason}", scene.name))?;
@@ -518,10 +544,85 @@ pub(super) fn shoot_with_globals(
     Ok(None)
 }
 
-/// What one shot came to: the PNG it wrote, and the image itself for a sheet that wants it.
+/// `report`, bound for `stream`, with what a failed snapshot check left to look at.
+pub(super) fn with_kept(mut report: Diagnostic, kept: &Kept, stream: Stream) -> Diagnostic {
+    if let Some(diff) = &kept.diff {
+        report = report.cause_as_is(diff_lines(diff));
+    }
+    for attachment in &kept.attachments {
+        report = report.hint(format!(
+            "{}: {}",
+            attachment.kind.name(),
+            crate::style::path(&attachment.path, stream)
+        ));
+    }
+    if kept.acceptance == Acceptance::Offered {
+        report = report.hint_apart("`UPDATE_SNAPSHOTS=1` takes what it saw as the reference");
+    }
+    report
+}
+
+/// A diff with its lines in their colours, cut where it would fill the screen.
+pub(super) fn diff_lines(diff: &str) -> String {
+    const MOST: usize = 40;
+    let coloured = |line: &str| {
+        let line = shown(line);
+        match line.chars().next() {
+            Some('-') => paint(AnsiColor::Red.on_default(), &line),
+            Some('+') => paint(AnsiColor::Green.on_default(), &line),
+            _ => line,
+        }
+    };
+    let mut lines: Vec<String> = diff.lines().take(MOST).map(coloured).collect();
+    match diff.lines().count().saturating_sub(MOST) {
+        0 => {}
+        1 => lines.push("… and 1 more line, in the diff".to_owned()),
+        left => lines.push(format!("… and {left} more lines, in the diff")),
+    }
+    lines.join("\n")
+}
+
+/// `text` with what a terminal would act on rather than show spelled out:
+/// control characters, and those that turn the direction of what follows.
+fn shown(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    for c in text.chars() {
+        let turns = matches!(
+            c,
+            '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        );
+        if c.is_control() || turns {
+            shown.extend(c.escape_unicode());
+        } else {
+            shown.push(c);
+        }
+    }
+    shown
+}
+
+/// What one shot came to: the PNG it wrote,
+/// and the image itself for a sheet that wants it.
 pub(super) struct ShotOutput {
     pub(super) written: OutputFile,
     pub(super) image: image::RgbaImage,
+}
+
+/// How far from the canvas's top left corner the scene drew, in points: its content,
+/// and the popups and windows over it, which egui keeps out of the content's size.
+/// One parked off the canvas, its edge on the canvas's own, is meant to be out of sight.
+pub(super) fn drawn(harness: &egui_kittest::Harness<'static, Canvas>) -> egui::Vec2 {
+    let content = harness.state().wanted;
+    let canvas = harness.ctx.content_rect();
+    harness.ctx.memory(|memory| {
+        memory
+            .areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|layer| layer.order != egui::Order::Background)
+            .filter_map(|layer| memory.area_rect(layer.id))
+            .filter(|area| area.intersect(canvas).is_positive())
+            .fold(content, |drawn, area| drawn.max(area.max.to_vec2()))
+    })
 }
 
 /// Grow the canvas to fit what the scene drew, then settle again.
@@ -536,8 +637,7 @@ fn fit(
     size: &mut egui::Vec2,
     frames: &mut Frames,
 ) -> Result<(), Diagnostic> {
-    let wanted = harness.state().wanted;
-    let fitting = egui::vec2(size.x.max(wanted.x.ceil()), size.y.max(wanted.y.ceil()));
+    let fitting = size.max(drawn(harness).ceil());
     if fitting != *size {
         session.validate_target(fitting, shot.scale)?;
         // Resized, not redrawn on a fresh harness: that would drop the GL context a scene cached
@@ -600,7 +700,7 @@ fn find_play<'p>(
 /// Crop the background a roomy `size` leaves around the canvas.
 ///
 /// The size stays as asked — `Fill` stages and any breakpoint lay out against it —
-/// so only the image is cut. `drawn` is what the canvas came to in points,
+/// so only the image is cut. `drawn` is in points,
 /// which `scale` turns into the pixels the crop is measured in.
 #[expect(
     clippy::cast_possible_truncation,
@@ -642,7 +742,7 @@ pub(super) struct Canvas {
     pub(super) wgpu: Option<eframe::egui_wgpu::RenderState>,
     /// This scene's cached `render_pass` targets, as the shell keeps them per scene.
     pub(super) passes: Vec<crate::PassTarget>,
-    /// What the last frame's canvas came to — the size a shot has to be at least as big as.
+    /// What the last frame's content came to, the popups and windows over it apart: see [`drawn`].
     pub(super) wanted: egui::Vec2,
     /// The first scene write to a catalog global that could not land, failing the shot.
     pub(super) global_write_error: Option<String>,

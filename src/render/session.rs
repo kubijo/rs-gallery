@@ -163,6 +163,15 @@ impl Session {
         }
     }
 
+    /// What a reference taken under this session is named for.
+    pub(crate) fn renderer_name(&self) -> &'static str {
+        match self {
+            #[cfg(not(target_vendor = "apple"))]
+            Self::Glow(_) => "glow",
+            Self::Wgpu(_) => "wgpu",
+        }
+    }
+
     /// The largest 2D texture/render-target side enabled on this run's actual backend.
     pub(crate) fn max_texture_dimension_2d(&self) -> u32 {
         match self {

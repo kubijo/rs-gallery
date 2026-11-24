@@ -25,10 +25,14 @@ use kittest::{AccessKitNode, NodeT, Queryable};
 
 mod expect;
 pub(crate) mod log;
+mod screenshot;
 mod shortcut;
+pub(crate) mod snapshot;
+pub(crate) mod tree;
 
-pub use expect::{Expect, Expected};
+pub use expect::{Expect, Expected, Subject};
 use log::{Check, Entry, Outcome, What};
+pub use screenshot::{Canvas, ExpectCanvas, Screenshot};
 
 /// The key of the scene a play drives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,6 +55,8 @@ pub struct PlayEntry {
     pub name: &'static str,
     /// Where the function is, to tell apart two plays of one name.
     pub module_path: &'static str,
+    /// The function's source file; its snapshot references sit beside it.
+    pub file: &'static str,
     pub run: fn(&mut Play<'_>) -> PlayResult,
 }
 
@@ -352,9 +358,12 @@ impl Found {
 /// Only host code can search the tree.
 pub(crate) trait PlayDriver {
     /// The widgets `by` matches in the last frame's tree.
-    fn query(&self, by: &By) -> Vec<Found>;
+    ///
+    /// # Errors
+    /// When the tree can't be read.
+    fn query(&self, by: &By) -> Result<Vec<Found>, String>;
 
-    /// Every non-empty label in the tree, for failure messages.
+    /// Every non-empty label in the tree, for failure messages; none when it can't be read.
     fn labels(&self) -> Vec<String>;
 
     /// Draw one frame with `events` as its input.
@@ -391,6 +400,19 @@ pub(crate) trait PlayDriver {
 
     /// The play's log entry `index` began, or ended as `entry` now says.
     fn logged(&mut self, index: usize, entry: &Entry);
+
+    /// Compare what `ask` is of, as it is now, with the reference it names.
+    ///
+    /// # Errors
+    /// When a screenshot cannot be taken, the check is misused,
+    /// its play or its name can name no reference, or the reference is already another check's.
+    fn compare(&mut self, ask: &snapshot::Ask<'_>) -> Result<snapshot::Look, String>;
+
+    /// The last [`compare`](Self::compare) is the check's verdict: write what it leaves behind.
+    ///
+    /// # Errors
+    /// When a file cannot be written.
+    fn keep(&mut self) -> Result<log::Kept, String>;
 }
 
 /// [`PlayDriver::query`] over a tree; host code only.
@@ -416,7 +438,9 @@ pub(crate) fn query_tree(root: AccessKitNode<'_>, pixels_per_point: f32, by: &By
                     step: node.numeric_value_step(),
                 }),
                 hidden: node.is_hidden(),
-                read_only: node.is_read_only(),
+                // Not the consumer's own `is_read_only`,
+                // which holds for every role that can't be edited.
+                read_only: node.data().is_read_only(),
                 required: node.is_required(),
                 description: node.description(),
                 placeholder: node.placeholder().map(str::to_owned),
@@ -494,6 +518,10 @@ fn points(bounds: Option<accesskit::Rect>, pixels_per_point: f32) -> egui::Rect 
 /// [`query`](Self::query), [`get`](Self::get) and their kin read the tree.
 pub struct Play<'d> {
     driver: &'d mut dyn PlayDriver,
+    /// The play's function, as its [`PlayEntry`] names it.
+    name: &'static str,
+    module_path: &'static str,
+    file: &'static str,
     frame: u32,
     actions: Vec<String>,
     log: Vec<Entry>,
@@ -564,6 +592,9 @@ pub fn __run_play(play: &mut Play<'_>, run: fn(&mut Play<'_>) -> PlayResult) -> 
 pub(crate) fn run(entry: &PlayEntry, driver: &mut dyn PlayDriver) -> PlayRun {
     let mut play = Play {
         driver,
+        name: entry.name,
+        module_path: entry.module_path,
+        file: entry.file,
         frame: 0,
         actions: Vec::new(),
         log: Vec::new(),
@@ -708,31 +739,28 @@ impl Play<'_> {
         })
     }
 
-    /// Log a finished check, and fail with it unless it `passed`.
+    /// Log a finished check, and fail with it when its `outcome` is a failure.
     /// `nothing_matched` puts the labels on screen into the failure.
     fn checked(
         &mut self,
         check: Check,
         start: u32,
         at: &Location<'_>,
-        passed: bool,
+        outcome: impl Into<Outcome>,
         nothing_matched: bool,
     ) -> PlayResult {
+        let outcome = outcome.into();
         self.log.push(Entry {
             depth: self.open.len(),
             frames: start..self.frame,
             at: Some(at.into()),
-            outcome: Some(if passed {
-                Outcome::Passed
-            } else {
-                Outcome::Failed
-            }),
+            outcome: Some(outcome),
             trace: None,
             what: What::Check(Box::new(check.clone())),
         });
         let index = self.log.len() - 1;
         self.driver.logged(index, &self.log[index]);
-        if passed {
+        if outcome != Outcome::Failed {
             return Ok(());
         }
         let mut error = PlayError::new(check.summary()).located(at);
@@ -743,19 +771,32 @@ impl Play<'_> {
         Err(error)
     }
 
+    /// The widgets `by` matches, or a panic that fails the play with why they can't be read.
+    #[track_caller]
+    fn matches(&self, by: &By) -> Vec<Found> {
+        self.driver
+            .query(by)
+            .unwrap_or_else(|reason| panic::panic_any(Missed(PlayError::new(reason))))
+    }
+
     /// Every widget `by` matches.
+    ///
+    /// # Panics
+    /// When the accessibility tree can't be read; inside a step, that fails the step.
+    #[track_caller]
     pub fn query_all(&self, by: impl Into<By>) -> Vec<Found> {
-        self.driver.query(&by.into())
+        self.matches(&by.into())
     }
 
     /// The widget `by` matches, if any.
     ///
     /// # Panics
-    /// When it matches several; inside a step, that fails the step.
+    /// When it matches several, or the accessibility tree can't be read;
+    /// inside a step, that fails the step.
     #[track_caller]
     pub fn query(&self, by: impl Into<By>) -> Option<Found> {
         let by = by.into();
-        let mut found = self.driver.query(&by);
+        let mut found = self.matches(&by);
         if found.len() > 1 {
             panic::panic_any(Missed(PlayError::new(format!(
                 "{} widgets match {by}; narrow it with a role or an exact label",
@@ -768,7 +809,8 @@ impl Play<'_> {
     /// The one widget `by` matches.
     ///
     /// # Panics
-    /// When it matches none or several; inside a step, that fails the step.
+    /// When it matches none or several, or the accessibility tree can't be read;
+    /// inside a step, that fails the step.
     #[track_caller]
     pub fn get(&self, by: impl Into<By>) -> Found {
         let by = by.into();
@@ -829,6 +871,7 @@ impl Play<'_> {
                     }),
                     explanation: None,
                     message: None,
+                    kept: None,
                 };
                 return self
                     .checked(check, start, at, held, true)
@@ -1084,8 +1127,12 @@ impl Play<'_> {
     fn locate(&mut self, by: &By) -> Result<Found, PlayError> {
         let mut waited = 0;
         loop {
-            let mut found = self.driver.query(by);
             // None and several are both waited out: a list redrawing can show two for a frame.
+            let mut found = match self.driver.query(by) {
+                Ok(found) => found,
+                Err(_) if waited < self.wait_frames => Vec::new(),
+                Err(reason) => return Err(PlayError::new(reason)),
+            };
             match found.len() {
                 1 => return Ok(found.remove(0)),
                 _ if waited < self.wait_frames => {

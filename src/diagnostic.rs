@@ -2,7 +2,7 @@
 //!
 //! The fix is usually one of a handful of names the program already knows, so a [`Diagnostic`] keeps
 //! them as a list rather than flattening them into a sentence.
-//! miette lays the report out, detecting colour, unicode, hyperlink and width support on stderr.
+//! miette lays the report out, as the stream it is bound for can show it.
 
 use std::{
     fmt,
@@ -16,7 +16,7 @@ use miette::{
 };
 use textwrap::{WordSeparator, WordSplitter};
 
-use crate::style::paint;
+use crate::style::{Stream, paint};
 
 /// What went wrong, why, which names were in play, and what to do about it.
 pub(crate) struct Diagnostic {
@@ -67,8 +67,14 @@ impl Diagnostic {
     }
 
     /// Why it happened, shown beneath the headline; each call adds a line.
-    pub(crate) fn cause(mut self, cause: impl Into<String>) -> Self {
-        self.causes.push(cause.into());
+    pub(crate) fn cause(self, cause: impl Into<String>) -> Self {
+        let cause = highlight(&cause.into());
+        self.cause_as_is(cause)
+    }
+
+    /// A [`cause`](Self::cause) whose backticks are its own, not around names.
+    pub(crate) fn cause_as_is(mut self, cause: String) -> Self {
+        self.causes.push(cause);
         self
     }
 
@@ -102,6 +108,12 @@ impl Diagnostic {
         self
     }
 
+    /// A [`hint`](Self::hint) set apart from those before it by an empty line.
+    pub(crate) fn hint_apart(self, hint: &str) -> Self {
+        let gap = if self.hints.is_empty() { "" } else { "\n" };
+        self.hint(format!("{gap}{hint}"))
+    }
+
     fn render(&self, handler: &dyn ReportHandler) -> String {
         struct Rendered<'a>(&'a dyn ReportHandler, &'a Report);
         impl fmt::Display for Rendered<'_> {
@@ -114,7 +126,7 @@ impl Diagnostic {
             message.push_str("\n  ");
             message.push_str(&highlight(name));
         }
-        let mut causes: Vec<String> = self.causes.iter().map(|cause| highlight(cause)).collect();
+        let mut causes = self.causes.clone();
         let source = self.source.as_ref().and_then(|source| {
             let shown = source.read();
             if shown.is_none() {
@@ -151,8 +163,13 @@ impl Diagnostic {
     pub(crate) fn report(&self) {
         // stdout goes first: anything still in its buffer would otherwise surface after the report.
         let _ = std::io::stdout().flush();
-        let (text, edge) = self.for_terminal();
-        anstream::eprintln!("\n{}", crate::style::panel(None, &text, edge, 0));
+        anstream::eprintln!("\n{}", self.panel(Stream::Stderr));
+    }
+
+    /// The report in its panel, styled for `stream`.
+    pub(crate) fn panel(&self, stream: Stream) -> String {
+        let (text, edge) = self.for_terminal(stream);
+        crate::style::panel(None, &text, edge, 0)
     }
 
     /// Report each of `titled` in its own panel, its title set into the top edge,
@@ -160,7 +177,7 @@ impl Diagnostic {
     pub(crate) fn report_all(titled: &[(String, &Self)]) {
         let rendered: Vec<(String, Style)> = titled
             .iter()
-            .map(|(_, diagnostic)| diagnostic.for_terminal())
+            .map(|(_, diagnostic)| diagnostic.for_terminal(Stream::Stderr))
             .collect();
         let titles = titled
             .iter()
@@ -178,19 +195,28 @@ impl Diagnostic {
         }
     }
 
-    /// The report as stderr shows it, and the colour of the edge framing it.
-    fn for_terminal(&self) -> (String, Style) {
-        let terminal = std::io::stderr().is_terminal();
+    /// The report as `stream` shows it, and the colour of the edge framing it.
+    fn for_terminal(&self, stream: Stream) -> (String, Style) {
+        let (terminal, size) = match stream {
+            Stream::Stdout => (
+                std::io::stdout().is_terminal(),
+                terminal_size::terminal_size_of(std::io::stdout()),
+            ),
+            Stream::Stderr => (
+                std::io::stderr().is_terminal(),
+                terminal_size::terminal_size_of(std::io::stderr()),
+            ),
+        };
         let mut options = MietteHandlerOpts::new()
             .force_graphical(true)
+            .color(crate::style::coloured(stream))
+            .terminal_links(supports_hyperlinks::on(stream))
             .wrap_lines(terminal)
             .break_words(false)
             .word_separator(WordSeparator::AsciiSpace)
             .word_splitter(WordSplitter::NoHyphenation);
         // The panel's borders and padding take four columns of the terminal's width.
-        if let Some((terminal_size::Width(columns), _)) =
-            terminal_size::terminal_size_of(std::io::stderr()).filter(|_| terminal)
-        {
+        if let Some((terminal_size::Width(columns), _)) = size.filter(|_| terminal) {
             options = options.width(usize::from(columns).saturating_sub(4));
         }
         let colour = match self.severity {
@@ -427,6 +453,35 @@ mod tests {
         assert_eq!(
             diagnostic.summary(),
             "play `p` failed; knob `gain` never landed; screenshots are in /tmp/trace"
+        );
+    }
+
+    #[test]
+    fn a_hint_set_apart_has_an_empty_line_above_it_unless_it_is_the_first() {
+        let first = Diagnostic::new("it differs").hint_apart("`UPDATE=1` takes it");
+        assert_eq!(
+            first.plain(),
+            indoc! {"
+                × it differs
+                help: `UPDATE=1` takes it"}
+        );
+        let later = Diagnostic::new("it differs")
+            .hint("actual: a.png")
+            .hint_apart("`UPDATE=1` takes it");
+        let plain = later.plain();
+        let lines: Vec<&str> = plain.lines().map(str::trim).collect();
+        assert_eq!(
+            lines,
+            [
+                "× it differs",
+                "help: actual: a.png",
+                "",
+                "`UPDATE=1` takes it"
+            ]
+        );
+        assert_eq!(
+            later.summary(),
+            "it differs; actual: a.png; `UPDATE=1` takes it"
         );
     }
 

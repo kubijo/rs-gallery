@@ -85,6 +85,61 @@ fn step(label: &str) -> What {
 }
 
 #[test]
+fn a_diff_is_coloured_cut_where_it_would_fill_the_screen_and_acts_on_no_terminal() {
+    let shown = diff_lines("-old `a\n+new\n same\n");
+    assert!(shown.contains("\u{1b}[31m-old `a"), "{shown:?}");
+    assert!(shown.contains("\u{1b}[32m+new"), "{shown:?}");
+    assert!(shown.ends_with("\n same"), "{shown:?}");
+
+    let long = "+line\n".repeat(42);
+    let shown = style::plain(&diff_lines(&long));
+    assert_eq!(shown.lines().count(), 41);
+    assert!(
+        shown.ends_with("… and 2 more lines, in the diff"),
+        "{shown}"
+    );
+    let shown = style::plain(&diff_lines(&"+line\n".repeat(41)));
+    assert!(shown.ends_with("… and 1 more line, in the diff"), "{shown}");
+
+    assert_eq!(
+        diff_lines(" \u{9b}31m \u{202e}rtl"),
+        " \\u{9b}31m \\u{202e}rtl"
+    );
+}
+
+#[test]
+fn a_diffs_backticks_are_its_own() {
+    let kept = Kept {
+        diff: Some(" `name`\n".to_owned()),
+        ..Kept::default()
+    };
+    let stream = style::Stream::Stderr;
+    let panel = with_kept(Diagnostic::new("it differs"), &kept, stream).panel(stream);
+    assert!(panel.contains(" `name`"), "{panel:?}");
+}
+
+#[test]
+fn a_skipped_check_says_why() {
+    let check = crate::play::log::Check {
+        subject: "canvas".to_owned(),
+        matcher: "to_match_screenshot",
+        negated: false,
+        expected: "matches screenshot \"saved\"".to_owned(),
+        actual: Some("not compared in a capture".to_owned()),
+        explanation: None,
+        message: None,
+        kept: None,
+    };
+    let mut skipped = entry(0, 0..0, true, What::Check(Box::new(check)));
+    skipped.outcome = Some(Outcome::Skipped);
+    let list = style::plain(&step_list("shot", "play", &[skipped], false));
+    assert!(
+        list.contains("– canvas matches screenshot \"saved\"  not compared in a capture"),
+        "{list}"
+    );
+}
+
+#[test]
 fn a_plays_log_lists_steps_gestures_and_checks_as_a_tree_with_the_failure_marked() {
     let saved = crate::play::log::Check {
         subject: "\"Saved\"".to_owned(),
@@ -94,6 +149,7 @@ fn a_plays_log_lists_steps_gestures_and_checks_as_a_tree_with_the_failure_marked
         actual: None,
         explanation: None,
         message: None,
+        kept: None,
     };
     let log = [
         entry(0, 0..3, true, step("open")),

@@ -22,6 +22,59 @@ pub struct Config {
     pub globs: Vec<String>,
     /// Extra hot-reload paths.
     pub hot_watch_paths: Vec<Utf8PathBuf>,
+    pub snapshots: Snapshots,
+}
+
+/// `[snapshots]`: how far a screenshot check lets a frame stray
+/// from its reference, with a table per renderer over the catalog's own.
+#[derive(Clone, Copy, Default, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshots {
+    pub threshold: Option<f32>,
+    pub tolerance: Option<u32>,
+    #[serde(default)]
+    pub wgpu: Budget,
+    #[serde(default)]
+    pub glow: Budget,
+}
+
+/// What a screenshot check lets through; unset leaves it to the table above.
+#[derive(Clone, Copy, Default, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Budget {
+    /// How far apart two pixels' colours may be
+    /// and still count as alike, from 0 to 1.
+    pub threshold: Option<f32>,
+    /// How many pixels may differ.
+    pub tolerance: Option<u32>,
+}
+
+impl Snapshots {
+    /// The catalog's own budget, under any renderer's.
+    #[must_use]
+    pub fn budget(&self) -> Budget {
+        Budget {
+            threshold: self.threshold,
+            tolerance: self.tolerance,
+        }
+    }
+
+    fn check(&self) -> Result<(), String> {
+        for (table, budget) in [
+            ("[snapshots]", self.budget()),
+            ("[snapshots.wgpu]", self.wgpu),
+            ("[snapshots.glow]", self.glow),
+        ] {
+            if let Some(threshold) = budget.threshold
+                && !(0.0..=1.0).contains(&threshold)
+            {
+                return Err(format!(
+                    "{table} threshold is {threshold}; it is a colour distance from 0 to 1"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The file's own shape, before the paths in it mean anything.
@@ -32,6 +85,8 @@ struct Declared {
     hot_watch_paths: Vec<Utf8PathBuf>,
     #[serde(default = "default_title")]
     title: String,
+    #[serde(default)]
+    snapshots: Snapshots,
 }
 
 fn default_title() -> String {
@@ -66,11 +121,16 @@ impl Config {
             .collect::<Result<Vec<_>, _>>()?;
         hot_watch_paths.sort();
         hot_watch_paths.dedup();
+        declared
+            .snapshots
+            .check()
+            .map_err(|e| format!("`{path}`: {e}"))?;
         Ok(Self {
             path,
             title: declared.title,
             globs,
             hot_watch_paths,
+            snapshots: declared.snapshots,
         })
     }
 }
@@ -567,6 +627,78 @@ mod tests {
                 root.join("shared/assets/palette.json")
             ],
             "both directories and files are retained, with duplicate spellings collapsed"
+        );
+    }
+
+    /// The config `toml` reads as, in a fresh tree of its own.
+    fn read_config(name: &str, toml: &str) -> Result<Config, String> {
+        let root = tree(name, &["scene.rs"]);
+        fs::write(root.join("gallery.toml"), toml).expect("write the config");
+        Config::read(&root.join("gallery.toml"))
+    }
+
+    #[test]
+    fn a_snapshots_table_sets_the_budget_and_one_per_renderer_over_it() {
+        let config = read_config(
+            "snapshots",
+            indoc::indoc! {r#"
+                scene_globs = ["scene.rs"]
+
+                [snapshots]
+                threshold = 0.2
+                tolerance = 10
+
+                [snapshots.wgpu]
+                tolerance = 400
+            "#},
+        )
+        .expect("a readable config");
+        assert_eq!(
+            config.snapshots,
+            Snapshots {
+                threshold: Some(0.2),
+                tolerance: Some(10),
+                wgpu: Budget {
+                    threshold: None,
+                    tolerance: Some(400),
+                },
+                glow: Budget::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_misspelt_snapshots_key_is_refused() {
+        let error = read_config(
+            "snapshots-misspelt",
+            indoc::indoc! {r#"
+                scene_globs = ["scene.rs"]
+
+                [snapshots]
+                tolerence = 10
+            "#},
+        )
+        .err()
+        .expect("an unknown key is an error");
+        assert!(error.contains("tolerence"), "{error}");
+    }
+
+    #[test]
+    fn a_threshold_past_one_names_its_table() {
+        let error = read_config(
+            "snapshots-threshold",
+            indoc::indoc! {r#"
+                scene_globs = ["scene.rs"]
+
+                [snapshots.glow]
+                threshold = 1.5
+            "#},
+        )
+        .err()
+        .expect("a threshold past 1 is an error");
+        assert!(
+            error.contains("[snapshots.glow] threshold is 1.5"),
+            "{error}"
         );
     }
 

@@ -261,6 +261,32 @@ fn waits_for_a_save_that_never_comes(p: &mut Play) -> PlayResult {
     })
 }
 
+/// Fails: no reference was ever taken for this screenshot,
+/// so the check leaves what it saw beside where one would go.
+#[play(todo)]
+fn compares_with_a_reference_never_taken(p: &mut Play) -> PlayResult {
+    add(p, "Write docs")?;
+    p.expect(Canvas).to_match_screenshot("one task")
+}
+
+/// Fails: its reference in `__snapshots__/` was altered on purpose (a brightened button,
+/// a shifted label, a blur, a circle and a `v2`), so the diff shows each kind of change.
+#[play(todo)]
+fn differs_from_its_reference(p: &mut Play) -> PlayResult {
+    add(p, "Write docs")?;
+    p.expect(Canvas).to_match_screenshot("one task")
+}
+
+/// Fails: its reference in `__snapshots__/` was altered on purpose
+/// (a button renamed, a filter chosen, a label gone), so the diff shows each.
+#[play(todo)]
+fn reads_other_than_its_reference(p: &mut Play) -> PlayResult {
+    add(p, "Write docs")?;
+    p.click("Write docs")?;
+    p.expect(Canvas)
+        .to_match_accesskit_snapshot("one task done")
+}
+
 /// Fails: a panic outside any step, which the scenes dylib's own `std` has to catch.
 #[play(todo)]
 fn panics_outside_a_step(p: &mut Play) -> PlayResult {

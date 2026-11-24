@@ -123,7 +123,7 @@ impl Pin {
     }
 }
 
-/// A scene that panics never reaches [`finish`](SceneCtx::finish);
+/// A scene that panics never reaches `finish`;
 /// its handles still close, so a stashed one can't claim a later write landed.
 impl Drop for SceneCtx<'_> {
     fn drop(&mut self) {

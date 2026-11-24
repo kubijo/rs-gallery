@@ -68,6 +68,7 @@ fn exists(actual: Option<&str>) -> What {
         actual: actual.map(str::to_owned),
         explanation: None,
         message: None,
+        kept: None,
     }))
 }
 

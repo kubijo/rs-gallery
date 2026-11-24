@@ -164,7 +164,7 @@ pub(super) struct FailedShot {
     scene: String,
     play: String,
     error: crate::play::PlayError,
-    log: Vec<Entry>,
+    pub(super) log: Vec<Entry>,
     videos: Vec<Utf8PathBuf>,
 }
 
@@ -289,7 +289,7 @@ struct EntryReport<'a> {
     /// The play's line it ran at: `file:line:column`.
     #[serde(skip_serializing_if = "Option::is_none")]
     at: Option<String>,
-    /// `passed` or `failed`; absent while it runs.
+    /// `passed`, `failed` or `skipped`; absent while it runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -353,6 +353,7 @@ impl<'a> EntryReport<'a> {
             outcome: entry.outcome.map(|outcome| match outcome {
                 Outcome::Passed => "passed",
                 Outcome::Failed => "failed",
+                Outcome::Skipped => "skipped",
             }),
             trace: entry.trace.as_deref(),
         }
@@ -483,13 +484,14 @@ pub(super) fn report(
 }
 
 /// A play's log as a tree: each step, gesture and check with the frames it drew,
-/// a failed check saying what it found instead.
+/// a failed check saying what it found instead, a skipped one why.
 /// A play that `failed` with no entry to blame says it failed outside any step.
 pub(super) fn step_list(shot: &str, play: &str, log: &[Entry], failed: bool) -> String {
     let aside = Style::new().dimmed();
     let passed = paint(Style::new().fg_color(Some(AnsiColor::Green.into())), "✓");
     let broke = paint(Style::new().fg_color(Some(AnsiColor::Red.into())), "×");
     let running = paint(aside, "…");
+    let skipped = paint(aside, "–");
     let lines: Vec<(String, &Entry)> = log
         .iter()
         .map(|entry| {
@@ -522,6 +524,7 @@ pub(super) fn step_list(shot: &str, play: &str, log: &[Entry], failed: bool) -> 
         let mark = match entry.outcome {
             Some(Outcome::Passed) => &passed,
             Some(Outcome::Failed) => &broke,
+            Some(Outcome::Skipped) => &skipped,
             None => &running,
         };
         list.push_str(&format!(
@@ -553,9 +556,13 @@ fn line(entry: &Entry) -> String {
         What::Gesture { label } => paint(aside, label),
         What::Check(check) => {
             let mut line = format!("{} {}", check.subject, one_line(&check.expected));
-            if entry.failed() {
-                let actual = check.actual.as_deref().unwrap_or("nothing matched");
-                line.push_str(&paint(aside, &format!("  got {}", one_line(actual))));
+            let actual = one_line(check.actual.as_deref().unwrap_or("nothing matched"));
+            match entry.outcome {
+                Some(Outcome::Failed) => {
+                    line.push_str(&paint(aside, &format!("  got {actual}")));
+                }
+                Some(Outcome::Skipped) => line.push_str(&paint(aside, &format!("  {actual}"))),
+                Some(Outcome::Passed) | None => {}
             }
             line
         }

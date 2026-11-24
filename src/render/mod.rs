@@ -30,7 +30,10 @@ use crate::{
     install_context,
     knobs::Span,
     offscreen::GlDeps,
-    play::log::{Check, Entry, Outcome, What},
+    play::{
+        log::{Acceptance, Check, Entry, Kept, Outcome, What},
+        snapshot::{Ask, Look, Of, Unmatched, Verdict},
+    },
     render_canvas_pinned, sheet,
     sheet::Panel,
     style::{self, paint},
@@ -48,12 +51,15 @@ mod record;
 mod report;
 mod session;
 mod shot;
+mod snapshot;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use self::log_view::LogMode;
 use self::log_view::LogView;
 pub(crate) use self::overlay::Corner;
+use self::snapshot::{Looks, Seen};
+pub(crate) use self::snapshot::{Snapshots, Update};
 use self::{overlay::InputOverlay, play_driver::*, record::*};
 pub(crate) use self::{overrides::*, recipe::*, report::*, session::*, shot::*};
 
@@ -470,12 +476,12 @@ pub(crate) fn render_with_globals(
     outcome
 }
 
-/// One shot drawn for a test: nothing printed,
-/// nothing reported, only whether it failed.
+/// One shot drawn for a test, its play's snapshots judged as `snapshots` has it:
+/// nothing printed, nothing reported, only whether it failed.
 ///
 /// # Errors
-/// What a capture would report for the shot, as plain text,
-/// a failed play or a panicking scene included; a failed play's log follows its report.
+/// What a capture would report for the shot, a failed play or a panicking scene included;
+/// a failed play's log follows its report. In colour when stdout takes it.
 pub(crate) fn check_shot(
     manifest: &Manifest,
     globals: Option<GlobalEntry>,
@@ -483,18 +489,52 @@ pub(crate) fn check_shot(
     session: &Session,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
+    snapshots: &Snapshots,
 ) -> Result<(), String> {
     let mut view = LogView::off();
     let mut watch = Watch::new(&mut view);
+    watch.snapshots = Some(snapshots);
+    watch.stream = style::Stream::Stdout;
     let outcome = shoot_with_globals(manifest, globals, plays, session, setup, shot, &mut watch);
     outcome.map(drop).map_err(|failure| {
-        let mut text = failure.plain();
-        if let Some(failed) = &watch.failed {
-            text.push_str("\n\n");
-            text.push_str(&style::plain(&failed.tree()));
+        let log = watch.failed.as_ref().map(FailedShot::tree);
+        let (report, log) = if style::coloured(watch.stream) {
+            (failure.panel(watch.stream), log)
+        } else {
+            (failure.plain(), log.map(|log| style::plain(&log)))
+        };
+        match log {
+            Some(log) => format!("{report}\n\n{log}"),
+            None => report,
         }
-        text
     })
+}
+
+/// [`check_shot`], with the play's log: what a test of its checks reads.
+/// The shot must have an `out`, which a passing play's log comes back with.
+#[cfg(all(test, not(target_vendor = "apple")))]
+pub(crate) fn judged_shot(
+    manifest: &Manifest,
+    plays: &[PlayEntry],
+    renderer: Renderer,
+    shot: &Shot,
+    snapshots: &Snapshots,
+) -> (Result<(), Diagnostic>, Vec<Entry>) {
+    let session = Session::open(renderer).expect("a session");
+    let mut view = LogView::off();
+    let mut watch = Watch::new(&mut view);
+    watch.snapshots = Some(snapshots);
+    let setup = |_: &egui::Context| {};
+    match shoot_with_globals(manifest, None, plays, &session, &setup, shot, &mut watch) {
+        Ok(taken) => {
+            let play = taken.and_then(|taken| taken.written.play);
+            (Ok(()), play.expect("a play").log)
+        }
+        Err(failure) => {
+            let log = watch.failed.map(|failed| failed.log);
+            (Err(failure), log.unwrap_or_default())
+        }
+    }
 }
 
 /// What one invocation asks for.

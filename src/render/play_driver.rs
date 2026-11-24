@@ -18,21 +18,95 @@ pub(super) struct HeadlessDriver<'h> {
     pub(super) bad_knob: Option<String>,
     /// Where the play's log is shown as it goes.
     pub(super) view: &'h mut LogView,
+    pub(super) session: &'h Session,
+    /// The canvas now, in points.
+    pub(super) size: &'h mut egui::Vec2,
+    /// `None` in a capture, which compares no snapshots.
+    pub(super) looks: Option<Looks<'h>>,
+}
+
+impl HeadlessDriver<'_> {
+    fn outgrown_by(&self, drawn: egui::Vec2) -> bool {
+        self.size.max(drawn.ceil()) != *self.size
+    }
+
+    /// Grow the canvas to hold `drawn`.
+    /// The next frame is the first drawn at that size.
+    fn grow(&mut self, drawn: egui::Vec2) -> Result<(), String> {
+        let fitting = self.size.max(drawn.ceil());
+        self.session
+            .validate_target(fitting, self.scale)
+            .map_err(|e| e.summary())?;
+        self.harness.set_size(fitting);
+        *self.size = fitting;
+        Ok(())
+    }
+
+    /// Compare what `ask` is of, as it is now.
+    fn look(&mut self, looks: &mut Looks<'_>, ask: &Ask<'_>) -> Result<Look, String> {
+        use kittest::NodeT as _;
+        if ask.first {
+            looks.begin(ask)?;
+        }
+        let seen = match ask.of {
+            Of::Screenshot { .. } => {
+                let drawn = drawn(self.harness);
+                if self.outgrown_by(drawn) {
+                    if looks.measured_twice(drawn) {
+                        self.grow(drawn)?;
+                    }
+                    return Ok(looks.outgrown());
+                }
+                Seen::Image(trim(self.harness.render()?, drawn, self.scale))
+            }
+            Of::Tree { by } => {
+                let root = self.harness.root().accesskit_node();
+                match read_tree(|| crate::play::tree::json(root, by)) {
+                    Ok(Ok(json)) => Seen::Text(json),
+                    Ok(Err(why)) => return Ok(looks.unmatched(why)),
+                    Err(why) => return Ok(looks.unmatched(Unmatched::Unread(why))),
+                }
+            }
+        };
+        looks.judge(ask, seen)
+    }
+}
+
+/// `body`'s panic caught here, by the `std` that raised it: unwinding into
+/// a scenes dylib's frames, it would meet the dylib's own `std`, which aborts on it.
+fn guarded<T>(what: &str, body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(AssertUnwindSafe(body))
+        .map_err(|panic| format!("{what}: {}", panic_message(&panic)))?
+}
+
+/// [`guarded`], of what reads labels, quietly, as a wait may ask for one every frame:
+/// accesskit_consumer 0.35 panics on a `labelled_by` naming a node not in the tree.
+fn read_tree<T>(body: impl FnOnce() -> T) -> Result<T, String> {
+    crate::play::caught(body).map_err(|panic| {
+        format!(
+            "the accessibility tree can't be read; a widget may be labelled by one \
+             not drawn this frame: {}",
+            panic.reason()
+        )
+    })
 }
 
 impl crate::play::PlayDriver for HeadlessDriver<'_> {
-    fn query(&self, by: &crate::By) -> Vec<crate::Found> {
+    fn query(&self, by: &crate::By) -> Result<Vec<crate::Found>, String> {
         use kittest::NodeT as _;
-        crate::play::query_tree(
-            self.harness.root().accesskit_node(),
-            self.harness.ctx.pixels_per_point(),
-            by,
-        )
+        read_tree(|| {
+            crate::play::query_tree(
+                self.harness.root().accesskit_node(),
+                self.harness.ctx.pixels_per_point(),
+                by,
+            )
+        })
     }
 
     fn labels(&self) -> Vec<String> {
         use kittest::NodeT as _;
-        crate::play::tree_labels(self.harness.root().accesskit_node())
+        read_tree(|| crate::play::tree_labels(self.harness.root().accesskit_node()))
+            .unwrap_or_default()
     }
 
     fn frame(&mut self, events: Vec<egui::Event>) -> Result<(), String> {
@@ -49,6 +123,9 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
         self.harness.input_mut().events.extend(events);
         // With nothing queued on the harness, `step` draws exactly one frame.
         step(self.harness)?;
+        if let Some(looks) = &mut self.looks {
+            looks.drew(self.harness.ctx.has_requested_repaint());
+        }
         match self.harness.state_mut().global_write_error.take() {
             Some(error) => Err(error),
             None => Ok(()),
@@ -95,21 +172,15 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
     }
 
     fn trace(&mut self, index: usize, label: &str) -> Result<Option<Utf8PathBuf>, String> {
-        let Some(dir) = &self.trace_dir else {
+        let Some(dir) = self.trace_dir.clone() else {
             return Ok(None);
         };
-        let drawn = self.harness.state().wanted;
-        // Caught here, by the `std` that raised it: unwinding into a scenes dylib's frames,
-        // a panic would meet the dylib's own `std`, which aborts on it.
-        let image = std::panic::catch_unwind(AssertUnwindSafe(|| self.harness.render())).map_err(
-            |panic| format!("render the step's screenshot: {}", panic_message(&panic)),
-        )??;
-        let image = if self.trim {
-            trim(image, drawn, self.scale)
-        } else {
-            image
-        };
-        std::fs::create_dir_all(dir).map_err(|e| format!("create `{dir}`: {e}"))?;
+        let drawn = drawn(self.harness);
+        let mut image = guarded("render the canvas", || self.harness.render())?;
+        if self.trim {
+            image = trim(image, drawn, self.scale);
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create `{dir}`: {e}"))?;
         let path = dir.join(format!("{:02}-{}.png", index + 1, step_file_stem(label)));
         write_png(&image, &path)?;
         Ok(Some(landed(&path)))
@@ -121,6 +192,25 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
 
     fn logged(&mut self, index: usize, entry: &Entry) {
         self.view.logged(index, entry);
+    }
+
+    fn compare(&mut self, ask: &Ask<'_>) -> Result<Look, String> {
+        let Some(mut looks) = self.looks.take() else {
+            return Ok(Look {
+                verdict: Verdict::NotCompared,
+                done: true,
+            });
+        };
+        let look = guarded("compare the snapshot", || self.look(&mut looks, ask));
+        self.looks = Some(looks);
+        look
+    }
+
+    fn keep(&mut self) -> Result<crate::play::log::Kept, String> {
+        guarded("keep the snapshot", || match &mut self.looks {
+            Some(looks) => looks.keep(),
+            None => Ok(crate::play::log::Kept::default()),
+        })
     }
 }
 
@@ -153,20 +243,28 @@ fn is_trace_file(name: &str) -> bool {
     digits >= 2 && name[digits..].starts_with('-') && name.ends_with(".png")
 }
 
-/// A step label as a file name: lower-case words, single dashes, cut short,
-/// since a gesture's label spells out its locator.
-fn step_file_stem(label: &str) -> String {
-    const MOST: usize = 48;
-    let mut slug = String::new();
+/// `label` in lower-case words and single dashes, empty when it has no letter or digit.
+pub(super) fn dashed(label: &str) -> String {
+    let mut words = String::new();
     for c in label.chars() {
         if c.is_alphanumeric() {
-            slug.extend(c.to_lowercase());
-        } else if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
+            words.extend(c.to_lowercase());
+        } else if !words.is_empty() && !words.ends_with('-') {
+            words.push('-');
         }
     }
-    let mut cut: String = slug.chars().take(MOST).collect();
-    while cut.ends_with('-') {
+    if words.ends_with('-') {
+        words.pop();
+    }
+    words
+}
+
+/// A step label as a file name, [`dashed`] and cut short,
+/// since a gesture's label spells out its locator.
+pub(super) fn step_file_stem(label: &str) -> String {
+    const MOST: usize = 48;
+    let mut cut: String = dashed(label).chars().take(MOST).collect();
+    if cut.ends_with('-') {
         cut.pop();
     }
     if cut.is_empty() {

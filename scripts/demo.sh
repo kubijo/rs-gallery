@@ -65,11 +65,16 @@ if [ "$variant" = femtovg ]; then
     cp "$repo/scripts/offscreen.scene.rs" "$demo/offscreen.scene.rs"
 fi
 
-# Scene files the template doesn't ship, for a run that needs them (`just demo::plays`).
-# One per line, so a path may hold spaces.
+# Scene files the template doesn't ship, for a run that needs them (`just demo::plays`),
+# with the snapshot references beside them. One per line, so a path may hold spaces.
 while IFS= read -r scene; do
     if [ -n "$scene" ]; then
         cp "$scene" "$demo/"
+        snapshots="$(dirname "$scene")/__snapshots__"
+        if [ -d "$snapshots" ]; then
+            cp -R "$snapshots" "$demo/"
+            find "$demo/__snapshots__" -type f \( -name '*.new.*' -o -name '*.diff.*' \) -delete
+        fi
     fi
 done <<<"${GALLERY_DEMO_SCENES:-}"
 

@@ -60,6 +60,9 @@ so a minor release may carry a breaking change.
   focus, typed text, which no knob can set. The report lists each step and its frames. A failing play keeps a screenshot
   per step beside the shot (`trace = "on"` keeps them always), and the instance justfile gains `just play`.
 
+- **Fixed: a capture cut off a scene's windows and popups.** Trimming kept the scene's content alone, and so did growing
+  a canvas too small for it. An `egui::Window` or popup a scene shows over its content is now captured whole.
+
 - **Plays check with matchers that wait.** `p.expect(by)` checks the widget a locator matches — `to_exist`,
   `to_be_absent`, `to_have_count`, `to_have_value`, `to_have_label`, `to_have_description`, `to_have_placeholder`,
   `to_have_numeric_value`, `to_be_focused`, `to_be_disabled`, `to_be_enabled`, `to_be_checked`,
@@ -68,6 +71,18 @@ so a minor release may carry a breaking change.
   re-exported as `gallery::matchers`; `p.expect_value` polls any computed value. A failure says what was expected and
   found. `Found` carries a widget's toggled, selected, expanded, numeric, hidden, read-only, required, description and
   placeholder state. The template's `checks` scene is a form whose play passes every matcher.
+
+- **Catalog tests compare screenshots.** `p.expect(Canvas).to_match_screenshot("saved")` in a play compares the canvas
+  with a reference in `__snapshots__/` beside the play's file, one per renderer, once the scene stops asking for frames.
+  It covers open popups, and grows a canvas too small for its content. With no reference, or past its budget, it fails
+  and leaves `.new.png` and `.diff.png` beside it; `UPDATE_SNAPSHOTS=1` takes the new one. `gallery.toml`'s
+  `[snapshots]` sets the budget, `threshold` and `tolerance`, per renderer too, and
+  `Screenshot::named("saved").tolerance(400)` per check. A capture that runs the play compares nothing and logs the
+  check as skipped.
+
+- **Catalog tests compare what a scene says.** `to_match_accesskit_snapshot("saved")`, on `p.expect(Canvas)` or on one
+  widget with what is inside it, compares the accessibility tree with `saved.accesskit.json`, in the shape
+  `egui_inspection_tools` writes one. It is taken and refused as a screenshot is; a failure shows the lines changed.
 
 - **A play's log shows as it runs.** Its steps, gestures and checks are redrawn in place on a terminal, a passing play
   folding to one line, and printed once each play is over anywhere else — a pipe, CI, `TERM=dumb`, an agent's harness.
@@ -100,7 +115,7 @@ so a minor release may carry a breaking change.
   seekable H.264 MP4, and `format = ["apng", "mp4"]` (`--record-format apng,mp4`) both from one run. The report's
   `videos` and the summary name each file, and the report adds what a frame cost to draw, capture and encode.
 
-- **Dependencies.** usvg 0.50 and notify 9.
+- **Dependencies.** usvg 0.50, notify 9 and process-wrap 11.
 
 - **Catalog tests.** `gallery::test_main!(renderer)` in a `harness = false` test makes every scene a `smoke::<scene>`
   test and every play a `play::<scene>::<name>` test, run through the same scenes dylib the window loads; `just test` in

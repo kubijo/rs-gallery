@@ -43,8 +43,8 @@ allow = [
     "Unlicense",
 ]
 # MPL-2.0 is copyleft per *file*, so an unmodified crate carries nothing outward — per crate, though,
-# not blanket. `colored` arrives under the reference tests' image differ. Should comparison ever ship
-# to consumers it lands in their binaries too, which is worth re-examining rather than inheriting.
+# not blanket. `colored` arrives under dify, the image differ, and so lands in every consumer's binary:
+# plays compare screenshots with no feature to turn off.
 exceptions = [{ allow = ["MPL-2.0"], crate = "colored" }]
 private = { ignore = true }
 

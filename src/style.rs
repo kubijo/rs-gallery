@@ -84,6 +84,15 @@ pub(crate) fn paint(style: Style, text: &str) -> String {
 
 pub(crate) use supports_hyperlinks::Stream;
 
+/// Whether `stream` takes colour, as `anstream` decides it.
+pub(crate) fn coloured(stream: Stream) -> bool {
+    let choice = match stream {
+        Stream::Stdout => anstream::AutoStream::choice(&std::io::stdout()),
+        Stream::Stderr => anstream::AutoStream::choice(&std::io::stderr()),
+    };
+    choice != anstream::ColorChoice::Never
+}
+
 /// A path in output bound for `stream`: coloured as a path, and clickable where that stream does OSC 8.
 pub(crate) fn path(path: &Utf8Path, stream: Stream) -> String {
     paint(PATH, &linked(path, &relative(path), stream))

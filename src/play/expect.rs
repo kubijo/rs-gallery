@@ -10,7 +10,11 @@ use std::{fmt::Debug, panic::Location};
 use egui::accesskit::Toggled;
 use googletest::matcher::{Matcher, MatcherResult};
 
-use super::{By, Found, Play, PlayResult, caught, log::Check};
+use super::{
+    By, Canvas, ExpectCanvas, Found, Play, PlayResult, caught,
+    log::Check,
+    snapshot::{Asked, Of},
+};
 
 /// What a matcher compares against: a googletest matcher, or a value it must equal.
 ///
@@ -176,17 +180,70 @@ pub struct Expect<'p, 'd> {
     within: Option<u32>,
 }
 
-impl<'d> Play<'d> {
-    /// Expect something of the widget `by` matches:
-    /// `p.expect("Name").to_have_value("Ada")?`.
-    pub fn expect(&mut self, by: impl Into<By>) -> Expect<'_, 'd> {
+/// What [`Play::expect`] checks: a widget, by its label or a [`By`], or the whole [`Canvas`].
+/// Each gives the expectation holding the matchers that make sense of it.
+pub trait Subject<'p, 'd: 'p>: sealed::Sealed {
+    type Expect;
+
+    #[doc(hidden)]
+    fn expect(self, play: &'p mut Play<'d>) -> Self::Expect;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for &str {}
+    impl Sealed for String {}
+    impl Sealed for super::By {}
+    impl Sealed for super::Canvas {}
+}
+
+impl<'p, 'd: 'p> Subject<'p, 'd> for By {
+    type Expect = Expect<'p, 'd>;
+
+    fn expect(self, play: &'p mut Play<'d>) -> Expect<'p, 'd> {
         Expect {
-            play: self,
-            by: by.into(),
+            play,
+            by: self,
             negated: false,
             message: None,
             within: None,
         }
+    }
+}
+
+impl<'p, 'd: 'p> Subject<'p, 'd> for &str {
+    type Expect = Expect<'p, 'd>;
+
+    fn expect(self, play: &'p mut Play<'d>) -> Expect<'p, 'd> {
+        By::from(self).expect(play)
+    }
+}
+
+impl<'p, 'd: 'p> Subject<'p, 'd> for String {
+    type Expect = Expect<'p, 'd>;
+
+    fn expect(self, play: &'p mut Play<'d>) -> Expect<'p, 'd> {
+        By::from(self).expect(play)
+    }
+}
+
+impl<'p, 'd: 'p> Subject<'p, 'd> for Canvas {
+    type Expect = ExpectCanvas<'p, 'd>;
+
+    fn expect(self, play: &'p mut Play<'d>) -> ExpectCanvas<'p, 'd> {
+        ExpectCanvas {
+            play,
+            message: None,
+            within: None,
+        }
+    }
+}
+
+impl<'d> Play<'d> {
+    /// Expect something of a widget, `p.expect("Name").to_have_value("Ada")?`,
+    /// or of the canvas, `p.expect(Canvas).to_match_screenshot("saved")?`.
+    pub fn expect<'p, S: Subject<'p, 'd>>(&'p mut self, subject: S) -> S::Expect {
+        subject.expect(self)
     }
 
     /// Draw frames until `poll` returns a value `expected` accepts,
@@ -226,6 +283,7 @@ impl<'d> Play<'d> {
                     actual: Some(actual),
                     explanation,
                     message: None,
+                    kept: None,
                 };
                 return self.checked(check, start, at, holds, false);
             }
@@ -256,6 +314,7 @@ impl<'d> Play<'d> {
                     actual: Some(format!("{:?}", self.actions)),
                     explanation: None,
                     message: None,
+                    kept: None,
                 };
                 return self.checked(check, start, at, holds, false);
             }
@@ -619,6 +678,32 @@ impl Expect<'_, '_> {
         })
     }
 
+    /// Its accessibility tree, the widget and what is inside it,
+    /// reads as its reference does: [`ExpectCanvas::to_match_accesskit_snapshot`]
+    /// for one widget, such as a window.
+    ///
+    /// # Errors
+    /// When none or several match, the one that does is hidden, or the tree still differs
+    /// from its reference, once the tree settles or the wait budget is spent;
+    /// when it has no reference, or the name was already checked in this play;
+    /// and after [`not`](Self::not), as a snapshot has no opposite.
+    #[track_caller]
+    pub fn to_match_accesskit_snapshot(self, name: impl Into<String>) -> PlayResult {
+        let at = Location::caller();
+        let asked = Asked {
+            subject: self.by.to_string(),
+            matcher: "to_match_accesskit_snapshot",
+            kind: "AccessKit snapshot",
+            name: name.into(),
+            misused: self
+                .negated
+                .then(|| "a snapshot has no opposite to expect with `.not()`".to_owned()),
+            message: self.message,
+            within: self.within,
+        };
+        asked.run(self.play, Of::Tree { by: Some(&self.by) }, at)
+    }
+
     /// A matcher reading one text property of the single widget matched.
     fn text<K>(
         self,
@@ -689,8 +774,13 @@ impl Expect<'_, '_> {
         let start = play.frame;
         let mut waited = 0;
         loop {
-            let found = play.driver.query(&by);
-            let seen = look(&found);
+            let (found, seen) = match play.driver.query(&by) {
+                Ok(found) => {
+                    let seen = look(&found);
+                    (found, seen)
+                }
+                Err(why) => (Vec::new(), Look::unjudged(why)),
+            };
             let passed = seen.verdict.is_some_and(|verdict| verdict != negated);
             if passed || waited >= budget {
                 let check = Check {
@@ -701,6 +791,7 @@ impl Expect<'_, '_> {
                     actual: seen.actual,
                     explanation: seen.explanation,
                     message,
+                    kept: None,
                 };
                 return play.checked(check, start, at, passed, found.is_empty());
             }

@@ -12,7 +12,10 @@ use libtest_mimic::{Arguments, Failed, Trial};
 use crate::{
     GlobalEntry, Manifest, PlayEntry, Renderer, SceneSource as _,
     hot::HotDylib,
-    render::{self, DEFAULT_SCALE, DEFAULT_SIZE, Overrides, Session, Shot, ShotPlay, Trace},
+    render::{
+        self, DEFAULT_SCALE, DEFAULT_SIZE, Overrides, Session, Shot, ShotPlay, Snapshots, Trace,
+        Update,
+    },
     tree::scene_key,
 };
 
@@ -67,6 +70,8 @@ pub fn __test_main(
     let manifest = Arc::new(source.manifest());
     let globals = source.globals();
     let plays: Arc<[PlayEntry]> = source.plays().into();
+    let update = Update::from_env().unwrap_or_else(|e| panic!("{e}"));
+    let snapshots = Arc::new(Snapshots::new(&config.snapshots, renderer, update));
 
     let mut trials = Vec::new();
     for scene in &manifest.scenes {
@@ -77,6 +82,7 @@ pub fn __test_main(
             plays: Arc::clone(&plays),
             renderer,
             setup,
+            snapshots: Arc::clone(&snapshots),
         };
         trials.push(
             Trial::test(format!("smoke::{key}"), move || {
@@ -93,6 +99,7 @@ pub fn __test_main(
             plays: Arc::clone(&plays),
             renderer,
             setup,
+            snapshots: Arc::clone(&snapshots),
         };
         let name = play.name;
         trials.push(
@@ -112,6 +119,7 @@ struct Catalog {
     plays: Arc<[PlayEntry]>,
     renderer: Renderer,
     setup: fn(&egui::Context),
+    snapshots: Arc<Snapshots>,
 }
 
 thread_local! {
@@ -139,6 +147,7 @@ impl Catalog {
                 session,
                 &self.setup,
                 &shot,
+                &self.snapshots,
             )
             .map_err(Failed::from)
         })

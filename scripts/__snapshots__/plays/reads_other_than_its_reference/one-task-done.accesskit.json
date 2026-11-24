@@ -1,0 +1,83 @@
+[
+  {
+    "role": "Label",
+    "value": "Tasks"
+  },
+  {
+    "role": "Label",
+    "value": "New task"
+  },
+  {
+    "role": "TextInput",
+    "label": "New task",
+    "value": ""
+  },
+  {
+    "role": "Button",
+    "label": "Add"
+  },
+  {
+    "role": "Button",
+    "label": "Add 30 samples"
+  },
+  {
+    "role": "Button",
+    "label": "Clear finished"
+  },
+  {
+    "role": "Button",
+    "label": "All",
+    "toggled": "False"
+  },
+  {
+    "role": "Button",
+    "label": "Active",
+    "toggled": "False"
+  },
+  {
+    "role": "Button",
+    "label": "Done",
+    "toggled": "True"
+  },
+  {
+    "role": "ComboBox",
+    "label": "Sort by",
+    "value": "Order added"
+  },
+  {
+    "role": "Label",
+    "value": "Sort by"
+  },
+  {
+    "role": "Slider",
+    "label": "Priority",
+    "numeric_value": 0.0,
+    "min_numeric_value": 0.0,
+    "max_numeric_value": 10.0
+  },
+  {
+    "role": "SpinButton",
+    "label": "Priority",
+    "value": "0.00",
+    "numeric_value": 0.0,
+    "min_numeric_value": 0.0,
+    "max_numeric_value": 10.0
+  },
+  {
+    "role": "Label",
+    "value": "Priority"
+  },
+  {
+    "role": "Label",
+    "value": "priority 0"
+  },
+  {
+    "role": "CheckBox",
+    "label": "Write docs",
+    "toggled": "True"
+  },
+  {
+    "role": "Button",
+    "label": "Remove"
+  }
+]

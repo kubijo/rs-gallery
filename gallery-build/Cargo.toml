@@ -12,3 +12,6 @@ camino = { version = "1", features = ["serde1"] }
 glob = "0.3"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+
+[dev-dependencies]
+indoc = "2"

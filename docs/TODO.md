@@ -83,16 +83,14 @@ them automatic:
 Rendering a scene headlessly and diffing it against a committed reference both landed. What is left is the shape needed
 past a handful of images, and a structural target beside the pixel one.
 
-- [ ] Only this crate's own tests compare images; a consumer capturing their components wants the same thing. It needs a
-  way to say so — `--capture --verify`, against references beside the recipe — and once it exists the differ moves from
-  a dev-dependency to an optional feature, so only those who ask for it link it (and inherit its MPL-2.0 corner; see
-  `deny.toml`).
+- [ ] A consumer's plays compare their canvas (`to_match_screenshot`), but a shot without a play has nothing to compare
+  it. It needs a way to say so: `--capture --verify`, against references beside the recipe.
 - [ ] It scales to a handful of images, not hundreds. Past that, the shape that works is a persistent differ fed image
   pairs over a pipe (`odiff --server`) rather than a process per image, and an HTML report putting before/after/diff
   side by side — reviewing a wall of failures in a browser beats opening `*.diff.png` by hand. Worth porting when the
   reference count justifies it, not before.
-- [ ] Structural snapshots as the other target: serialize the scene's AccessKit tree / `Shape` list — jest-style,
-  text-diffable in a PR, no GPU or antialiasing to pin at all. A `snapshot!` API would pick per use.
+- [ ] Structural snapshots of a scene's `Shape` list, beside the AccessKit tree plays compare
+  (`to_match_accesskit_snapshot`): what is drawn, text-diffable in a PR, with no GPU or antialiasing to pin.
 - [ ] The wgpu path has no equivalent pin, so only glow captures are reference-tested. Lavapipe via `VK_ICD_FILENAMES`
   would give wgpu a deterministic rasteriser too, if a wgpu-rendered reference is ever wanted.
 - [ ] Storage location: default to **co-located with the file of origin**, derived by the `snapshot!` macro itself from

@@ -1,0 +1,5 @@
+target/
+
+# What a failing snapshot check leaves beside its reference, to look at before taking it
+**/__snapshots__/**/*.new.*
+**/__snapshots__/**/*.diff.*
