@@ -28,10 +28,17 @@ fn a_key_lists_its_chord_and_typed_text_its_quoted_run() {
     log.frame(&[key(Key::Tab, false, Modifiers::SHIFT)]);
     log.frame(&[Event::Text("hi".to_owned())]);
     assert_eq!(
-        log.shown().keys,
+        log.shown(1.0).keys,
         ["Shift+Tab", "\"hi\""],
         "a release lists nothing"
     );
+}
+
+#[test]
+fn the_pointer_is_shown_where_a_zoomed_frame_has_it() {
+    let mut log = InputLog::new(10);
+    log.frame(&[Event::PointerMoved(egui::pos2(40.0, 28.0))]);
+    assert_eq!(log.shown(0.5).pointer, Some(egui::pos2(20.0, 14.0)));
 }
 
 #[test]
@@ -41,9 +48,9 @@ fn a_key_leaves_the_list_once_its_time_is_up() {
     for _ in 1..15 {
         log.frame(&[]);
     }
-    assert_eq!(log.shown().keys, ["A"], "listed for 1.5 s at 10 fps");
+    assert_eq!(log.shown(1.0).keys, ["A"], "listed for 1.5 s at 10 fps");
     log.frame(&[]);
-    assert!(log.shown().keys.is_empty());
+    assert!(log.shown(1.0).keys.is_empty());
 }
 
 #[test]
@@ -61,7 +68,7 @@ fn only_the_newest_keys_stay_listed() {
     ] {
         log.frame(&[key(letter, true, Modifiers::NONE)]);
     }
-    assert_eq!(log.shown().keys, ["C", "D", "E", "F", "G", "H"]);
+    assert_eq!(log.shown(1.0).keys, ["C", "D", "E", "F", "G", "H"]);
 }
 
 #[test]
@@ -69,7 +76,7 @@ fn a_click_stays_lit_past_its_release_long_enough_to_see() {
     let mut log = InputLog::new(10);
     log.frame(&[click(true)]);
     log.frame(&[click(false)]);
-    let shown = log.shown();
+    let shown = log.shown(1.0);
     assert_eq!(
         shown.buttons,
         [true, false, false],
@@ -79,7 +86,7 @@ fn a_click_stays_lit_past_its_release_long_enough_to_see() {
     log.frame(&[]);
     log.frame(&[]);
     assert_eq!(
-        log.shown().buttons,
+        log.shown(1.0).buttons,
         [false; 3],
         "dark 0.3 s after the press"
     );
@@ -92,7 +99,7 @@ fn a_pause_counts_toward_a_keys_time() {
     log.hold(20);
     log.frame(&[]);
     assert!(
-        log.shown().keys.is_empty(),
+        log.shown(1.0).keys.is_empty(),
         "two seconds passed in the pause"
     );
 }

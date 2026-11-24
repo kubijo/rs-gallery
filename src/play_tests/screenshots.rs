@@ -1,13 +1,14 @@
 //! Snapshot checks: where references go, what a check
 //! leaves behind, and how a run takes a new reference.
 
+mod films;
 mod tree;
 
 use super::*;
 use crate::{
     Canvas, Screenshot,
     play::log::{Check, Outcome, What},
-    render::{Record, Snapshots, Update, VideoFormats, judged_shot},
+    render::{Films, Record, Snapshots, Update, VideoFormat, VideoFormats, judged_shot},
 };
 
 fn hello_in(ui: &mut egui::Ui, colour: egui::Color32) {
@@ -101,22 +102,34 @@ fn greeting_shot(dir: &Utf8Path) -> Shot {
         "plays::scene",
         &dir.join("shot.png"),
         "greets",
-        Trace::RetainOnFailure,
+        Trace::Failing,
     )
 }
 
 fn judge(scene: SceneFn, run: PlayFn, dir: &Utf8Path, snapshots: Snapshots) -> Judged {
+    judge_filmed(scene, run, dir, snapshots, None)
+}
+
+/// [`judge`], the play filmed.
+fn judge_filmed(
+    scene: SceneFn,
+    run: PlayFn,
+    dir: &Utf8Path,
+    snapshots: Snapshots,
+    films: Option<&Films>,
+) -> Judged {
     let (manifest, plays) = catalog(scene, &[("greets", run)]);
     let snapshots = Snapshots {
         dir: Some(dir.join("refs")),
         ..snapshots
     };
-    let (outcome, log) = judged_shot(
+    let (outcome, log, _) = judged_shot(
         &manifest,
         &plays,
         Renderer::Glow,
         &greeting_shot(dir),
         &snapshots,
+        films,
     );
     let (check, frames) = log
         .into_iter()
@@ -189,7 +202,7 @@ fn a_capture_compares_no_snapshots_and_says_so_whatever_its_shot() {
     let recorded = Record {
         fps: 30,
         seconds: None,
-        keep: Trace::On,
+        keep: Trace::Always,
         formats: VideoFormats::default(),
         hold: Some(0.0),
         input: None,
@@ -227,14 +240,13 @@ fn a_captures_canvas_keeps_its_size_past_a_check() {
         record: Some(Record {
             fps: 30,
             seconds: None,
-            keep: Trace::On,
-            formats: VideoFormats::default(),
+            keep: Trace::Always,
+            formats: VideoFormat::Apng.into(),
             hold: Some(0.0),
             input: None,
         }),
         ..greeting_shot(&dir)
     };
-    // A frame of another size fails the recording.
     capture(&manifest, &plays, shot, None).unwrap_or_else(|failure| panic!("{}", failure.plain()));
     let video = image::open(dir.join("shot.apng")).expect("the recording");
     assert_eq!((video.width(), video.height()), (320, 240));
@@ -725,6 +737,66 @@ fn a_reference_that_cannot_be_written_leaves_nothing_half_written() {
     assert_eq!(files(&dir), [REFERENCE]);
 }
 
+#[test]
+fn a_run_removes_what_one_cut_short_left_half_written() {
+    let dir = scratch("screenshot-cut-short");
+    take(red, greets, &dir);
+    let [old, young, old_new, old_diff] = [
+        (REFERENCE, "old"),
+        (REFERENCE, "young"),
+        (NEW, "old"),
+        (DIFF, "old"),
+    ]
+    .map(|(of, name)| format!(".{of}.new.{name}"));
+    let then = std::time::SystemTime::now() - std::time::Duration::from_mins(5);
+    for name in [&old, &young, &old_new, &old_diff] {
+        let file = std::fs::File::create(refs(&dir).join(name)).expect("written");
+        if name != &young {
+            file.set_modified(then).expect("aged");
+        }
+    }
+    assert!(judge(red, greets, &dir, Snapshots::default()).passed);
+    assert_eq!(files(&dir), [young, REFERENCE.to_owned()]);
+}
+
+#[test]
+fn a_check_refused_leaves_nothing_of_an_earlier_run() {
+    fn out_of_range(p: &mut Play<'_>) -> PlayResult {
+        p.expect(Canvas)
+            .to_match_screenshot(Screenshot::named("greeting").threshold(1.5))
+    }
+    let dir = scratch("screenshot-refused");
+    take(red, greets, &dir);
+    judge(blue, greets, &dir, Snapshots::default());
+    assert_eq!(files(&dir), [DIFF, NEW, REFERENCE]);
+    let judged = judge(red, out_of_range, &dir, Snapshots::default());
+    assert!(!judged.passed);
+    assert_eq!(files(&dir), [REFERENCE]);
+}
+
+#[test]
+fn how_to_take_what_a_check_saw_comes_last_and_apart() {
+    let dir = scratch("screenshot-offer");
+    let judged = judge_filmed(
+        red,
+        greets,
+        &dir,
+        Snapshots::default(),
+        Some(&Films::new(
+            dir.join("out"),
+            dir.join("recordings"),
+            gallery_build::Video::Failing,
+            "plays".to_owned(),
+        )),
+    );
+    let lines: Vec<&str> = judged.panel.lines().map(str::trim).collect();
+    let [.., video, "", offer] = lines.as_slice() else {
+        panic!("{}", judged.panel);
+    };
+    assert!(video.contains("recorded in"), "{video}");
+    assert!(offer.starts_with("`UPDATE_SNAPSHOTS=1` takes"), "{offer}");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_passing_check_needs_no_writable_references() {
@@ -813,12 +885,13 @@ fn references_sit_beside_the_plays_file_wherever_the_check_is_called() {
     let (manifest, mut plays) = catalog(red, &[("greets", greets)]);
     plays[0].file = String::leak(scenes.into_string());
     plays[0].module_path = "catalog::widgets::form";
-    let (outcome, log) = judged_shot(
+    let (outcome, log, _) = judged_shot(
         &manifest,
         &plays,
         Renderer::Glow,
         &greeting_shot(&dir),
         &updating(Update::Failing),
+        None,
     );
     outcome.expect("taken");
     assert_eq!(log[0].outcome, Some(Outcome::Passed));

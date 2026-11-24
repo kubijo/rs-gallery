@@ -13,7 +13,10 @@ use std::{
     cell::{Cell, RefCell},
     fmt::{self, Debug, Display},
     panic::{self, AssertUnwindSafe, Location},
-    sync::Once,
+    sync::{
+        Once,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use camino::Utf8PathBuf;
@@ -357,6 +360,11 @@ impl Found {
 /// Only gallery implements it, so its methods run as host code.
 /// Only host code can search the tree.
 pub(crate) trait PlayDriver {
+    /// The play's panics are kept off the terminal by `quieten`, which is turned off around
+    /// a render: that runs the scene's paint callbacks where nothing of the play's can catch
+    /// a panic, see [`IN_SCENES_DYLIB`].
+    fn quietened_by(&mut self, quieten: Quieten);
+
     /// The widgets `by` matches in the last frame's tree.
     ///
     /// # Errors
@@ -586,7 +594,7 @@ const TAIL_FRAMES: u32 = 8;
 /// which is the only one that can catch it.
 #[doc(hidden)]
 pub fn __run_play(play: &mut Play<'_>, run: fn(&mut Play<'_>) -> PlayResult) -> PlayResult {
-    caught(|| run(play)).and_then(|outcome| outcome)
+    play.caught(run)
 }
 
 pub(crate) fn run(entry: &PlayEntry, driver: &mut dyn PlayDriver) -> PlayRun {
@@ -705,7 +713,7 @@ impl Play<'_> {
             what,
         });
         self.driver.logged(index, &self.log[index]);
-        let mut outcome = caught(|| body(self)).and_then(|outcome| outcome);
+        let mut outcome = self.caught(body);
         if opens_step {
             self.open.pop();
         }
@@ -737,6 +745,13 @@ impl Play<'_> {
                 None => error,
             }
         })
+    }
+
+    /// `body` of this play, its panics [`caught`] and kept off the terminal.
+    /// Generic, as [`caught`] is.
+    fn caught(&mut self, body: impl FnOnce(&mut Self) -> PlayResult) -> PlayResult {
+        self.driver.quietened_by(quieten);
+        caught(|| body(self)).and_then(|outcome| outcome)
     }
 
     /// Log a finished check, and fail with it when its `outcome` is a failure.
@@ -1127,14 +1142,15 @@ impl Play<'_> {
     fn locate(&mut self, by: &By) -> Result<Found, PlayError> {
         let mut waited = 0;
         loop {
-            // None and several are both waited out: a list redrawing can show two for a frame.
             let mut found = match self.driver.query(by) {
                 Ok(found) => found,
+                // Waited out: the next frame may draw the widget this one's tree lacks.
                 Err(_) if waited < self.wait_frames => Vec::new(),
                 Err(reason) => return Err(PlayError::new(reason)),
             };
             match found.len() {
                 1 => return Ok(found.remove(0)),
+                // None and several are both waited out: a list redrawing can show two for a frame.
                 _ if waited < self.wait_frames => {
                     self.frame(Vec::new())?;
                     waited += 1;
@@ -1196,6 +1212,37 @@ thread_local! {
     static QUIET: Cell<bool> = const { Cell::new(false) };
     /// Where the last quiet panic was raised.
     static RAISED_AT: RefCell<Option<SourceAt>> = const { RefCell::new(None) };
+    /// The scene this thread drew last.
+    static LAST_DRAWN: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// This copy of gallery is a scenes dylib's. A panic raised outside a catch of its own, as by
+/// a scene's paint callback while the host renders, unwinds into the host, whose `std`
+/// aborts on it: "Rust cannot catch foreign exceptions". A hook can only say so first.
+pub(crate) static IN_SCENES_DYLIB: AtomicBool = AtomicBool::new(false);
+
+/// Mark this copy of gallery as [`IN_SCENES_DYLIB`].
+#[doc(hidden)]
+pub fn __in_scenes_dylib() {
+    IN_SCENES_DYLIB.store(true, Ordering::Relaxed);
+}
+
+/// Sets whether this thread's panics keep off the terminal, in the copy of gallery it is from;
+/// returns whether they did.
+pub(crate) type Quieten = fn(bool) -> bool;
+
+fn quieten(quiet: bool) -> bool {
+    QUIET.replace(quiet)
+}
+
+#[cfg(test)]
+pub(crate) fn is_quiet() -> bool {
+    QUIET.get()
+}
+
+/// Note that this thread draws `scene`, for a panic raised once it is drawn.
+pub(crate) fn draws(scene: &'static str) {
+    LAST_DRAWN.set(Some(scene));
 }
 
 /// Run `body`, turning a panic into a [`PlayError`]
@@ -1213,6 +1260,14 @@ pub(crate) fn caught<T>(body: impl FnOnce() -> T) -> Result<T, PlayError> {
                 RAISED_AT.set(info.location().map(SourceAt::from));
             } else {
                 previous(info);
+                if let Some(scene) = LAST_DRAWN.get()
+                    && IN_SCENES_DYLIB.load(Ordering::Relaxed)
+                {
+                    eprintln!(
+                        "gallery: scene `{scene}` panicked after it was drawn, most likely in a paint \
+                         callback: unless it catches that itself, the process ends here"
+                    );
+                }
             }
         }));
     });

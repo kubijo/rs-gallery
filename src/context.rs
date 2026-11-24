@@ -89,8 +89,10 @@ impl std::fmt::Display for ScenePanic {
 pub fn __run_scene(
     ctx: &mut SceneCtx<'_>,
     ui: &mut egui::Ui,
+    scene: &'static str,
     render: fn(&mut SceneCtx<'_>, &mut egui::Ui),
 ) {
+    crate::play::draws(scene);
     if let Err(error) = crate::play::caught(|| render(ctx, ui)) {
         ctx.panicked = Some(ScenePanic {
             message: error.reason().to_owned(),

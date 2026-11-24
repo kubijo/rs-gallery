@@ -3,7 +3,9 @@
 
 use std::{
     collections::HashSet,
-    sync::atomic::{AtomicU32, Ordering},
+    fs::File,
+    io::{BufWriter, Write as _},
+    time::Duration,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -18,7 +20,7 @@ use crate::{
     },
 };
 
-use super::{QUIET_FRAMES, dashed, landed, write_png};
+use super::{QUIET_FRAMES, dashed, landed};
 
 /// How a test run judges its snapshot checks.
 #[derive(Clone, PartialEq, Debug)]
@@ -117,9 +119,6 @@ pub(super) struct Looks<'a> {
     measured: Option<egui::Vec2>,
 }
 
-/// References this process has taken.
-static TAKEN: AtomicU32 = AtomicU32::new(0);
-
 /// The check under way: its files, its reference, and what it last saw.
 struct Looking {
     reference_path: Utf8PathBuf,
@@ -138,15 +137,52 @@ pub(super) enum Seen {
 }
 
 impl Seen {
+    /// Write it to `path`, moved into place whole:
+    /// a run cut short leaves what was there,
+    /// and another run may be writing the same file.
     fn write(&self, path: &Utf8Path) -> Result<(), String> {
+        let error = |e: &dyn std::fmt::Display| format!("write `{path}`: {e}");
+        let dir = path.parent().unwrap_or(Utf8Path::new("."));
+        std::fs::create_dir_all(dir).map_err(|e| format!("create `{dir}`: {e}"))?;
+        let (mut file, whole) = tempfile::Builder::new()
+            .prefix(&unfinished(path))
+            .make_in(dir, |path| File::create_new(path))
+            .map_err(|e| error(&e))?
+            .into_parts();
         match self {
-            Self::Image(image) => write_png(image, path),
-            Self::Text(text) => {
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir).map_err(|e| format!("create `{dir}`: {e}"))?;
-                }
-                std::fs::write(path, text).map_err(|e| format!("write `{path}`: {e}"))
+            Self::Image(image) => {
+                let mut out = BufWriter::new(&mut file);
+                image
+                    .write_to(&mut out, image::ImageFormat::Png)
+                    .map_err(|e| error(&e))?;
+                out.flush().map_err(|e| error(&e))?;
             }
+            Self::Text(text) => file.write_all(text.as_bytes()).map_err(|e| error(&e))?,
+        }
+        drop(file);
+        whole.persist(path).map_err(|e| error(&e))
+    }
+}
+
+/// How the names of the files that become the one at `path` begin,
+/// which a catalog's `.gitignore` passes over as it does what a check leaves.
+fn unfinished(path: &Utf8Path) -> String {
+    format!(".{}.new.", path.file_name().unwrap_or_default())
+}
+
+/// How long it can take to write a file of a check's.
+const WRITTEN_WITHIN: Duration = Duration::from_mins(1);
+
+/// Remove what runs cut short while writing the file at `path` have left.
+fn sweep(path: &Utf8Path) {
+    let unfinished = unfinished(path);
+    let files = path.parent().into_iter().flat_map(Utf8Path::read_dir_utf8);
+    for file in files.flatten().flatten() {
+        let age = file.metadata().and_then(|file| file.modified());
+        if file.file_name().starts_with(&unfinished)
+            && age.is_ok_and(|at| at.elapsed().is_ok_and(|age| age > WRITTEN_WITHIN))
+        {
+            _ = std::fs::remove_file(file.path());
         }
     }
 }
@@ -191,16 +227,30 @@ impl<'a> Looks<'a> {
         self.current = None;
         self.quiet = 0;
         self.measured = None;
+        let path = reference_path(ask, self.renderer, self.snapshots.dir.as_deref());
+        let unchecked = matches!(&path, Ok(path) if !self.checked.contains(path));
+        if let Ok(path) = &path
+            && unchecked
+        {
+            // An earlier run's would pass for this one's, whatever this one comes to.
+            // Left at worst: a read-only checkout must not fail a check that passes.
+            sweep(path);
+            for stale in beside(path, self.renderer) {
+                sweep(&stale);
+                _ = std::fs::remove_file(stale);
+            }
+        }
         if let Some(why) = ask.misused {
             return Err(why.to_owned());
         }
-        let path = reference_path(ask, self.renderer, self.snapshots.dir.as_deref())?;
-        if !self.checked.insert(path.clone()) {
+        let path = path?;
+        if !unchecked {
             return Err(format!(
                 "`{}` is already checked in this play; give each snapshot a name of its own",
                 path.file_name().unwrap_or_default()
             ));
         }
+        self.checked.insert(path.clone());
         self.current = Some(Looking {
             reference: match ask.of {
                 Of::Screenshot { .. } => read_image(&path),
@@ -281,15 +331,6 @@ impl<'a> Looks<'a> {
                 Update::All => looking.verdict != Verdict::Identical,
             };
         let path = &looking.reference_path;
-        let (new, diff) = match path.extension() {
-            Some("json") => ("new.json", "diff.txt"),
-            _ => ("new.png", "diff.png"),
-        };
-        let (new, diff) = (path.with_extension(new), path.with_extension(diff));
-        // Leftovers at worst: a read-only checkout must not fail a check that passes.
-        for stale in [&new, &diff] {
-            _ = std::fs::remove_file(stale);
-        }
         let mut kept = Kept::default();
         if !take && !matches!(looking.reference, Reference::Missing) {
             kept.attachments
@@ -297,23 +338,12 @@ impl<'a> Looks<'a> {
         }
         if let Some(seen) = looking.seen.filter(|_| take || !passed) {
             if take {
-                // Moved into place whole, so a run cut short leaves the old reference as it was,
-                // from a name of its own, as another run may be taking the same one.
-                let whole = path.with_extension(format!(
-                    "{}-{}.new.{}",
-                    std::process::id(),
-                    TAKEN.fetch_add(1, Ordering::Relaxed),
-                    path.extension().unwrap_or_default(),
-                ));
-                seen.write(&whole)
-                    .and_then(|()| {
-                        std::fs::rename(&whole, path).map_err(|e| format!("write `{path}`: {e}"))
-                    })
-                    .inspect_err(|_| _ = std::fs::remove_file(&whole))?;
+                seen.write(path)?;
                 kept.attachments
                     .push(attach(AttachmentKind::Reference, path));
                 kept.acceptance = Acceptance::Taken;
             } else {
+                let [new, diff] = beside(path, self.renderer);
                 seen.write(&new)?;
                 kept.attachments.push(attach(AttachmentKind::Actual, &new));
                 if let Some(marked) = looking.diff {
@@ -329,6 +359,17 @@ impl<'a> Looks<'a> {
             }
         }
         Ok(kept)
+    }
+}
+
+/// What a check that fails leaves beside the reference at `path`:
+/// what it saw, and where that differs.
+fn beside(path: &Utf8Path, renderer: &str) -> [Utf8PathBuf; 2] {
+    match path.extension() {
+        // One reference for every renderer, whose tests may run side by side.
+        Some("json") => ["new.json", "diff.txt"]
+            .map(|extension| path.with_extension(format!("{renderer}.{extension}"))),
+        _ => ["new.png", "diff.png"].map(|extension| path.with_extension(extension)),
     }
 }
 
@@ -364,10 +405,7 @@ fn reference_path(
             play_dir(ask.file, &here)?.join(crate::play::snapshot::DIR)
         }
     };
-    for module in ask.module_path.split("::").skip(1) {
-        path.push(component(module)?);
-    }
-    path.push(component(ask.play)?);
+    path.push(play_path(ask.module_path, ask.play)?);
     path.push(match ask.of {
         Of::Screenshot { .. } => format!("{name}.{renderer}.png"),
         Of::Tree { .. } => format!("{name}.accesskit.json"),
@@ -375,11 +413,22 @@ fn reference_path(
     Ok(path)
 }
 
-/// A module or a play as a directory. A [`PlayEntry`](crate::PlayEntry) built by hand
-/// may name anything, a way out of the references' directory included.
-fn component(name: &str) -> Result<&str, String> {
+/// `<module>/<play>`, under which a play's files are kept.
+pub(super) fn play_path(module_path: &str, play: &str) -> Result<Utf8PathBuf, String> {
+    let mut path = Utf8PathBuf::new();
+    for module in module_path.split("::").skip(1) {
+        path.push(component(module)?);
+    }
+    path.push(component(play)?);
+    Ok(path)
+}
+
+/// A module or a play as a directory.
+/// A [`PlayEntry`](crate::PlayEntry) built by hand may name
+/// anything, a way out of the directory it is kept in included.
+pub(super) fn component(name: &str) -> Result<&str, String> {
     if name.is_empty() || name.contains(['/', '\\', ':', '.', '\0']) {
-        return Err(format!("{name:?} is no name to keep references under"));
+        return Err(format!("{name:?} is no name to keep files under"));
     }
     Ok(name)
 }
@@ -387,7 +436,10 @@ fn component(name: &str) -> Result<&str, String> {
 /// The directory of `file`, as `file!()` gives it: absolute for a scene file,
 /// relative to the workspace for a module, where a member's tests run from below.
 fn play_dir(file: &str, here: &Utf8Path) -> Result<Utf8PathBuf, String> {
-    here.ancestors()
+    // The workspace's first: a member may have a file of the same path in its own directory.
+    workspace_of(here)
+        .into_iter()
+        .chain(here.ancestors().map(Utf8Path::to_owned))
         .map(|dir| dir.join(file))
         .find(|found| found.is_file())
         .and_then(|found| found.parent().map(Utf8Path::to_owned))
@@ -396,6 +448,30 @@ fn play_dir(file: &str, here: &Utf8Path) -> Result<Utf8PathBuf, String> {
                 "the play's file `{file}` is not in `{here}` or above it, to keep references beside"
             )
         })
+}
+
+/// The root of the workspace the package around `here` is in, as cargo finds it:
+/// from the package up, the first directory whose `[workspace]` does not exclude the package,
+/// or the one a `package.workspace` names on the way.
+fn workspace_of(here: &Utf8Path) -> Option<Utf8PathBuf> {
+    let manifest = |dir: &Utf8Path| {
+        let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+        manifest.parse::<toml::Table>().ok()
+    };
+    let package = here.ancestors().find(|dir| manifest(dir).is_some())?;
+    package.ancestors().find_map(|dir| {
+        let manifest = manifest(dir)?;
+        let Some(workspace) = manifest.get("workspace") else {
+            let root = manifest.get("package")?.get("workspace")?.as_str()?;
+            return Some(dir.join(root));
+        };
+        let lists = |key| {
+            let paths = workspace.get(key).and_then(toml::Value::as_array);
+            let mut paths = paths.into_iter().flatten().filter_map(toml::Value::as_str);
+            paths.any(|path| package.starts_with(dir.join(path)))
+        };
+        (!lists("exclude") || lists("members")).then(|| dir.to_owned())
+    })
 }
 
 fn read_image(path: &Utf8Path) -> Reference {
@@ -601,6 +677,62 @@ mod tests {
         );
         let lost = play_dir("nowhere/lost.scene.rs", workspace).expect_err("no such file");
         assert!(lost.contains("nowhere/lost.scene.rs"), "{lost}");
+    }
+
+    #[test]
+    fn a_plays_file_is_its_workspaces_though_a_package_has_one_of_its_path() {
+        let scratch = tempfile::tempdir().expect("a directory");
+        let root = Utf8Path::from_path(scratch.path()).expect("UTF-8");
+        for dir in ["", "app"] {
+            std::fs::create_dir_all(root.join(dir).join("src")).expect("made");
+            std::fs::write(root.join(dir).join("src/lib.rs"), "").expect("written");
+        }
+        for (workspace, package, of) in [
+            ("[workspace]", "[package]", ""),
+            ("[workspace]\nexclude = [\"app\"]", "[package]", "app"),
+            (
+                "[workspace]\nexclude = [\"app\"]\nmembers = [\"app\"]",
+                "[package]",
+                "",
+            ),
+            ("[workspace]", "[workspace]", "app"),
+            ("[package]", "[package]", "app"),
+        ] {
+            std::fs::write(root.join("Cargo.toml"), workspace).expect("written");
+            std::fs::write(root.join("app/Cargo.toml"), package).expect("written");
+            assert_eq!(
+                play_dir("src/lib.rs", &root.join("app")),
+                Ok(root.join(of).join("src")),
+                "{workspace:?} over {package:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plays_file_is_the_outer_workspaces_when_the_inner_leaves_its_package_out() {
+        let scratch = tempfile::tempdir().expect("a directory");
+        let root = Utf8Path::from_path(scratch.path()).expect("UTF-8");
+        for (dir, manifest) in [
+            ("", "[workspace]"),
+            ("inner", "[workspace]\nexclude = [\"app\"]"),
+            ("inner/app", "[package]"),
+            ("other", "[workspace]"),
+            ("inner/pointing", "[package]\nworkspace = \"../../other\""),
+        ] {
+            std::fs::create_dir_all(root.join(dir).join("src")).expect("made");
+            std::fs::write(root.join(dir).join("src/lib.rs"), "").expect("written");
+            std::fs::write(root.join(dir).join("Cargo.toml"), manifest).expect("written");
+        }
+        for (package, of) in [
+            ("inner/app", "src"),
+            ("inner/pointing", "inner/pointing/../../other/src"),
+        ] {
+            assert_eq!(
+                play_dir("src/lib.rs", &root.join(package)),
+                Ok(root.join(of)),
+                "{package}"
+            );
+        }
     }
 
     fn path_of(module_path: &str, play: &str) -> Result<String, String> {

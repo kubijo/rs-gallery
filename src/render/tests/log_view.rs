@@ -5,7 +5,7 @@ use crate::play::log::{Check, Entry, Outcome, What};
 
 /// What a view wrote, kept where the test can read it back.
 #[derive(Clone, Default)]
-struct Written(Rc<RefCell<Vec<u8>>>);
+pub(super) struct Written(Rc<RefCell<Vec<u8>>>);
 
 impl Write for Written {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -19,12 +19,12 @@ impl Write for Written {
 }
 
 impl Written {
-    fn text(&self) -> String {
+    pub(super) fn text(&self) -> String {
         String::from_utf8(self.0.borrow().clone()).expect("UTF-8")
     }
 }
 
-fn view(mode: LogMode, rows: usize) -> (LogView, Written) {
+pub(super) fn view(mode: LogMode, rows: usize) -> (LogView, Written) {
     let written = Written::default();
     (
         LogView::into(mode, Box::new(written.clone()), rows, 80),

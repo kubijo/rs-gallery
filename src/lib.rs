@@ -101,6 +101,8 @@ pub use offscreen::{ImageInput, Offscreen, Pointer, StageTexture};
 pub use pass::ScenePass;
 use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
+#[doc(hidden)]
+pub use play::__in_scenes_dylib;
 pub use play::__run_play;
 pub use play::{
     By, Canvas, DEFAULT_WAIT_FRAMES, DRAG_FRAMES, Expect, ExpectCanvas, Expected, Found, Numeric,
@@ -1995,6 +1997,7 @@ macro_rules! scenes_dylib {
 
         #[unsafe(no_mangle)]
         pub fn __gallery_manifest() -> $crate::Manifest {
+            $crate::__in_scenes_dylib();
             $crate::Manifest {
                 scenes: $crate::inventory::iter::<$crate::SceneEntry>()
                     .copied()
@@ -2018,6 +2021,7 @@ macro_rules! scenes_dylib {
 
         #[unsafe(no_mangle)]
         pub fn __gallery_manifest() -> $crate::Manifest {
+            $crate::__in_scenes_dylib();
             $crate::Manifest {
                 scenes: $crate::inventory::iter::<$crate::SceneEntry>()
                     .copied()

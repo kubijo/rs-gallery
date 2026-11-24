@@ -67,7 +67,7 @@ fn recorded(
             record: Some(Record {
                 fps,
                 seconds: Some(seconds),
-                keep: Trace::On,
+                keep: Trace::Always,
                 formats: VideoFormat::Apng.into(),
                 hold: None,
                 input: None,
@@ -134,6 +134,160 @@ fn a_recording_of_a_still_scene_is_one_frame_held() {
         (video["frames"].as_u64(), video["written"].as_u64()),
         (Some(5), Some(1))
     );
+}
+
+/// What a shot recorded in both formats came to.
+#[cfg(not(target_vendor = "apple"))]
+struct Recorded {
+    dir: Utf8PathBuf,
+    _scratch: tempfile::TempDir,
+    outcome: Result<(), String>,
+    /// The play's log as a terminal without redrawing shows it.
+    log: String,
+}
+
+/// Record a canvas of 8×8 pixels, where OpenH264 takes 16×16 and up: the APNG is written
+/// and the MP4 lost, which its encoder may not tell before the recording is closed.
+#[cfg(not(target_vendor = "apple"))]
+fn losing_the_mp4(
+    render: fn(&mut crate::SceneCtx<'_>, &mut egui::Ui),
+    play: Option<fn(&mut crate::Play<'_>) -> crate::PlayResult>,
+    seconds: f32,
+) -> Recorded {
+    let scratch = tempfile::tempdir().expect("a directory");
+    let dir = Utf8PathBuf::from_path_buf(scratch.path().to_owned()).expect("UTF-8");
+    let shot = Shot {
+        scene: "recorded".to_owned(),
+        out: Some(dir.join("shot.png")),
+        size: egui::vec2(32.0, 32.0),
+        knobs: Overrides::default(),
+        globals: Overrides::default(),
+        frames: None,
+        trim: false,
+        settle: false,
+        scale: 0.25,
+        list: false,
+        template: false,
+        play: play.map(|_| ShotPlay {
+            name: "plays".to_owned(),
+            trace: Trace::Failing,
+            steps: false,
+        }),
+        record: Some(Record {
+            fps: 10,
+            seconds: Some(seconds),
+            keep: Trace::Failing,
+            formats: VideoFormats::of([VideoFormat::Apng, VideoFormat::Mp4]).expect("two"),
+            hold: Some(0.0),
+            input: None,
+        }),
+    };
+    let plays: Vec<_> = play
+        .map(|run| PlayEntry {
+            scene: crate::SceneKey {
+                module_path: "reference",
+                name: "recorded",
+            },
+            name: "plays",
+            module_path: "reference",
+            file: file!(),
+            run,
+        })
+        .into_iter()
+        .collect();
+    let (mut view, written) = log_view::view(LogMode::Linear, 24);
+    let mut watch = Watch::new(&mut view);
+    let setup = |_: &egui::Context| {};
+    let scenes = manifest(render);
+    let outcome = shoot_with_globals(&scenes, None, &plays, &glow(), &setup, &shot, &mut watch);
+    Recorded {
+        dir,
+        _scratch: scratch,
+        outcome: outcome.map(drop).map_err(|failure| failure.plain()),
+        log: written.text(),
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+impl Recorded {
+    /// That it failed for the MP4 and kept the APNG, in a panel that says `recorded`.
+    #[track_caller]
+    fn kept_the_apng_alone(&self, recorded: &str) -> &str {
+        let panel = self.outcome.as_ref().expect_err("the MP4 is lost");
+        let path = |name: &str| self.dir.join(name);
+        assert_eq!(panel.matches("shot.mp4`").count(), 1, "{panel}");
+        assert!(
+            panel.contains(&format!("{recorded} {}", path("shot.apng"))),
+            "{panel}"
+        );
+        assert!(!path("shot.mp4").exists());
+        assert!(!decode(&path("shot.apng")).1.is_empty());
+        panel
+    }
+}
+
+/// Draws nothing, so its canvas stays as small as asked.
+#[cfg(not(target_vendor = "apple"))]
+fn blank(_: &mut crate::SceneCtx<'_>, _: &mut egui::Ui) {}
+
+#[cfg(not(target_vendor = "apple"))]
+#[test]
+fn a_play_that_loses_one_recording_fails_and_lists_the_other() {
+    let lost = losing_the_mp4(blank, Some(|p| p.idle(1)), 0.0);
+    let panel = lost.kept_the_apng_alone("the play is recorded in");
+    assert!(
+        panel.contains("play `plays` on `recorded` failed"),
+        "{panel}"
+    );
+    assert!(
+        lost.log.contains("× failed outside any step"),
+        "its log says so too: {}",
+        lost.log
+    );
+}
+
+#[cfg(not(target_vendor = "apple"))]
+#[test]
+fn a_play_that_fails_says_which_recording_it_also_lost() {
+    let fails: fn(&mut crate::Play<'_>) -> crate::PlayResult = |p| {
+        p.idle(1)?;
+        Err("its own failure".into())
+    };
+    let lost = losing_the_mp4(blank, Some(fails), 0.0);
+    let panel = lost.kept_the_apng_alone("the play is recorded in");
+    assert!(panel.contains("its own failure"), "{panel}");
+    assert!(panel.contains("not recorded: write"), "{panel}");
+}
+
+#[cfg(not(target_vendor = "apple"))]
+#[test]
+fn a_shot_that_loses_one_recording_fails_and_points_at_the_other() {
+    let lost = losing_the_mp4(blank, None, 0.1);
+    lost.kept_the_apng_alone("the shot is recorded in");
+}
+
+#[cfg(not(target_vendor = "apple"))]
+#[test]
+fn a_shot_that_fails_as_it_is_recorded_says_so_before_what_it_lost() {
+    thread_local! {
+        static LEFT: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
+    }
+    fn panics(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
+        crate::__run_scene(ctx, ui, "recorded", |_, _| {
+            let left = LEFT.get();
+            assert_ne!(left, 0, "its own failure");
+            LEFT.set(left - 1);
+        });
+    }
+    let one_frame = losing_the_mp4(panics, None, 0.1);
+    one_frame.kept_the_apng_alone("the shot is recorded in");
+    let drawn = u32::MAX - LEFT.get();
+    LEFT.set(drawn);
+
+    let two_frames = losing_the_mp4(panics, None, 0.2);
+    let panel = two_frames.outcome.expect_err("the second panics");
+    let [own, mp4] = ["its own failure", "not recorded: write"].map(|said| panel.find(said));
+    assert!(own.is_some() && own < mp4, "{panel}");
 }
 
 #[cfg(not(target_vendor = "apple"))]

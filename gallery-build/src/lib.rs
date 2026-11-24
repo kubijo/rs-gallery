@@ -23,6 +23,30 @@ pub struct Config {
     /// Extra hot-reload paths.
     pub hot_watch_paths: Vec<Utf8PathBuf>,
     pub snapshots: Snapshots,
+    pub tests: Tests,
+}
+
+/// `[tests]`: what a catalog's tests leave to look at.
+#[derive(Clone, Default, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tests {
+    #[serde(default)]
+    pub video: Video,
+    /// Where it goes, absolute;
+    /// unset leaves it to `gallery/` in cargo's target directory.
+    pub output: Option<Utf8PathBuf>,
+}
+
+/// Which plays' videos a catalog's tests keep.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Video {
+    /// None: no play is recorded.
+    Off,
+    /// Those of the plays that fail.
+    #[default]
+    Failing,
+    Always,
 }
 
 /// `[snapshots]`: how far a screenshot check lets a frame stray
@@ -87,6 +111,8 @@ struct Declared {
     title: String,
     #[serde(default)]
     snapshots: Snapshots,
+    #[serde(default)]
+    tests: Tests,
 }
 
 fn default_title() -> String {
@@ -125,12 +151,17 @@ impl Config {
             .snapshots
             .check()
             .map_err(|e| format!("`{path}`: {e}"))?;
+        let tests = Tests {
+            output: declared.tests.output.map(|output| dir.join(output)),
+            ..declared.tests
+        };
         Ok(Self {
-            path,
             title: declared.title,
             globs,
             hot_watch_paths,
             snapshots: declared.snapshots,
+            tests,
+            path,
         })
     }
 }
@@ -681,6 +712,39 @@ mod tests {
         .err()
         .expect("an unknown key is an error");
         assert!(error.contains("tolerence"), "{error}");
+    }
+
+    #[test]
+    fn a_tests_table_says_which_videos_to_keep_and_where() {
+        let read = |name, tests: &str| {
+            read_config(name, &format!("scene_globs = [\"scene.rs\"]\n{tests}"))
+        };
+        let unset = read("tests-unset", "").expect("a readable config").tests;
+        assert_eq!((unset.video, unset.output), (Video::Failing, None));
+
+        let config = read(
+            "tests-set",
+            indoc::indoc! {r#"
+                [tests]
+                video = "always"
+                output = "out/tests"
+            "#},
+        )
+        .expect("a readable config");
+        assert_eq!(config.tests.video, Video::Always);
+        let dir = config.path.parent().expect("a directory");
+        assert_eq!(config.tests.output, Some(dir.join("out/tests")));
+
+        let error = read(
+            "tests-misspelt",
+            indoc::indoc! {r#"
+                [tests]
+                video = "on"
+            "#},
+        )
+        .err()
+        .expect("an unknown value is an error");
+        assert!(error.contains("`off`, `failing`, `always`"), "{error}");
     }
 
     #[test]

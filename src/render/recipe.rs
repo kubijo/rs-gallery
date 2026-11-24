@@ -94,9 +94,10 @@ pub(super) struct Recipe {
     /// Shoot each scene as soon as it stops asking to be redrawn.
     /// Off by default, and a shot can override it.
     settle: Option<bool>,
-    /// Write what the run came to as JSON here. Off unless asked for.
+    /// Write what the run came to as JSON here.
+    /// Off unless asked for.
     report: Option<Utf8PathBuf>,
-    /// When to keep a play's step screenshots: `retain-on-failure` unless set.
+    /// When to keep a play's step screenshots: `failing` unless set.
     /// A shot can override it.
     trace: Option<Trace>,
     /// Catalog globals inherited by each shot.
@@ -233,7 +234,7 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                     let record = Record {
                         fps: record.fps,
                         seconds: record.seconds,
-                        keep: shot.video.unwrap_or(Trace::On),
+                        keep: shot.video.unwrap_or(Trace::Always),
                         formats: record.format,
                         hold: record.hold,
                         input: record.input.as_ref().and_then(RecipeInput::corner),

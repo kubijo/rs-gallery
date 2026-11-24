@@ -479,7 +479,7 @@ just play form saves_after_a_moment /tmp/saved.png
 name = "saved"
 scene = "form"
 play = "saves_after_a_moment"
-trace = "on" # optional; "retain-on-failure" unless set
+trace = "always" # optional; "failing" unless set
 ```
 
 While a capture runs, each play's log — its steps, gestures and checks, with the frames each drew — shows on stderr. On
@@ -492,8 +492,8 @@ redraw for 300 ms, slow enough to follow a run or record it.
 A play that fails does not stop the run: the other shots still run, the summary marks each shot passed or failed, and
 each failure follows in a panel that names the step and shows the play's own failing line. A failed play keeps a
 screenshot after every step in a directory beside the shot, `renders/saved.steps/01-fill-name.png` and on, which
-`trace = "on"` keeps for a passing play too. The run exits non-zero. The report's `play` gives its `steps` and its whole
-`log`, each check with what it expected and found; `failed_shots` adds the `check` that failed.
+`trace = "always"` keeps for a passing play too. The run exits non-zero. The report's `play` gives its `steps` and its
+whole `log`, each check with what it expected and found; `failed_shots` adds the `check` that failed.
 
 A capture makes pictures and recordings, at whatever size, scale and knobs its shots ask for. What a play expects still
 has to hold, as that is also how a play waits; its [snapshots](#comparing-screenshots) are not compared, and its log
@@ -594,26 +594,26 @@ it and fails.
 
 ## Recording
 
-A shot can record what it draws beside its PNG, as `saved.apng` or `saved.mp4`:
+A shot can record what it draws beside its PNG, as `saved.mp4` or `saved.apng`:
 
 ```toml
 [[shot]]
 name = "orbit"
 scene = "orbit"
-record = { fps = 60, seconds = 2 } # optional; `format = "mp4"`, or both: `format = ["apng", "mp4"]`
+record = { fps = 60, seconds = 2 } # optional; `format = "apng"`, or both: `format = ["apng", "mp4"]`
 
 [[shot]]
 name = "saved"
 scene = "form"
 play = "saves_after_a_moment"
 record = { fps = 30 } # a play shot records the whole play, so it takes no `seconds`
-video = "retain-on-failure" # optional; "on" unless set
+video = "failing" # optional; "always" unless set
 # `hold = 0.5` is the default: seconds the recording pauses at each step's end, 0 for none
 # `input = true` shows the play's keys and mouse, bottom-left; or `input = "top-right"`, etc.
 ```
 
 ```bash
-gallery --scene orbit --render orbit.png --record 60:2 --record-format mp4
+gallery --scene orbit --render orbit.png --record 60:2
 ```
 
 Time is set, not measured: frame *n* is drawn at exactly *n* / fps, so a recording comes out the same however fast the
@@ -628,12 +628,16 @@ pointer is. It is laid over the recorded frames only; the shot's PNG and step sc
 [`studio.scene.rs`](template/studio.scene.rs) is a scene to watch it on: a play that clicks, types, presses shortcuts,
 drags and scrolls across a scene filling its stage.
 
-- **APNG**, the default: lossless and byte-identical between runs, so a recording can itself be compared. A frame that
-  repeats lengthens the one before it, and only the rectangle that changed is written.
-- **MP4** (H.264): small, and seekable and pausable in any player, with a keyframe every second. Encoded by OpenH264,
-  which builds from bundled C++, so a first build needs a C++ compiler.
+- **MP4** (H.264), the default: small, and seekable and pausable in any player, with a keyframe every second. Up to
+  3840×2160 pixels, either way up. Encoded by OpenH264, which builds from bundled C++, so a first build needs a C++
+  compiler.
+- **APNG**: lossless and byte-identical between runs, so a recording can itself be compared, but few players can pause
+  or seek it. A frame that repeats lengthens the one before it, and only the rectangle that changed is written.
 
 Several formats (`--record-format apng,mp4`) are written from one run of the shot, every file from the same frames.
+
+A play whose recording cannot be written fails, though its every check held. So does one whose canvas changes size as it
+is recorded, since a recording's frames are all of one size.
 
 The report's `videos` has an entry per format: its path, the frames drawn, held and written, and what a frame cost on
 average: drawing the scene, rendering and reading it back, and encoding it.
@@ -656,6 +660,35 @@ just test play:: # only the plays; `--list` lists them all
 a test crosses the boundary the window does. A panic is caught where the scene raised it, so it fails only that scene's
 test and names the scene's own line; in the window, the canvas shows it in place of the scene. nextest runs the same
 binary.
+
+A panic in a paint callback of the scene's (`egui_wgpu::Callback`, `egui_glow::CallbackFn`) is only its own to catch: it
+is raised while the frame is rendered, not drawn, and the dylib's `std` and the host's can't catch each other's panics.
+It ends the process, a capture's or the window's too, after its message and a line naming the scene.
+
+A play that fails leaves a video of itself, which its report points at. `gallery.toml` says which are kept, and where:
+
+```toml
+[tests]
+video = "failing" # the default; or "off", "always"
+output = "target/tests" # relative to this file; `gallery/` in cargo's target directory unless set
+```
+
+A video is an MP4 at `<catalog's crate>/<module>/<play>/video.<renderer>.mp4` in there, the crate's dashes as
+underscores; a play of another crate has an `extern-<crate>` before its module. It shows every frame the play drew at 15
+a second, a pause on each step's last, and the keys, mouse and pointer as a recording's `input` does, bottom-left. Where
+a check grows the canvas, the video grows with it, up to the 3840×2160 an MP4 can be. `failing` and `always` record
+every play alike, and differ in what they keep. Each test replaces its own video alone, so one whose play is gone stays
+until it's deleted. A directory gallery makes for them is ignored by git and by hot reload. Until a video is known to be
+kept it is in `gallery-recordings/` in cargo's target directory.
+
+The test keeps its own time and no animations, and trouble with a video fails nothing. Filming does render frames a test
+would not, which a scene can tell in two ways: its paint callbacks run, so a panic in one ends the process and every
+other test in it, and frames take longer, so what a scene does on a thread or by the wall clock gets further within the
+same frames.
+
+A frame painted as the last was is held rather than rendered, unless it has a paint callback or a texture of the scene's
+own. Each one rendered costs a dev build some 40 ms, or 10 ms with the crates that read frames back and encode them
+optimised, as the template's `Cargo.toml` has them; in a workspace, its `[profile.dev.package]` goes in the root's.
 
 ## How it works
 

@@ -282,8 +282,8 @@ struct Cli {
     )]
     record: Option<render::Record>,
 
-    /// The recording's format: `apng` (lossless, comparable) or `mp4` (small, seekable),
-    /// or both from one run as `apng,mp4` [default: apng]
+    /// The recording's format: `mp4` (small, seekable) or `apng` (lossless, comparable),
+    /// or both from one run as `apng,mp4` [default: mp4]
     #[arg(long, value_name = "FORMAT[,FORMAT]", requires = "record")]
     record_format: Option<render::VideoFormats>,
 

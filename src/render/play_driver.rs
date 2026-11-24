@@ -57,7 +57,8 @@ impl HeadlessDriver<'_> {
                     }
                     return Ok(looks.outgrown());
                 }
-                Seen::Image(trim(self.harness.render()?, drawn, self.scale))
+                let image = rendered("render the canvas", self.harness)?;
+                Seen::Image(trim(image, drawn, self.scale))
             }
             Of::Tree { by } => {
                 let root = self.harness.root().accesskit_node();
@@ -74,9 +75,30 @@ impl HeadlessDriver<'_> {
 
 /// `body`'s panic caught here, by the `std` that raised it: unwinding into
 /// a scenes dylib's frames, it would meet the dylib's own `std`, which aborts on it.
-fn guarded<T>(what: &str, body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+///
+/// The other way round, so does a panic the dylib raises in here,
+/// as a scene's paint callback can: [`crate::play::IN_SCENES_DYLIB`].
+pub(super) fn guarded<T>(
+    what: &str,
+    body: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     std::panic::catch_unwind(AssertUnwindSafe(body))
         .map_err(|panic| format!("{what}: {}", panic_message(&panic)))?
+}
+
+/// The canvas as last drawn, rendered [`guarded`]. Meanwhile a play's panics are not kept
+/// off the terminal: the hook alone can tell of one a paint callback in the dylib raises.
+pub(super) fn rendered(
+    what: &str,
+    harness: &mut egui_kittest::Harness<'static, Canvas>,
+) -> Result<image::RgbaImage, String> {
+    let quieten = harness.state().quieten;
+    let was = quieten.map(|quieten| quieten(false));
+    let image = guarded(what, || harness.render());
+    if let (Some(quieten), Some(was)) = (quieten, was) {
+        quieten(was);
+    }
+    image
 }
 
 /// [`guarded`], of what reads labels, quietly, as a wait may ask for one every frame:
@@ -92,6 +114,10 @@ fn read_tree<T>(body: impl FnOnce() -> T) -> Result<T, String> {
 }
 
 impl crate::play::PlayDriver for HeadlessDriver<'_> {
+    fn quietened_by(&mut self, quieten: crate::play::Quieten) {
+        self.harness.state_mut().quieten = Some(quieten);
+    }
+
     fn query(&self, by: &crate::By) -> Result<Vec<crate::Found>, String> {
         use kittest::NodeT as _;
         read_tree(|| {
@@ -176,7 +202,7 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
             return Ok(None);
         };
         let drawn = drawn(self.harness);
-        let mut image = guarded("render the canvas", || self.harness.render())?;
+        let mut image = rendered("render the canvas", self.harness)?;
         if self.trim {
             image = trim(image, drawn, self.scale);
         }

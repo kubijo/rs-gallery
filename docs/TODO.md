@@ -83,8 +83,6 @@ them automatic:
 Rendering a scene headlessly and diffing it against a committed reference both landed. What is left is the shape needed
 past a handful of images, and a structural target beside the pixel one.
 
-- [ ] A consumer's plays compare their canvas (`to_match_screenshot`), but a shot without a play has nothing to compare
-  it. It needs a way to say so: `--capture --verify`, against references beside the recipe.
 - [ ] It scales to a handful of images, not hundreds. Past that, the shape that works is a persistent differ fed image
   pairs over a pipe (`odiff --server`) rather than a process per image, and an HTML report putting before/after/diff
   side by side — reviewing a wall of failures in a browser beats opening `*.diff.png` by hand. Worth porting when the

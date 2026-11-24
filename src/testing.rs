@@ -6,16 +6,18 @@
 
 use std::{cell::RefCell, mem::ManuallyDrop, process::ExitCode, sync::Arc};
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use libtest_mimic::{Arguments, Failed, Trial};
 
 use crate::{
     GlobalEntry, Manifest, PlayEntry, Renderer, SceneSource as _,
-    hot::HotDylib,
+    diagnostic::Diagnostic,
+    hot::{HotDylib, profile_dir},
     render::{
-        self, DEFAULT_SCALE, DEFAULT_SIZE, Overrides, Session, Shot, ShotPlay, Snapshots, Trace,
-        Update,
+        self, DEFAULT_SCALE, DEFAULT_SIZE, Films, Overrides, Session, Shot, ShotPlay, Snapshots,
+        Testing, Trace, Update,
     },
+    style::Stream,
     tree::scene_key,
 };
 
@@ -71,7 +73,17 @@ pub fn __test_main(
     let globals = source.globals();
     let plays: Arc<[PlayEntry]> = source.plays().into();
     let update = Update::from_env().unwrap_or_else(|e| panic!("{e}"));
-    let snapshots = Arc::new(Snapshots::new(&config.snapshots, renderer, update));
+    let testing = Arc::new(Testing {
+        snapshots: Snapshots::new(&config.snapshots, renderer, update),
+        films: Films::new(
+            config.tests.output.unwrap_or_else(|| in_target("gallery")),
+            in_target("gallery-recordings"),
+            config.tests.video,
+            package.replace('-', "_"),
+        ),
+        warn: Diagnostic::report,
+        styled: styled_for(&args, crate::style::coloured(Stream::Stdout)),
+    });
 
     let mut trials = Vec::new();
     for scene in &manifest.scenes {
@@ -82,7 +94,7 @@ pub fn __test_main(
             plays: Arc::clone(&plays),
             renderer,
             setup,
-            snapshots: Arc::clone(&snapshots),
+            testing: Arc::clone(&testing),
         };
         trials.push(
             Trial::test(format!("smoke::{key}"), move || {
@@ -99,7 +111,7 @@ pub fn __test_main(
             plays: Arc::clone(&plays),
             renderer,
             setup,
-            snapshots: Arc::clone(&snapshots),
+            testing: Arc::clone(&testing),
         };
         let name = play.name;
         trials.push(
@@ -112,14 +124,27 @@ pub fn __test_main(
     libtest_mimic::run(&args, trials).exit_code()
 }
 
-/// What every trial draws from, shared between the test threads.
+/// `name` in cargo's target directory.
+fn in_target(name: &str) -> Utf8PathBuf {
+    let profile = profile_dir().unwrap_or_else(|e| panic!("find the target directory: {e}"));
+    profile.with_file_name(name)
+}
+
+/// Whether failures are printed in colour, with links, when stdout is `coloured`:
+/// a log file takes stdout's place.
+fn styled_for(args: &Arguments, coloured: bool) -> bool {
+    args.logfile.is_none() && coloured
+}
+
+/// What every trial draws from,
+/// shared between the test threads.
 struct Catalog {
     manifest: Arc<Manifest>,
     globals: Option<GlobalEntry>,
     plays: Arc<[PlayEntry]>,
     renderer: Renderer,
     setup: fn(&egui::Context),
-    snapshots: Arc<Snapshots>,
+    testing: Arc<Testing>,
 }
 
 thread_local! {
@@ -147,7 +172,7 @@ impl Catalog {
                 session,
                 &self.setup,
                 &shot,
-                &self.snapshots,
+                &self.testing,
             )
             .map_err(Failed::from)
         })
@@ -171,9 +196,25 @@ fn shot(scene: String, play: Option<&str>) -> Shot {
         template: false,
         play: play.map(|name| ShotPlay {
             name: name.to_owned(),
-            trace: Trace::RetainOnFailure,
+            trace: Trace::Failing,
             steps: false,
         }),
         record: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_log_file_takes_no_colour_whatever_the_terminal_does() {
+        let args = |logfile: Option<&str>| Arguments {
+            logfile: logfile.map(str::to_owned),
+            ..Arguments::default()
+        };
+        assert!(styled_for(&args(None), true));
+        assert!(!styled_for(&args(None), false));
+        assert!(!styled_for(&args(Some("log.txt")), true));
     }
 }

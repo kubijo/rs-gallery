@@ -45,6 +45,7 @@ fn global_overrides_resolve_conditional_control_chains_before_drawing() {
         clock: None,
         recording: None,
         scene_panic: None,
+        quieten: None,
     };
     let overrides = knobs(&[("first", "true"), ("second", "true"), ("third", "true")]);
     let mut unmatched: Vec<&KnobOverride> = overrides.iter().collect();
@@ -208,6 +209,7 @@ fn global_overrides_are_rechecked_after_choice_options_change() {
         clock: None,
         recording: None,
         scene_panic: None,
+        quieten: None,
     };
     let overrides = knobs(&[("choice", "Target"), ("expanded", "true")]);
     let mut unmatched: Vec<&KnobOverride> = overrides.iter().collect();

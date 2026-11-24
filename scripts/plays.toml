@@ -17,7 +17,7 @@ play = "tab_counts_while_focused"
 name = "tasks-filtered"
 scene = "todo"
 play = "adds_completes_and_filters"
-trace = "on"
+trace = "always"
 
 [[shot]]
 name = "tasks-sorted"
@@ -33,7 +33,7 @@ play = "drags_the_priority_up"
 name = "tasks-scrolled"
 scene = "todo"
 play = "scrolls_to_the_end_of_a_long_list"
-trace = "on"
+trace = "always"
 
 [[shot]]
 name = "tasks-cleared"

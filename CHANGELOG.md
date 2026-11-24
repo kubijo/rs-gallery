@@ -58,7 +58,7 @@ so a minor release may carry a breaking change.
 
 - **Captures run plays.** `[[shot]] play = "name"` and `--play NAME` capture the state a play leaves behind — hover,
   focus, typed text, which no knob can set. The report lists each step and its frames. A failing play keeps a screenshot
-  per step beside the shot (`trace = "on"` keeps them always), and the instance justfile gains `just play`.
+  per step beside the shot (`trace = "always"` keeps a passing play's too), and the instance justfile gains `just play`.
 
 - **Fixed: a capture cut off a scene's windows and popups.** Trimming kept the scene's content alone, and so did growing
   a canvas too small for it. An `egui::Window` or popup a scene shows over its content is now captured whole.
@@ -107,24 +107,26 @@ so a minor release may carry a breaking change.
   and `just release::check`.
 
 - **Recordings.** A shot's `record = { fps, seconds }`, or `--record FPS:SECONDS`, writes what it draws beside its PNG;
-  on a play shot, `record = { fps }` records the whole play, and `video = "retain-on-failure"` keeps it only when the
-  play fails, while pausing `hold` seconds (0.5 unless set) on each step's end so it can be followed, and with
-  `input = true` (`--record-input`) shows the play's keys, mouse buttons and pointer over it; the template's new
-  `studio` scene carries a play touching it with every kind of input to show that on. Frame *n* is drawn at exactly *n*
-  / fps. The default APNG is lossless and byte-identical between runs; `format = "mp4"` (`--record-format mp4`) writes a
-  seekable H.264 MP4, and `format = ["apng", "mp4"]` (`--record-format apng,mp4`) both from one run. The report's
-  `videos` and the summary name each file, and the report adds what a frame cost to draw, capture and encode.
+  on a play shot, `record = { fps }` records the whole play, and `video = "failing"` keeps it only when the play fails,
+  while pausing `hold` seconds (0.5 unless set) on each step's end so it can be followed, and with `input = true`
+  (`--record-input`) shows the play's keys, mouse buttons and pointer over it; the template's new `studio` scene carries
+  a play touching it with every kind of input to show that on. Frame *n* is drawn at exactly *n* / fps. The default is a
+  seekable H.264 MP4; `format = "apng"` (`--record-format apng`) writes an APNG, lossless and byte-identical between
+  runs, and `format = ["apng", "mp4"]` (`--record-format apng,mp4`) both from one run. The report's `videos` and the
+  summary name each file, and the report adds what a frame cost to draw, capture and encode.
 
 - **Dependencies.** usvg 0.50, notify 9 and process-wrap 11.
 
 - **Catalog tests.** `gallery::test_main!(renderer)` in a `harness = false` test makes every scene a `smoke::<scene>`
   test and every play a `play::<scene>::<name>` test, run through the same scenes dylib the window loads; `just test` in
   the template runs them. To add it to an existing instance, copy `tests/scenes.rs` and its `[[test]]` entry from the
-  template.
+  template. A failing play's report points at a video of it, its input shown; `gallery.toml`'s `[tests]` sets `video` to
+  `"off"`, `"failing"` (the default) or `"always"`, and `output` to the directory they go to. Recording costs less with
+  the `[profile.dev.package]` of the template's `Cargo.toml`.
 
 - **A panicking scene no longer takes everything down.** `#[scene]` catches the panic in the scenes dylib, where it was
   raised: the window shows it in place of the scene, a capture fails just that shot, and a test just that scene's test,
-  each naming the scene's own line.
+  each naming the scene's own line. A panic in a paint callback still ends the process, after naming the scene.
 
 ## [0.16.0] - 2026-10-26
 

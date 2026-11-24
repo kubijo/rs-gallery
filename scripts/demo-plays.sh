@@ -55,6 +55,14 @@ if [ "$tests_status" -eq 0 ] || [ "$failed" != "$meant" ]; then
     exit 1
 fi
 
+# A panic the play catches is reported at its own line, and is no end of the process.
+if grep -q 'panicked after it was drawn' <<<"$tests" \
+    || ! grep -q '[0-9] .*panic!("the frame' <<<"$tests"; then
+    echo "$tests" >&2
+    echo "demo-plays: expected the frame's end to fail its play at the line that panics" >&2
+    exit 1
+fi
+
 # Run again for a terminal to show in colour: what a failing snapshot looks like.
 echo >&2
 echo "demo-plays: the snapshots, each failing as meant" >&2
@@ -71,5 +79,16 @@ for update in 1 0; do
         exit 1
     fi
 done
+
+# A panic in a paint callback, which the callback alone could catch,
+# says whose it was before the process ends.
+ended_status=0
+ended=$(cd "$repo/.tmp/demo-wgpu" && DEMO_CALLBACK_PANICS=1 cargo test --quiet --test scenes -- paints_with_a_callback 2>&1) || ended_status=$?
+if [ "$ended_status" -eq 0 ] || ! grep -q 'the callback panics' <<<"$ended" \
+    || ! grep -q 'scene .Calls back. panicked after it was drawn' <<<"$ended"; then
+    echo "$ended" >&2
+    echo "demo-plays: expected the panicking callback's scene and message; exit $ended_status" >&2
+    exit 1
+fi
 
 echo "demo-plays: as meant, the catalog's tests failed only the $meant trials meant to fail" >&2

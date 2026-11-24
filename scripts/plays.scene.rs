@@ -3,6 +3,7 @@
 //! Copied into the demo beside the template's scenes; not part of the template.
 
 use gallery::{
+    egui_wgpu,
     matchers::{gt, lt},
     prelude::*,
 };
@@ -292,6 +293,58 @@ fn reads_other_than_its_reference(p: &mut Play) -> PlayResult {
 fn panics_outside_a_step(p: &mut Play) -> PlayResult {
     p.get_by_label("Nowhere");
     Ok(())
+}
+
+/// Draws nothing, and panics at it when the environment says to.
+struct Callback;
+
+impl egui_wgpu::CallbackTrait for Callback {
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        _pass: &mut egui_wgpu::wgpu::RenderPass<'static>,
+        _resources: &egui_wgpu::CallbackResources,
+    ) {
+        if std::env::var_os("DEMO_CALLBACK_PANICS").is_some() {
+            panic!("the callback panics");
+        }
+    }
+}
+
+/// Paints with a callback once its button was clicked.
+#[scene("Calls back")]
+fn calls_back(_ctx: &mut SceneCtx, ui: &mut Ui) {
+    let id = ui.make_persistent_id("clicked");
+    let mut clicked = ui.data_mut(|data| data.get_temp::<bool>(id).unwrap_or_default());
+    clicked |= ui.button("Paint").clicked();
+    ui.data_mut(|data| data.insert_temp(id, clicked));
+    if clicked {
+        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+            ui.max_rect(),
+            Callback,
+        ));
+    }
+}
+
+/// Passes, unless the callback is told to panic, which ends the process.
+#[play(calls_back)]
+fn paints_with_a_callback(p: &mut Play) -> PlayResult {
+    p.click("Paint")
+}
+
+/// Has egui call it at the end of every frame once its button was clicked.
+#[scene("Ends frames")]
+fn ends_frames(_ctx: &mut SceneCtx, ui: &mut Ui) {
+    if ui.button("Arm").clicked() {
+        let panics = |_: &mut Ui| panic!("the frame's end panics");
+        ui.ctx().on_end_pass("panics", std::sync::Arc::new(panics));
+    }
+}
+
+/// Fails: the scene panics once it is drawn, where only the play can catch it.
+#[play(ends_frames)]
+fn panics_at_a_frames_end(p: &mut Play) -> PlayResult {
+    p.click("Arm")
 }
 
 /// Fails: the scene itself panics, which its `smoke::`

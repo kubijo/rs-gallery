@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use egui::{Event, PointerButton, Pos2};
 
 use super::*;
+use crate::video::resized;
 
 /// The corner the keys and mouse panel sits in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize)]
@@ -178,10 +179,11 @@ impl InputLog {
         at.is_some_and(|at| self.frame < at + self.lit_for)
     }
 
-    pub(super) fn shown(&self) -> Shown {
+    /// What to show on a frame drawn at egui's `zoom`, in points of the canvas unzoomed.
+    pub(super) fn shown(&self, zoom: f32) -> Shown {
         Shown {
             keys: self.keys.iter().map(|(_, key)| key.clone()).collect(),
-            pointer: self.pointer,
+            pointer: self.pointer.map(|at| at * zoom),
             buttons: std::array::from_fn(|index| {
                 self.held[index] || self.lit(self.pressed_at[index])
             }),
@@ -323,12 +325,10 @@ fn corner_offset(corner: Corner) -> egui::Vec2 {
     )
 }
 
-/// A recording's input overlay: the log, the harness that draws it,
-/// and its last image, drawn again only when what it shows changes.
+/// A recording's input so far, and the layer that shows it.
 pub(super) struct InputOverlay {
     log: InputLog,
-    harness: egui_kittest::Harness<'static, OverlayApp>,
-    drawn: Option<(Shown, image::RgbaImage)>,
+    layer: InputLayer,
 }
 
 impl InputOverlay {
@@ -344,14 +344,9 @@ impl InputOverlay {
         fps: u16,
         corner: Corner,
     ) -> Result<Self, Diagnostic> {
-        let harness = open_apart(size, scale, session, |_| OverlayApp {
-            shown: Shown::default(),
-            corner,
-        })?;
         Ok(Self {
             log: InputLog::new(fps),
-            harness,
-            drawn: None,
+            layer: InputLayer::open(session, size, scale, corner)?,
         })
     }
 
@@ -368,14 +363,56 @@ impl InputOverlay {
     pub(super) fn lay_over(
         &mut self,
         events: &[Event],
+        zoom: f32,
         frame: &mut image::RgbaImage,
     ) -> Result<(), String> {
         self.log.frame(events);
-        let shown = self.log.shown();
+        self.layer.lay(&self.log.shown(zoom), frame)
+    }
+}
+
+/// What draws the input over a frame: a harness, and its last image,
+/// drawn again only when what it shows changes.
+pub(super) struct InputLayer {
+    harness: egui_kittest::Harness<'static, OverlayApp>,
+    drawn: Option<(Shown, image::RgbaImage)>,
+}
+
+impl InputLayer {
+    /// A layer for a canvas of `size` points at `scale`,
+    /// drawn on the shot's own renderer.
+    ///
+    /// # Errors
+    /// When the renderer cannot open a harness.
+    pub(super) fn open(
+        session: &Session,
+        size: egui::Vec2,
+        scale: f32,
+        corner: Corner,
+    ) -> Result<Self, Diagnostic> {
+        let harness = open_apart(size, scale, session, |_| OverlayApp {
+            shown: Shown::default(),
+            corner,
+        })?;
+        Ok(Self {
+            harness,
+            drawn: None,
+        })
+    }
+
+    /// Lay `shown` over `frame`.
+    ///
+    /// # Errors
+    /// When it cannot be rendered, or the canvas is not the size it was.
+    pub(super) fn lay(
+        &mut self,
+        shown: &Shown,
+        frame: &mut image::RgbaImage,
+    ) -> Result<(), String> {
         if shown.is_empty() {
             return Ok(());
         }
-        if self.drawn.as_ref().is_none_or(|(was, _)| *was != shown) {
+        if self.drawn.as_ref().is_none_or(|(was, _)| was != shown) {
             self.harness.state_mut().shown = shown.clone();
             // An area only learns its size on the first frame it is drawn,
             // so a panel anchored to a bottom or right edge lands there on the second.
@@ -385,15 +422,11 @@ impl InputOverlay {
             let image = std::panic::catch_unwind(AssertUnwindSafe(|| harness.render())).map_err(
                 |panic| format!("render the input overlay: {}", panic_message(&panic)),
             )??;
-            self.drawn = Some((shown, image));
+            self.drawn = Some((shown.clone(), image));
         }
         let (_, overlay) = self.drawn.as_ref().expect("BUG: drawn just above");
         if overlay.dimensions() != frame.dimensions() {
-            return Err(format!(
-                "the input overlay came out {:?} for a frame of {:?}",
-                overlay.dimensions(),
-                frame.dimensions()
-            ));
+            return Err(resized(overlay.dimensions(), frame.dimensions()));
         }
         composite(frame, overlay);
         Ok(())

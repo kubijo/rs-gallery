@@ -66,6 +66,7 @@ pub(super) fn draw_with_globals(
             clock: recorded.map(Clock::new),
             recording: None,
             scene_panic: None,
+            quieten: None,
         }
     })?;
     if recorded.is_some() {
@@ -228,8 +229,13 @@ pub(super) struct Watch<'a> {
     /// How to judge the play's snapshot checks. `None` in a capture, which makes pictures
     /// at any size, scale and knobs: no reference means one of those.
     pub(super) snapshots: Option<&'a Snapshots>,
+    /// How to film the play.
+    /// `None` in a capture, which records what its shot asks for.
+    pub(super) films: Option<&'a Films>,
     /// Where a failure is reported.
     pub(super) stream: Stream,
+    /// What is amiss that fails nothing.
+    pub(super) warnings: Vec<Diagnostic>,
 }
 
 impl<'a> Watch<'a> {
@@ -238,8 +244,16 @@ impl<'a> Watch<'a> {
             view,
             failed: None,
             snapshots: None,
+            films: None,
             stream: Stream::Stderr,
+            warnings: Vec::new(),
         }
+    }
+
+    /// Note that something is amiss with a play's video.
+    fn unfilmed(&mut self, play: &str, why: String) {
+        let warning = Diagnostic::warning(format!("no video of play `{play}`"));
+        self.warnings.push(warning.cause(why));
     }
 }
 
@@ -253,6 +267,13 @@ pub(super) fn shoot_with_globals(
     watch: &mut Watch<'_>,
 ) -> Result<Option<ShotOutput>, Diagnostic> {
     let scene = *resolve_scene(&manifest.scenes, &shot.scene)?;
+    if let Some(films) = watch.films
+        && let Some(play) = &shot.play
+        && let Ok(entry) = find_play(plays, &scene, &play.name)
+        && let Err(why) = films.clear(entry, session.renderer_name())
+    {
+        watch.unfilmed(&play.name, why);
+    }
     let SceneFrame {
         mut harness,
         mut frames,
@@ -288,8 +309,12 @@ pub(super) fn shoot_with_globals(
             }
             harness.state_mut().actions = Some(Vec::new());
             if let Some((record, out)) = recording {
-                start(&mut harness, session, (size, shot.scale), out, record)?;
+                start(&mut harness, session, shot.scale, out, record)?;
             }
+            let mut film = watch
+                .films
+                .map(|films| films.begin(&mut harness, session.renderer_name(), entry))
+                .unwrap_or(Ok(None));
             let mut driver = HeadlessDriver {
                 harness: &mut harness,
                 globals: &shot.globals,
@@ -312,12 +337,35 @@ pub(super) fn shoot_with_globals(
                 .unwrap_or(&shot.scene);
             driver.view.begin(name, &play.name, play.steps);
             let mut run = crate::play::run(entry, &mut driver);
-            driver.view.end(run.failure.is_some(), run.frames);
             let ledger = driver.ledger;
             harness.state_mut().actions = None;
-            let videos = finish(&mut harness)?;
-            let video_paths: Vec<Utf8PathBuf> =
+            if let Ok(Some(film)) = &mut film {
+                film.end(&mut harness);
+            }
+            let (videos, lost) = finish(&mut harness);
+            if run.failure.is_none() && !lost.is_empty() {
+                run.failure = Some(crate::play::PlayError::new(lost.join("; ")));
+            }
+            watch.view.end(run.failure.is_some(), run.frames);
+            let mut video_paths: Vec<Utf8PathBuf> =
                 videos.iter().map(|video| video.path.clone()).collect();
+            // A failure's report, with where its play is recorded.
+            let mut with_video = |mut report: Diagnostic, film: Result<Option<Film>, String>| {
+                let keep = |film: Film| film.keep(session, shot.scale);
+                match film.and_then(|film| film.map(keep).transpose()) {
+                    Ok(kept) => video_paths.extend(kept),
+                    Err(why) => report = report.hint(format!("the play is not recorded: {why}")),
+                }
+                if !video_paths.is_empty() {
+                    let paths: Vec<String> = video_paths
+                        .iter()
+                        .map(|path| crate::style::path(path, watch.stream))
+                        .collect();
+                    report =
+                        report.hint(format!("the play is recorded in {}", paths.join(" and ")));
+                }
+                (report, std::mem::take(&mut video_paths))
+            };
             // Reported before anything else is drawn: settling again
             // could fail on the very thing the play did, and that
             // would stop the run instead of reporting the play.
@@ -380,14 +428,10 @@ pub(super) fn shoot_with_globals(
                         crate::style::path(&landed(dir), watch.stream)
                     ));
                 }
-                if !video_paths.is_empty() {
-                    let paths: Vec<String> = video_paths
-                        .iter()
-                        .map(|path| crate::style::path(path, watch.stream))
-                        .collect();
-                    report =
-                        report.hint(format!("the play is recorded in {}", paths.join(" and ")));
-                }
+                report = with_lost(report, &lost, failure.reason());
+                let (report, video_paths) = with_video(report, film);
+                let kept = failure.check().and_then(|check| check.kept.as_ref());
+                let report = with_offer(report, kept);
                 watch.failed = Some(FailedShot::of(
                     shot,
                     &scene,
@@ -422,6 +466,7 @@ pub(super) fn shoot_with_globals(
                     play.name, scene.name
                 ))
                 .cause(report.summary());
+                let (report, video_paths) = with_video(report, film);
                 watch.failed = Some(FailedShot::of(
                     shot,
                     &scene,
@@ -432,8 +477,14 @@ pub(super) fn shoot_with_globals(
                 ));
                 return Err(report);
             }
+            if watch.films.is_some_and(Films::keeps_passing) {
+                let keep = |film: Film| film.keep(session, shot.scale);
+                if let Err(why) = film.and_then(|film| film.map(keep).transpose()) {
+                    watch.unfilmed(&play.name, why);
+                }
+            }
             // Only now has the shot passed, so only now are its step screenshots let go.
-            if play.trace == Trace::RetainOnFailure {
+            if play.trace == Trace::Failing {
                 if let Some(dir) = &trace_dir {
                     clear_trace(dir)?;
                 }
@@ -443,7 +494,7 @@ pub(super) fn shoot_with_globals(
             }
             let videos = match shot.record {
                 Some(Record {
-                    keep: Trace::RetainOnFailure,
+                    keep: Trace::Failing,
                     ..
                 }) => {
                     for video in &videos {
@@ -466,9 +517,22 @@ pub(super) fn shoot_with_globals(
     if shot.play.is_none()
         && let Some((record, out)) = recording
     {
-        start(&mut harness, session, (size, shot.scale), out, record)?;
-        record_frames(&mut harness, shot, record.frames())?;
-        videos = finish(&mut harness)?;
+        start(&mut harness, session, shot.scale, out, record)?;
+        let recorded = record_frames(&mut harness, shot, record.frames());
+        let (finished, lost) = finish(&mut harness);
+        if let Err(report) = recorded {
+            let told = report.summary();
+            return Err(with_lost(report, &lost, &told));
+        }
+        if !lost.is_empty() {
+            let mut report = Diagnostic::new(lost.join("; "));
+            for video in &finished {
+                let path = crate::style::path(&video.path, watch.stream);
+                report = report.hint(format!("the shot is recorded in {path}"));
+            }
+            return Err(report);
+        }
+        videos = finished;
     }
 
     if shot.list {
@@ -556,10 +620,27 @@ pub(super) fn with_kept(mut report: Diagnostic, kept: &Kept, stream: Stream) -> 
             crate::style::path(&attachment.path, stream)
         ));
     }
-    if kept.acceptance == Acceptance::Offered {
-        report = report.hint_apart("`UPDATE_SNAPSHOTS=1` takes what it saw as the reference");
-    }
     report
+}
+
+/// `report` with why each recording `lost` was, unless it has `told` that already.
+fn with_lost(report: Diagnostic, lost: &[String], told: &str) -> Diagnostic {
+    lost.iter()
+        .filter(|why| !told.contains(*why))
+        .fold(report, |report, why| {
+            report.hint(format!("not recorded: {why}"))
+        })
+}
+
+/// `report` with how to take what a failed snapshot check saw, if that is on offer:
+/// last, set apart from the files before it.
+pub(super) fn with_offer(report: Diagnostic, kept: Option<&Kept>) -> Diagnostic {
+    match kept {
+        Some(kept) if kept.acceptance == Acceptance::Offered => {
+            report.hint_apart("`UPDATE_SNAPSHOTS=1` takes what it saw as the reference")
+        }
+        _ => report,
+    }
 }
 
 /// A diff with its lines in their colours, cut where it would fill the screen.
@@ -756,6 +837,8 @@ pub(super) struct Canvas {
     pub(super) recording: Option<Recording>,
     /// The first panic the scene raised, failing the shot.
     pub(super) scene_panic: Option<crate::context::ScenePanic>,
+    /// What keeps the panics of its play off the terminal.
+    pub(super) quieten: Option<crate::play::Quieten>,
 }
 
 impl eframe::App for Canvas {
@@ -779,6 +862,7 @@ impl eframe::App for Canvas {
             clock: _,
             recording: _,
             scene_panic,
+            quieten: _,
         } = self;
         let gl_deps = match (loader.clone(), gl.as_deref(), painter.as_ref()) {
             (Some(loader), Some(gl), Some(painter)) => Some(GlDeps {

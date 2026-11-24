@@ -836,7 +836,7 @@ fn a_panicking_scene_fails_its_shot_naming_the_line_that_panicked() {
     }
     // What `#[scene]` registers: the scene, run where its panic can be caught.
     fn caught_boom(ctx: &mut crate::SceneCtx<'_>, ui: &mut egui::Ui) {
-        crate::__run_scene(ctx, ui, boom);
+        crate::__run_scene(ctx, ui, "boom", boom);
     }
     let manifest = Manifest {
         scenes: vec![SceneEntry {

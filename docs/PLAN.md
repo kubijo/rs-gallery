@@ -36,7 +36,9 @@ From the wasm-runtime harness, as designs:
   contrast, which no colour threshold absorbs; the budget is what lets llvmpipe and a GPU share references. A missing or
   new reference fails.
 - The HTML report is written to a temporary name and renamed into place, since a report existing is the evidence that a
-  verdict was reached. Animated results sit side by side as two APNGs; nothing is re-encoded to compare them.
+  verdict was reached.
+- The report's minimap (a rail of every section, coloured by verdict, that jumps to one), its filter by verdict, and its
+  lightbox, which steps through reference, actual and diff in place.
 - CI uploads the artifacts before a separate step fails on them.
 
 Left out of it: its event recorder, network and device fixtures, and archived baselines, which pay off only past the
@@ -77,20 +79,39 @@ Three pieces, each committed on its own.
 - A failure panel lists the reference, the actual and the diff; the host writes them, the play only names them.
 - Comparison is host-side: `PlayDriver` gains a compare, and a keep that writes the files for the final look only.
 
-#### 3b — `to_match_accesskit_snapshot("label")` and `--capture --verify`
+#### 3b — `to_match_accesskit_snapshot("label")`
 
 - The AccessKit tree of the canvas or of one widget's subtree, as the JSON `egui_inspection_tools` writes: the nearest
   thing egui has to a text format, which needs egui 0.37, keeps ids and drops the toggled, selected and expanded states.
   Not Playwright's YAML, whose ARIA roles egui's would have to be translated to.
 - Compared and diffed with `similar`, with 3a's `.new` and `UPDATE_SNAPSHOTS` flow rather than insta's, so a failure is
   a check in the log, not a panic. `<label>.accesskit.json`, with no renderer.
-- `--capture --verify` compares every shot's PNG with `__snapshots__/<shot>.<renderer>.png` beside the recipe: captures'
-  own verdict, with nothing of plays in it.
+
+#### Videos of catalog tests
+
+- `[tests]` in `gallery.toml`: `video = "off" | "failing" | "always"`, the recipes' words, and the `output` directory
+  videos and the report share, as coverage has one. `failing` and `always` record alike and differ in what they keep.
+- A video only watches: a test keeps its own time (0.25 s a frame, kittest's) and no animations, and a recording that
+  breaks stops without failing the test. A scene can tell it is filmed by its paint callbacks running, and by the wall
+  clock. A callback's panic ends the process: `egui_wgpu::Callback` and `egui_glow::CallbackFn` keep theirs private, so
+  nothing in the dylib can be put around it. The dylib's panic hook names the scene first.
+- A frame painted from the same shapes as the last is held, not rendered again.
+- A kept video is an MP4, which a report can pause and seek. A check can grow the canvas and an H.264 stream cannot, so
+  a play is recorded as an APNG that grows with it, and becomes an MP4 that holds its every frame only if it is kept.
+  The input is noted frame by frame and laid over them then too, so a passing test does not pay for it.
+- A recording is made in cargo's target directory, and only a kept video goes to `output`, which may be the user's own:
+  what comes and goes there would show in git and set off a hot rebuild.
+- Each test writes its own `<crate>/<module>/<play>/video.<renderer>.mp4` alone, since nextest runs every one in a
+  process of its own, and a package may test under both renderers.
 
 #### 3c — the HTML report
 
-- Verdicts and attachments in an HTML report. Partial-frame APNGs decode at well over real time in ffmpeg (and so mpv);
-  how browsers play them is judged there.
+- Verdicts and attachments in an HTML report at the root of the tests' `output`, linking only to files in there, so CI
+  can upload the directory as it is. It reads top to bottom without JavaScript.
+- A minimap of scenes and their plays that jumps to each, a filter by verdict, and a lightbox with zoom that steps
+  through reference, actual and diff. A line of the log seeks the play's video to it.
+- Under nextest each test writes its own result, then rebuilds the page from all of them under a file lock. One that did
+  not run keeps its earlier result, marked as such.
 - The terminal summary drops its empty columns and gives a recording's length beside its frame count.
 
 ### Slice 5 — an interactions panel driving the live canvas

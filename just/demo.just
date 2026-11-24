@@ -15,8 +15,8 @@ femtovg *args:
 plays:
     @scripts/demo-plays.sh
 
-# Record a scene headlessly into .tmp/record/<backend>/, e.g. `just demo::record femtovg mp4`.
-record backend='wgpu' format='apng' scene='orbit' rate='60:2':
+# Record a scene headlessly into .tmp/record/<backend>/, e.g. `just demo::record femtovg apng`.
+record backend='wgpu' format='mp4' scene='orbit' rate='60:2':
     @scripts/demo.sh {{ backend }} --scene {{ scene }} \
         --render .tmp/record/{{ backend }}/{{ scene }}.png --record {{ rate }} --record-format {{ format }}
 

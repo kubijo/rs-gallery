@@ -535,7 +535,7 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
         (
             "video-without-a-record",
             indoc! {r#"
-                video = "on"
+                video = "always"
             "#},
             "has no `record`",
         ),
@@ -577,7 +577,7 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
         Some(Record {
             fps: 24,
             seconds: Some(1.5),
-            keep: Trace::On,
+            keep: Trace::Always,
             formats: VideoFormat::Mp4.into(),
             hold: None,
             input: None,

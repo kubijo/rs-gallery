@@ -42,6 +42,7 @@ use crate::{
 
 pub(crate) use crate::video::{VideoFormat, VideoFormats};
 
+mod film;
 mod log_view;
 mod overlay;
 mod overrides;
@@ -55,12 +56,21 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 
+use self::film::Film;
+pub(crate) use self::film::Films;
 pub(crate) use self::log_view::LogMode;
 use self::log_view::LogView;
 pub(crate) use self::overlay::Corner;
-use self::snapshot::{Looks, Seen};
+#[cfg(test)]
+pub(crate) use self::record::RENDERED;
+use self::snapshot::{Looks, Seen, component, play_path};
 pub(crate) use self::snapshot::{Snapshots, Update};
-use self::{overlay::InputOverlay, play_driver::*, record::*};
+use self::{
+    overlay::{InputLayer, InputLog, InputOverlay, Shown},
+    play_driver::*,
+    record::*,
+};
+
 pub(crate) use self::{overrides::*, recipe::*, report::*, session::*, shot::*};
 
 /// One scene, in one state, at one size — what a single capture produces.
@@ -107,7 +117,7 @@ pub(crate) struct Shot {
 pub(crate) struct Record {
     pub(crate) fps: u16,
     pub(crate) seconds: Option<f32>,
-    /// `RetainOnFailure` drops a play's recording once the play passes.
+    /// `Failing` drops a play's recording once the play passes.
     pub(crate) keep: Trace,
     pub(crate) formats: VideoFormats,
     /// Seconds a play's recording shows each step's last frame for, beyond its own;
@@ -218,7 +228,7 @@ pub(crate) fn parse_record(raw: &str) -> Result<Record, String> {
     Ok(Record {
         fps,
         seconds,
-        keep: Trace::On,
+        keep: Trace::Always,
         formats: VideoFormats::default(),
         hold: None,
         input: None,
@@ -238,9 +248,9 @@ pub(crate) struct ShotPlay {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Trace {
-    On,
+    Always,
     #[default]
-    RetainOnFailure,
+    Failing,
 }
 
 /// The window's own inner size (see `run_with`),
@@ -476,12 +486,24 @@ pub(crate) fn render_with_globals(
     outcome
 }
 
-/// One shot drawn for a test, its play's snapshots judged as `snapshots` has it:
-/// nothing printed, nothing reported, only whether it failed.
+/// What a test run does with its plays' snapshots and videos.
+pub(crate) struct Testing {
+    pub(crate) snapshots: Snapshots,
+    pub(crate) films: Films,
+    /// Reports what is amiss that fails no test.
+    pub(crate) warn: fn(&Diagnostic),
+    /// Where failures are printed takes colour and links.
+    pub(crate) styled: bool,
+}
+
+/// One shot drawn for a test, its play's snapshots judged
+/// and the play filmed as `testing` has it:
+/// only whether it failed, and what it warns of.
 ///
 /// # Errors
-/// What a capture would report for the shot, a failed play or a panicking scene included;
-/// a failed play's log follows its report. In colour when stdout takes it.
+/// What a capture would report for the shot,
+/// a failed play or a panicking scene included;
+/// a failed play's log follows its report.
 pub(crate) fn check_shot(
     manifest: &Manifest,
     globals: Option<GlobalEntry>,
@@ -489,16 +511,18 @@ pub(crate) fn check_shot(
     session: &Session,
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
-    snapshots: &Snapshots,
+    testing: &Testing,
 ) -> Result<(), String> {
     let mut view = LogView::off();
     let mut watch = Watch::new(&mut view);
-    watch.snapshots = Some(snapshots);
+    watch.snapshots = Some(&testing.snapshots);
+    watch.films = Some(&testing.films);
     watch.stream = style::Stream::Stdout;
     let outcome = shoot_with_globals(manifest, globals, plays, session, setup, shot, &mut watch);
+    watch.warnings.iter().for_each(testing.warn);
     outcome.map(drop).map_err(|failure| {
         let log = watch.failed.as_ref().map(FailedShot::tree);
-        let (report, log) = if style::coloured(watch.stream) {
+        let (report, log) = if testing.styled {
             (failure.panel(watch.stream), log)
         } else {
             (failure.plain(), log.map(|log| style::plain(&log)))
@@ -510,7 +534,7 @@ pub(crate) fn check_shot(
     })
 }
 
-/// [`check_shot`], with the play's log: what a test of its checks reads.
+/// [`check_shot`], with the play's log and the warnings: what a test of it reads.
 /// The shot must have an `out`, which a passing play's log comes back with.
 #[cfg(all(test, not(target_vendor = "apple")))]
 pub(crate) fn judged_shot(
@@ -519,20 +543,22 @@ pub(crate) fn judged_shot(
     renderer: Renderer,
     shot: &Shot,
     snapshots: &Snapshots,
-) -> (Result<(), Diagnostic>, Vec<Entry>) {
+    films: Option<&Films>,
+) -> (Result<(), Diagnostic>, Vec<Entry>, Vec<Diagnostic>) {
     let session = Session::open(renderer).expect("a session");
     let mut view = LogView::off();
     let mut watch = Watch::new(&mut view);
     watch.snapshots = Some(snapshots);
+    watch.films = films;
     let setup = |_: &egui::Context| {};
     match shoot_with_globals(manifest, None, plays, &session, &setup, shot, &mut watch) {
         Ok(taken) => {
             let play = taken.and_then(|taken| taken.written.play);
-            (Ok(()), play.expect("a play").log)
+            (Ok(()), play.expect("a play").log, watch.warnings)
         }
         Err(failure) => {
             let log = watch.failed.map(|failed| failed.log);
-            (Err(failure), log.unwrap_or_default())
+            (Err(failure), log.unwrap_or_default(), watch.warnings)
         }
     }
 }

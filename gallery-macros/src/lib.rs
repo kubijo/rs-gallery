@@ -175,7 +175,7 @@ pub fn scene(attr: TokenStream, item: TokenStream) -> TokenStream {
         // panics are caught by the `std` that raised them.
         #[doc(hidden)]
         fn #caught(ctx: &mut ::gallery::SceneCtx<'_>, ui: &mut ::gallery::egui::Ui) {
-            ::gallery::__run_scene(ctx, ui, #render);
+            ::gallery::__run_scene(ctx, ui, #name, #render);
         }
         // A display name means the key can't be derived from the function's name.
         #[doc(hidden)]

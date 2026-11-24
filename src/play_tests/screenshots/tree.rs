@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use super::*;
 
 const REFERENCE: &str = "saved.accesskit.json";
-const NEW: &str = "saved.accesskit.new.json";
-const DIFF: &str = "saved.accesskit.diff.txt";
+const NEW: &str = "saved.accesskit.glow.new.json";
+const DIFF: &str = "saved.accesskit.glow.diff.txt";
 
 fn canvas(p: &mut Play<'_>) -> PlayResult {
     p.expect(Canvas).to_match_accesskit_snapshot("saved")
@@ -325,7 +325,7 @@ fn a_change_is_shown_as_a_diff_in_the_panel_and_a_file() {
         assert!(judged.panel.contains(line), "{line} in:\n{}", judged.panel);
     }
     assert_eq!(judged.attachments(), ["reference", "actual", "diff"]);
-    assert_eq!(files(&dir), [DIFF, REFERENCE, NEW]);
+    assert_eq!(files(&dir), [DIFF, NEW, REFERENCE]);
     let file = std::fs::read_to_string(refs(&dir).join(DIFF)).expect("the diff");
     assert_eq!(file, shown);
 
@@ -475,7 +475,7 @@ fn a_widget_labelled_by_one_not_drawn_fails_saying_so() {
             ..updating(Update::All)
         };
         let shot = greeting_shot(&dir);
-        let (outcome, _) = judged_shot(&manifest, &plays, Renderer::Glow, &shot, &snapshots);
+        let (outcome, ..) = judged_shot(&manifest, &plays, Renderer::Glow, &shot, &snapshots, None);
         let panel = outcome.expect_err("it can't be read").plain();
         assert!(panel.contains(DANGLES), "{panel}");
         assert_eq!(files(&dir), Vec::<String>::new());

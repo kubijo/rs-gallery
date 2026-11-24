@@ -59,12 +59,7 @@ fn passed_shot(scene: SceneFn, name: &'static str, run: PlayFn) -> serde_json::V
     capture(
         &manifest,
         &plays,
-        shot(
-            "plays::scene",
-            &dir.join("shot.png"),
-            name,
-            Trace::RetainOnFailure,
-        ),
+        shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
         Some(report.clone()),
     )
     .unwrap_or_else(|failure| panic!("the play passes: {}", failure.plain()));
@@ -192,7 +187,7 @@ fn a_failed_checks_panel_says_what_was_expected_found_and_where() {
             "plays::scene",
             &dir.join("shot.png"),
             "misnamed-panel",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )

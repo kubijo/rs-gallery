@@ -9,7 +9,8 @@ use crate::{
     SceneKey, SceneSource,
     diagnostic::Diagnostic,
     render::{
-        Capture, DEFAULT_SCALE, LogMode, Overrides, Shot, ShotPlay, Trace, render_with_globals,
+        Capture, DEFAULT_SCALE, LogMode, Overrides, Shot, ShotPlay, Trace, VideoFormat,
+        render_with_globals,
     },
 };
 
@@ -133,7 +134,7 @@ fn the_form_play_saves_and_the_report_lists_its_steps() {
     capture(
         &Linked.manifest(),
         &Linked.plays(),
-        shot(FORM, &out, "saves_after_a_moment", Trace::On),
+        shot(FORM, &out, "saves_after_a_moment", Trace::Always),
         Some(report.clone()),
     )
     .unwrap_or_else(|failure| panic!("{}", failure.plain()));
@@ -163,7 +164,7 @@ fn the_form_play_saves_and_the_report_lists_its_steps() {
     for step in play["steps"].as_array().expect("steps") {
         let trace = step["trace"]
             .as_str()
-            .expect("`trace = on` keeps every step");
+            .expect("`trace = always` keeps every step");
         assert!(Utf8Path::new(trace).exists(), "`{trace}` was written");
     }
 }
@@ -176,7 +177,7 @@ fn the_keyboard_plays_pass_and_keep_no_trace() {
         capture(
             &Linked.manifest(),
             &Linked.plays(),
-            shot(KEYBOARD, &out, play, Trace::RetainOnFailure),
+            shot(KEYBOARD, &out, play, Trace::Failing),
             None,
         )
         .unwrap_or_else(|failure| panic!("`{play}`: {}", failure.plain()));
@@ -204,7 +205,7 @@ fn a_missing_widget_fails_its_step_naming_what_was_there_and_keeps_the_trace() {
             "plays::scene",
             &dir.join("shot.png"),
             "missing",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -242,7 +243,7 @@ fn a_failed_play_reports_its_steps_reason_and_line_in_the_json() {
             "plays::scene",
             &dir.join("shot.png"),
             "missing",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         Some(report.clone()),
     )
@@ -305,13 +306,13 @@ fn a_failed_play_does_not_stop_the_shots_after_it() {
                     "plays::scene",
                     &dir.join("first.png"),
                     "missing",
-                    Trace::RetainOnFailure,
+                    Trace::Failing,
                 ),
                 shot(
                     "plays::scene",
                     &dir.join("second.png"),
                     "present",
-                    Trace::RetainOnFailure,
+                    Trace::Failing,
                 ),
             ],
             sheet: None,
@@ -375,7 +376,7 @@ fn fill_replaces_what_a_field_already_holds() {
             "plays::scene",
             &dir.join("shot.png"),
             "rename",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -397,13 +398,38 @@ fn a_locator_matching_two_widgets_fails_rather_than_picking_one() {
             "plays::scene",
             &dir.join("shot.png"),
             "ambiguous",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
     .expect_err("the play fails")
     .plain();
     assert!(failure.contains("2 widgets still match"), "{failure}");
+}
+
+/// The panic hook may touch none of its own state that a thread has destroyed by then:
+/// a panic in a hook ends the process.
+#[test]
+fn a_panic_as_a_thread_ends_is_no_harm_to_the_process() {
+    struct PanicsLate(std::sync::mpsc::Sender<bool>);
+    impl Drop for PanicsLate {
+        fn drop(&mut self) {
+            let caught = std::panic::catch_unwind(|| panic!("as the thread ends")).is_err();
+            self.0.send(caught).expect("the test waits");
+        }
+    }
+    thread_local! {
+        static LATE: std::cell::RefCell<Option<PanicsLate>> = const { std::cell::RefCell::new(None) };
+    }
+    let (late, told) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // Destroyed after what comes to life with the panic below.
+        LATE.set(Some(PanicsLate(late)));
+        crate::play::caught(|| panic!("a play's")).expect_err("it panics");
+    })
+    .join()
+    .expect("the thread ends");
+    assert_eq!(told.recv(), Ok(true));
 }
 
 #[test]
@@ -420,7 +446,7 @@ fn a_panic_in_a_step_fails_that_step() {
             "plays::scene",
             &dir.join("shot.png"),
             "panics",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -448,7 +474,7 @@ fn wait_for_gives_up_after_its_budget() {
             "plays::scene",
             &dir.join("shot.png"),
             "never",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -474,7 +500,7 @@ fn an_unknown_play_names_the_ones_there_are() {
             "plays::scene",
             &dir.join("shot.png"),
             "nope",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -507,13 +533,13 @@ fn a_knob_no_frame_declares_fails_its_play_and_not_the_run() {
                     "plays::scene",
                     &dir.join("first.png"),
                     "misspelt",
-                    Trace::RetainOnFailure,
+                    Trace::Failing,
                 ),
                 shot(
                     "plays::scene",
                     &dir.join("second.png"),
                     "fine",
-                    Trace::RetainOnFailure,
+                    Trace::Failing,
                 ),
             ],
             sheet: None,
@@ -563,7 +589,7 @@ fn a_knob_set_as_the_last_thing_a_play_does_still_counts() {
             "plays::scene",
             &dir.join("shot.png"),
             "turn_it_up_last",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -593,7 +619,7 @@ fn a_value_past_its_range_fails_the_play_even_once_its_knob_is_hidden() {
             "plays::scene",
             &dir.join("shot.png"),
             "past_then_hide",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -625,7 +651,7 @@ fn a_recipe_knob_the_play_hides_behind_a_group_of_its_label_still_passes() {
         "plays::scene",
         &dir.join("shot.png"),
         "close",
-        Trace::RetainOnFailure,
+        Trace::Failing,
     );
     closing.knobs = [crate::render::KnobOverride {
         key: "size".to_owned(),
@@ -654,7 +680,7 @@ fn a_failed_play_says_which_knob_never_took_its_value() {
             "plays::scene",
             &dir.join("shot.png"),
             "past_then_fail",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -690,7 +716,7 @@ fn a_later_value_past_its_range_fails_though_an_earlier_one_landed() {
             "plays::scene",
             &dir.join("shot.png"),
             "landed_then_past",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -729,7 +755,7 @@ fn knobs_set_last_get_frames_to_land_one_after_another() {
             "plays::scene",
             &dir.join("shot.png"),
             "reveal_last",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -755,7 +781,7 @@ fn a_key_set_twice_is_blamed_on_its_last_set() {
             "plays::scene",
             &dir.join("shot.png"),
             "twice",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         Some(report.clone()),
     )
@@ -786,12 +812,7 @@ fn failed_shot(scene: SceneFn, name: &'static str, run: PlayFn) -> serde_json::V
     capture(
         &manifest,
         &plays,
-        shot(
-            "plays::scene",
-            &dir.join("shot.png"),
-            name,
-            Trace::RetainOnFailure,
-        ),
+        shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
         Some(report.clone()),
     )
     .expect_err("the shot fails");
@@ -850,7 +871,7 @@ fn a_play_ending_with_its_knob_hidden_does_not_let_the_settle_move_the_key() {
             "plays::scene",
             &dir.join("shot.png"),
             "set_then_hide",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -923,7 +944,7 @@ fn a_state_a_passing_play_leaves_past_a_range_names_the_play() {
             "plays::scene",
             &dir.join("shot.png"),
             "narrow",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -954,7 +975,7 @@ fn two_plays_of_one_name_for_one_scene_are_refused_naming_both() {
             "plays::scene",
             &dir.join("shot.png"),
             "smoke",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -988,7 +1009,7 @@ fn a_recipe_knob_the_scene_hides_does_not_fail_a_play() {
         "plays::scene",
         &dir.join("shot.png"),
         "look",
-        Trace::RetainOnFailure,
+        Trace::Failing,
     );
     simple.knobs = [
         crate::render::KnobOverride {
@@ -1030,7 +1051,7 @@ fn a_knob_a_play_sets_outranks_the_recipe_through_the_capture() {
         "plays::scene",
         &dir.join("shot.png"),
         "turn_it_up",
-        Trace::RetainOnFailure,
+        Trace::Failing,
     );
     quiet.knobs = [crate::render::KnobOverride {
         key: "loud".to_owned(),
@@ -1054,7 +1075,7 @@ fn a_play_writes_the_same_bytes_twice() {
         capture(
             &Linked.manifest(),
             &Linked.plays(),
-            shot(FORM, &out, "saves_after_a_moment", Trace::RetainOnFailure),
+            shot(FORM, &out, "saves_after_a_moment", Trace::Failing),
             None,
         )
         .unwrap_or_else(|failure| panic!("{}", failure.plain()));
@@ -1101,7 +1122,7 @@ fn a_popup_a_play_leaves_open_is_whole_in_the_shot_and_its_step_screenshots() {
     capture(
         &manifest,
         &plays,
-        shot("plays::scene", &out, "opens", Trace::On),
+        shot("plays::scene", &out, "opens", Trace::Always),
         None,
     )
     .unwrap_or_else(|failure| panic!("{}", failure.plain()));
@@ -1131,7 +1152,7 @@ fn a_window_is_captured_whole_where_it_stands_and_past_the_canvas() {
         let out = scratch(&format!("window-{name}")).join("shot.png");
         let still = Shot {
             play: None,
-            ..shot("plays::scene", &out, "", Trace::On)
+            ..shot("plays::scene", &out, "", Trace::Always)
         };
         capture(&manifest, &plays, still, None)
             .unwrap_or_else(|failure| panic!("{}", failure.plain()));
@@ -1152,7 +1173,7 @@ fn a_window_parked_off_the_canvas_is_left_there() {
     let out = scratch("window-parked").join("shot.png");
     let still = Shot {
         play: None,
-        ..shot("plays::scene", &out, "", Trace::On)
+        ..shot("plays::scene", &out, "", Trace::Always)
     };
     capture(&manifest, &plays, still, None).unwrap_or_else(|failure| panic!("{}", failure.plain()));
     let image = image::open(&out).expect("a PNG");
@@ -1173,7 +1194,7 @@ fn a_passing_run_clears_an_old_trace_and_nothing_else() {
             FORM,
             &dir.join("form.png"),
             "saves_after_a_moment",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -1221,7 +1242,7 @@ fn a_drag_moves_the_pointer_across_the_widget_while_held() {
             "plays::scene",
             &dir.join("shot.png"),
             "drag_right",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -1260,7 +1281,7 @@ fn a_scroll_moves_the_content_under_the_widget() {
             "plays::scene",
             &dir.join("shot.png"),
             "scroll_down",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )
@@ -1314,16 +1335,16 @@ fn a_plays_input_shows_on_its_recording_and_nowhere_else() {
     let record = |input| crate::render::Record {
         fps: 30,
         seconds: None,
-        keep: Trace::On,
+        keep: Trace::Always,
         formats: crate::render::VideoFormat::Apng.into(),
         hold: None,
         input,
     };
-    let (plain, _) = record_play("input-off", tab_then_hover, Trace::On, record(None));
+    let (plain, _) = record_play("input-off", tab_then_hover, Trace::Always, record(None));
     let (shown, _) = record_play(
         "input-on",
         tab_then_hover,
-        Trace::On,
+        Trace::Always,
         record(Some(crate::render::Corner::BottomLeft)),
     );
     let png = |video: &Utf8Path| std::fs::read(video.with_extension("png")).expect("the PNG");
@@ -1351,12 +1372,217 @@ fn a_plays_input_shows_on_its_recording_and_nowhere_else() {
     );
 }
 
+/// Asks for a wider window once it is pointed at.
+fn widens(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    ui.label("Hello");
+    if ui.ui_contains_pointer() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 240.0)));
+    }
+}
+
+#[test]
+fn a_recording_whose_canvas_changes_size_fails_its_play() {
+    for format in [VideoFormat::Apng, VideoFormat::Mp4] {
+        for input in [None, Some(crate::render::Corner::BottomLeft)] {
+            let (dir, outcome) = record_pointing("widens", widens, 1.0, format, input);
+            let failure = outcome.expect_err("it can't be recorded").plain();
+            assert!(
+                failure.contains("play `points` on `scene` failed"),
+                "{failure}"
+            );
+            assert!(
+                failure.contains("the canvas went from 320×240 to 400×240 while it was recorded"),
+                "{failure}"
+            );
+            let left = trace_files(&dir);
+            assert!(
+                input.is_some() || !left.contains(&format!("shot.{}", format.extension())),
+                "{left:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_recording_without_a_play_whose_canvas_changes_size_leaves_no_file() {
+    fn sways(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let wide = ui.ctx().cumulative_pass_nr() % 2 == 1;
+        let size = egui::vec2(if wide { 400.0 } else { 320.0 }, 240.0);
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+    }
+    let (manifest, plays) = catalog(sways, &[]);
+    let dir = scratch("sways");
+    let mut shot = shot("plays::scene", &dir.join("shot.png"), "", Trace::Failing);
+    shot.play = None;
+    let formats = [VideoFormat::Apng, VideoFormat::Mp4];
+    shot.record = Some(crate::render::Record {
+        seconds: Some(0.5),
+        formats: crate::render::VideoFormats::of(formats).expect("two formats"),
+        ..pointing_record(VideoFormat::Mp4, None)
+    });
+    let failure = capture(&manifest, &plays, shot, None).expect_err("it can't be recorded");
+    let failure = failure.plain();
+    assert!(failure.contains("the canvas went from"), "{failure}");
+    assert_eq!(trace_files(&dir), Vec::<String>::new());
+}
+
+#[test]
+fn a_recording_that_fails_its_play_fails_no_other_shot() {
+    fn fails_first(p: &mut Play<'_>) -> PlayResult {
+        p.expect("Nowhere").within(0).to_exist()
+    }
+    let (manifest, plays) = catalog(widens, &[("points", points), ("fails_first", fails_first)]);
+    let dir = scratch("record-others");
+    let shots = [
+        ("resized", "points"),
+        ("unseen", "fails_first"),
+        ("fine", "points"),
+    ];
+    let shots = shots.map(|(name, play)| {
+        let mut shot = shot(
+            "plays::scene",
+            &dir.join(format!("{name}.png")),
+            play,
+            Trace::Failing,
+        );
+        shot.record = (name != "fine").then(|| pointing_record(VideoFormat::Mp4, None));
+        shot
+    });
+    let report = dir.join("capture.json");
+    render_with_globals(
+        &manifest,
+        None,
+        &plays,
+        Renderer::Glow,
+        &|_: &egui::Context| {},
+        &Capture {
+            shots: shots.into(),
+            sheet: None,
+            report: Some(report.clone()),
+        },
+        LogMode::Off,
+    )
+    .expect_err("two plays fail");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    let failed = json["failed_shots"].as_array().expect("the failed shots");
+    let reasons: Vec<_> = failed.iter().map(|shot| shot["reason"].as_str()).collect();
+    let [Some(resized), Some(unseen)] = reasons[..] else {
+        panic!("{json:#}");
+    };
+    assert!(resized.contains("the canvas went from"), "{resized}");
+    assert!(
+        unseen.contains("Nowhere"),
+        "the play's own failure, though nothing was recorded: {unseen}"
+    );
+    assert!(dir.join("fine.png").exists(), "the shots after still run");
+}
+
+fn points(p: &mut Play<'_>) -> PlayResult {
+    p.hover("Hello")
+}
+
+fn pointing_record(
+    format: VideoFormat,
+    input: Option<crate::render::Corner>,
+) -> crate::render::Record {
+    crate::render::Record {
+        fps: 30,
+        seconds: None,
+        keep: Trace::Always,
+        formats: format.into(),
+        hold: None,
+        input,
+    }
+}
+
+/// A recording of a play that points at the `Hello` of `scene`,
+/// and the directory it is in.
+fn record_pointing(
+    name: &str,
+    scene: SceneFn,
+    scale: f32,
+    format: VideoFormat,
+    input: Option<crate::render::Corner>,
+) -> (Utf8PathBuf, Result<(), crate::diagnostic::Diagnostic>) {
+    let (manifest, plays) = catalog(scene, &[("points", points)]);
+    let dir = scratch(name);
+    let mut recorded = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "points",
+        Trace::Failing,
+    );
+    recorded.scale = scale;
+    recorded.record = Some(pointing_record(format, input));
+    let outcome = capture(&manifest, &plays, recorded, None);
+    (dir, outcome)
+}
+
+#[test]
+fn a_zoomed_scenes_recording_shows_the_pointer_where_it_is() {
+    static HELLO: std::sync::Mutex<egui::Pos2> = std::sync::Mutex::new(egui::Pos2::ZERO);
+    fn tall(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.ctx().set_zoom_factor(2.0);
+        ui.add_space(40.0);
+        let hello = ui.horizontal(|ui| {
+            ui.add_space(60.0);
+            ui.label("Hello")
+        });
+        *HELLO.lock().expect("the place") = hello.inner.rect.center();
+        ui.add_space(400.0);
+    }
+    for scale in [1.0, 1.5] {
+        let corner = Some(crate::render::Corner::BottomLeft);
+        let [plain, shown] = [None, corner].map(|input| {
+            let apng = VideoFormat::Apng;
+            let (dir, outcome) = record_pointing("zoomed-input", tall, scale, apng, input);
+            outcome.unwrap_or_else(|failure| panic!("{}", failure.plain()));
+            let (_, mut frames) = crate::video::decode(&dir.join("shot.apng"));
+            frames.pop().expect("a frame").image
+        });
+        assert!(shown.height() as f32 > 800.0 * scale, "{}", shown.height());
+        let pixels_per_point = 2.0 * scale;
+        let aimed = *HELLO.lock().expect("the place") * pixels_per_point;
+        let off: Vec<f32> = shown
+            .enumerate_pixels()
+            .filter(|(x, y, pixel)| *pixel != plain.get_pixel(*x, *y))
+            .map(|(x, y, _)| aimed.distance(egui::pos2(x as f32, y as f32)))
+            .collect();
+        let farthest = off.iter().copied().fold(0.0, f32::max);
+        assert!(
+            (8.0 * scale..14.0 * scale).contains(&farthest),
+            "the pointer's ring, and no more, is around it: {farthest} at {scale}"
+        );
+    }
+}
+
+#[test]
+fn a_recording_too_large_for_its_format_says_so_before_it_is_made() {
+    fn wide(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.ctx().set_zoom_factor(2.0);
+        ui.set_min_width(2_000.0);
+        ui.label("Hello");
+    }
+    let (dir, outcome) = record_pointing("zoomed-large", wide, 1.0, VideoFormat::Mp4, None);
+    let failure = outcome.expect_err("4000 pixels wide").plain();
+    assert!(failure.contains("is past the 3840×2160"), "{failure}");
+    assert!(failure.contains("`format = \"apng\"`"), "{failure}");
+    assert!(!dir.join("shot.mp4").exists());
+
+    let (dir, outcome) = record_pointing("zoomed-large", wide, 1.0, VideoFormat::Apng, None);
+    outcome.unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    assert!(dir.join("shot.apng").exists(), "as the hint says");
+}
+
 #[test]
 fn one_play_records_in_every_format_asked_for_from_the_same_frames() {
     let record = |formats| crate::render::Record {
         fps: 30,
         seconds: None,
-        keep: Trace::On,
+        keep: Trace::Always,
         formats,
         hold: None,
         input: None,
@@ -1366,7 +1592,7 @@ fn one_play_records_in_every_format_asked_for_from_the_same_frames() {
         crate::render::VideoFormat::Mp4,
     ])
     .expect("two formats");
-    let (apng, report) = record_play("both-formats", flip, Trace::On, record(both));
+    let (apng, report) = record_play("both-formats", flip, Trace::Always, record(both));
     let mp4 = apng.with_extension("mp4");
     assert!(mp4.exists(), "`{mp4}` beside `{apng}`");
     let videos = report["shots"][0]["videos"]
@@ -1385,7 +1611,7 @@ fn one_play_records_in_every_format_asked_for_from_the_same_frames() {
     let (alone, _) = record_play(
         "apng-alone",
         flip,
-        Trace::On,
+        Trace::Always,
         record(crate::render::VideoFormat::Apng.into()),
     );
     assert_eq!(
@@ -1407,7 +1633,7 @@ fn recorded_play(
     record_play(
         name,
         run,
-        Trace::RetainOnFailure,
+        Trace::Failing,
         crate::render::Record {
             fps: 30,
             seconds: None,
@@ -1445,7 +1671,7 @@ fn recorded_frames(video: &Utf8Path) -> u64 {
 
 #[test]
 fn a_recorded_play_holds_every_frame_the_play_drew() {
-    let (video, report) = recorded_play("flip", flip, Trace::On, Some(0.0));
+    let (video, report) = recorded_play("flip", flip, Trace::Always, Some(0.0));
     let shot = &report["shots"][0];
     let played = shot["play"]["frames"].as_u64().expect("the play's frames");
     assert_eq!(shot["videos"][0]["frames"].as_u64(), Some(played));
@@ -1461,7 +1687,7 @@ fn a_recorded_play_holds_every_frame_the_play_drew() {
 
 #[test]
 fn a_recorded_play_pauses_at_each_steps_end() {
-    let (video, report) = recorded_play("flip-held", flip, Trace::On, None);
+    let (video, report) = recorded_play("flip-held", flip, Trace::Always, None);
     let shot = &report["shots"][0];
     let played = shot["play"]["frames"].as_u64().expect("the play's frames");
     assert_eq!(
@@ -1475,7 +1701,7 @@ fn a_recorded_play_pauses_at_each_steps_end() {
 
 #[test]
 fn a_step_ending_with_the_one_around_it_pauses_once() {
-    let (video, report) = recorded_play("nested-held", nested, Trace::On, None);
+    let (video, report) = recorded_play("nested-held", nested, Trace::Always, None);
     let shot = &report["shots"][0];
     let played = shot["play"]["frames"].as_u64().expect("the play's frames");
     assert_eq!(shot["videos"][0]["held"].as_u64(), Some(15));
@@ -1484,19 +1710,14 @@ fn a_step_ending_with_the_one_around_it_pauses_once() {
 
 #[test]
 fn a_passing_play_drops_a_recording_kept_only_on_failure() {
-    let (video, report) = recorded_play("flip-kept-on-failure", flip, Trace::RetainOnFailure, None);
+    let (video, report) = recorded_play("flip-kept-on-failure", flip, Trace::Failing, None);
     assert!(!video.exists(), "the play passed, so `{video}` is gone");
     assert!(report["shots"][0].get("videos").is_none());
 }
 
 #[test]
 fn a_failing_play_keeps_its_recording_and_the_report_points_at_it() {
-    let (video, report) = recorded_play(
-        "fail-recorded",
-        flip_then_fail,
-        Trace::RetainOnFailure,
-        None,
-    );
+    let (video, report) = recorded_play("fail-recorded", flip_then_fail, Trace::Failing, None);
     assert!(video.exists(), "the play failed, so `{video}` stays");
     let failed = &report["failed_shots"][0];
     assert!(
@@ -1524,7 +1745,7 @@ fn a_mistyped_key_fails_its_press_saying_what_was_meant_and_where() {
             "plays::scene",
             &dir.join("shot.png"),
             "mistyped-key",
-            Trace::RetainOnFailure,
+            Trace::Failing,
         ),
         None,
     )

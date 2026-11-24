@@ -24,9 +24,9 @@ use image::RgbaImage;
 pub(crate) enum VideoFormat {
     /// Lossless and byte-identical between runs,
     /// so a recording can itself be compared.
-    #[default]
     Apng,
     /// H.264: small, lossy, and seekable in any player.
+    #[default]
     Mp4,
 }
 
@@ -41,9 +41,15 @@ impl VideoFormat {
     }
 
     /// The file's writer, started with the first frame.
-    fn start(self, file: File, first: RgbaImage, fps: u16) -> Result<Box<dyn Stream>, String> {
+    fn start(
+        self,
+        file: File,
+        first: RgbaImage,
+        fps: u16,
+        grows: bool,
+    ) -> Result<Box<dyn Stream>, String> {
         match self {
-            Self::Apng => Ok(Box::new(Apng::start(file, first, fps)?)),
+            Self::Apng => Ok(Box::new(Apng::start(file, first, fps, grows)?)),
             Self::Mp4 => Ok(Box::new(Mp4::start(file, first, fps)?)),
         }
     }
@@ -143,6 +149,8 @@ enum Message {
     Frame(RgbaImage),
     /// Show the last frame for this many frames more.
     Hold(u32),
+    /// Close the file.
+    Finish,
 }
 
 /// A recording's file as frames reach it, on the encoder thread.
@@ -188,6 +196,8 @@ pub(crate) struct Recorder {
     deepest_queue: usize,
     count: u32,
     held: u32,
+    /// Why the encoder stopped, once that is known.
+    failed: Option<String>,
 }
 
 impl Recorder {
@@ -197,6 +207,19 @@ impl Recorder {
     /// # Errors
     /// When `path` cannot be created or `fps` is zero.
     pub(crate) fn create(path: &Utf8Path, fps: u16, format: VideoFormat) -> Result<Self, String> {
+        Self::open(path, fps, format, false)
+    }
+
+    /// [`create`](Self::create) an APNG as large as its largest frames, of no use
+    /// before it is [finished](Self::finish).
+    ///
+    /// # Errors
+    /// As [`create`](Self::create).
+    pub(crate) fn growing(path: &Utf8Path, fps: u16) -> Result<Self, String> {
+        Self::open(path, fps, VideoFormat::Apng, true)
+    }
+
+    fn open(path: &Utf8Path, fps: u16, format: VideoFormat, grows: bool) -> Result<Self, String> {
         if fps == 0 {
             return Err("a recording needs at least one frame per second".to_owned());
         }
@@ -217,7 +240,8 @@ impl Recorder {
             thread::Builder::new()
                 .name("gallery-recording".to_owned())
                 .spawn(move || {
-                    encode(file, fps, format, &incoming, &queued)
+                    let start = |file, first| format.start(file, first, fps, grows);
+                    encode(file, start, !grows, &incoming, &queued)
                         .map_err(|e| format!("write `{target}`: {e}"))
                 })
                 .map_err(|e| format!("start the encoder for `{path}`: {e}"))?
@@ -229,20 +253,23 @@ impl Recorder {
             deepest_queue: 0,
             count: 0,
             held: 0,
+            failed: None,
         })
     }
 
     /// The encoder's own error, once it has stopped taking frames.
     fn failure(&mut self) -> String {
         self.frames = None;
-        match self.worker.take().map(thread::JoinHandle::join) {
+        let stopped = match self.worker.take().map(thread::JoinHandle::join) {
             Some(Ok(Err(error))) => error,
             Some(Err(_)) => "the encoder panicked".to_owned(),
             Some(Ok(Ok(_))) | None => "the encoder stopped early".to_owned(),
-        }
+        };
+        self.failed.get_or_insert(stopped).clone()
     }
 
-    /// Hand over the next frame, the same size as the first.
+    /// Hand over the next frame: the same size as the last,
+    /// except in one that is [`growing`](Self::growing).
     ///
     /// # Errors
     /// When the encoder has already failed;
@@ -269,7 +296,7 @@ impl Recorder {
 
     fn send(&mut self, message: Message) -> Result<(), String> {
         let Some(frames) = &self.frames else {
-            return Err("the recording is already closed".to_owned());
+            return Err(self.failure());
         };
         let waiting = self.queued.fetch_add(1, Ordering::Relaxed) + 1;
         self.deepest_queue = self.deepest_queue.max(waiting);
@@ -284,12 +311,14 @@ impl Recorder {
     /// # Errors
     /// When nothing was recorded, or the file could not be written.
     pub(crate) fn finish(mut self) -> Result<Encoded, String> {
-        // Dropping the sender ends the encoder's loop.
-        self.frames = None;
+        if let Some(frames) = self.frames.take() {
+            // An encoder that stopped taking messages says why once joined.
+            _ = frames.send(Message::Finish);
+        }
         let encoded = match self.worker.take().map(thread::JoinHandle::join) {
             Some(Ok(result)) => result?,
             Some(Err(_)) => return Err("the encoder panicked".to_owned()),
-            None => return Err("the recording is already closed".to_owned()),
+            None => return Err(self.failure()),
         };
         Ok(Encoded {
             frames: self.count,
@@ -300,42 +329,62 @@ impl Recorder {
     }
 }
 
-/// The encoder thread: every frame in, one file out.
+/// A recording given up leaves no thread behind that still has its file open.
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.frames = None;
+        if let Some(worker) = self.worker.take() {
+            _ = worker.join();
+        }
+    }
+}
+
+/// The encoder thread: every frame in, one file out. A recording dropped before it is finished
+/// is closed all the same when it is `wanted`, for what it holds until then.
 fn encode(
     file: File,
-    fps: u16,
-    format: VideoFormat,
+    start: impl FnOnce(File, RgbaImage) -> Result<Box<dyn Stream>, String>,
+    wanted: bool,
     incoming: &mpsc::Receiver<Message>,
     queued: &AtomicUsize,
 ) -> Result<Encoded, String> {
     let first = match incoming.recv() {
         Ok(Message::Frame(first)) => first,
         Ok(Message::Hold(_)) => return Err("a hold before any frame to hold".to_owned()),
-        Err(_) => return Err("a recording needs at least one frame".to_owned()),
+        Ok(Message::Finish) | Err(_) => {
+            return Err("a recording needs at least one frame".to_owned());
+        }
     };
     queued.fetch_sub(1, Ordering::Relaxed);
     let mut started = Instant::now();
-    let mut stream = format.start(file, first, fps)?;
+    let mut stream = start(file, first)?;
     let mut spent = started.elapsed();
-    for message in incoming {
-        queued.fetch_sub(1, Ordering::Relaxed);
+    loop {
+        let message = match incoming.recv() {
+            Ok(message) => message,
+            Err(_) if wanted => Message::Finish,
+            Err(_) => return Err("the recording was given up".to_owned()),
+        };
+        if !matches!(message, Message::Finish) {
+            queued.fetch_sub(1, Ordering::Relaxed);
+        }
         started = Instant::now();
         match message {
             Message::Frame(image) => stream.push(image)?,
             Message::Hold(frames) => stream.hold(frames)?,
+            Message::Finish => {
+                let written = stream.finish()?;
+                return Ok(Encoded {
+                    frames: 0,
+                    held: 0,
+                    written,
+                    encode: spent + started.elapsed(),
+                    deepest_queue: 0,
+                });
+            }
         }
         spent += started.elapsed();
     }
-    started = Instant::now();
-    let written = stream.finish()?;
-    spent += started.elapsed();
-    Ok(Encoded {
-        frames: 0,
-        held: 0,
-        written,
-        encode: spent,
-        deepest_queue: 0,
-    })
 }
 
 /// A frame waiting to learn how long it shows,
@@ -360,27 +409,40 @@ struct Apng {
     shown: RgbaImage,
     pending: Pending,
     written: u32,
+    /// The first frame's size, and its pixels in one that may grow.
+    start: (u32, u32),
+    first: Option<RgbaImage>,
+    /// The delay the first frame was written with.
+    first_shows: u16,
+}
+
+/// A header's width and height until the last frame
+/// tells the real ones, past any a canvas can have.
+const UNKNOWN_SIZE: u32 = 1 << 20;
+
+/// An animated PNG's header, its frame count and size to be known later.
+fn apng_header<W: Write>(sink: W, size: (u32, u32), frames: u32) -> Result<png::Writer<W>, String> {
+    let mut encoder = png::Encoder::new(sink, size.0, size.1);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    encoder.set_animated(frames, 0).map_err(|e| e.to_string())?;
+    encoder.write_header().map_err(|e| e.to_string())
 }
 
 impl Apng {
-    fn start(file: File, first: RgbaImage, fps: u16) -> Result<Self, String> {
-        let (width, height) = first.dimensions();
+    fn start(file: File, first: RgbaImage, fps: u16, grows: bool) -> Result<Self, String> {
         let patch = file.try_clone().map_err(|e| e.to_string())?;
-        let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        // The count is unknown until the stream ends, and `acTL`
-        // comes before any frame: a placeholder now, patched
-        // by `set_frame_count` once the file is closed.
-        encoder
-            .set_animated(u32::MAX, 0)
-            .map_err(|e| e.to_string())?;
-        let writer = encoder.write_header().map_err(|e| e.to_string())?;
+        // Both are unknown until the stream ends, and come before any frame:
+        // placeholders now, patched by `set_header` once the file is closed.
+        let writer = apng_header(BufWriter::new(file), (UNKNOWN_SIZE, UNKNOWN_SIZE), u32::MAX)?;
         Ok(Self {
             writer,
             file: patch,
             fps,
+            start: first.dimensions(),
+            first: grows.then(|| first.clone()),
+            first_shows: 0,
             pending: Pending {
                 x: 0,
                 y: 0,
@@ -395,12 +457,19 @@ impl Apng {
 
 impl Stream for Apng {
     fn push(&mut self, image: RgbaImage) -> Result<(), String> {
+        let mut image = image;
         if image.dimensions() != self.shown.dimensions() {
-            return Err(format!(
-                "a frame of {:?} in a recording of {:?}",
-                image.dimensions(),
-                self.shown.dimensions()
-            ));
+            let (was, now) = (self.shown.dimensions(), image.dimensions());
+            if self.first.is_none() {
+                return Err(resized(was, now));
+            }
+            let size = (was.0.max(now.0), was.1.max(now.1));
+            if was != size {
+                self.shown = grown(&self.shown, size);
+            }
+            if now != size {
+                image = grown(&image, size);
+            }
         }
         let Some(changed) = changed(&self.shown, &image) else {
             self.pending.repeats += 1;
@@ -433,9 +502,31 @@ impl Stream for Apng {
         let mut apng = *self;
         apng.write_pending()?;
         apng.writer.finish().map_err(|e| e.to_string())?;
-        set_frame_count(&mut apng.file, apng.written)?;
+        let size = apng.shown.dimensions();
+        match &apng.first {
+            Some(first) if size != apng.start => {
+                let delay = (apng.first_shows, apng.fps);
+                replace_first(&mut apng.file, &grown(first, size), delay, apng.written)?;
+            }
+            _ => set_header(&mut apng.file, size, apng.written)?,
+        }
         Ok(apng.written)
     }
+}
+
+/// Why a recording that does not grow takes no frame of another size.
+pub(crate) fn resized(was: (u32, u32), now: (u32, u32)) -> String {
+    format!(
+        "the canvas went from {}×{} to {}×{} while it was recorded",
+        was.0, was.1, now.0, now.1
+    )
+}
+
+/// `image` in the top left corner of a transparent one of `size`.
+fn grown(image: &RgbaImage, size: (u32, u32)) -> RgbaImage {
+    let mut grown = RgbaImage::new(size.0, size.1);
+    image::imageops::replace(&mut grown, image, 0, 0);
+    grown
 }
 
 impl Apng {
@@ -488,6 +579,9 @@ impl Apng {
             .set_frame_delay(shows as u16, self.fps)
             .map_err(error)?;
         writer.write_image_data(pixels.as_raw()).map_err(error)?;
+        if self.written == 0 {
+            self.first_shows = shows as u16;
+        }
         self.written += 1;
         Ok(())
     }
@@ -592,11 +686,7 @@ impl Mp4 {
 impl Stream for Mp4 {
     fn push(&mut self, image: RgbaImage) -> Result<(), String> {
         if image.dimensions() != self.size {
-            return Err(format!(
-                "a frame of {:?} in a recording of {:?}",
-                image.dimensions(),
-                self.size
-            ));
+            return Err(resized(self.size, image.dimensions()));
         }
         self.last = Self::yuv(image, self.coded);
         self.write_last()
@@ -607,8 +697,11 @@ impl Stream for Mp4 {
     }
 
     fn finish(self: Box<Self>) -> Result<u32, String> {
-        let mp4 = *self;
-        mp4.muxer.finish().map_err(|e| e.to_string())?;
+        let mut mp4 = *self;
+        mp4.muxer.finish_in_place().map_err(|e| e.to_string())?;
+        // `muxide` 0.5 never flushes its writer, and a `BufWriter` dropped tells no error.
+        let mut writer = mp4.muxer.into_writer();
+        writer.flush().map_err(|e| e.to_string())?;
         Ok(mp4.written)
     }
 }
@@ -663,40 +756,95 @@ fn changed(was: &RgbaImage, now: &RgbaImage) -> Option<Rect> {
     })
 }
 
-/// Write the real frame count into the `acTL` chunk the encoder
-/// left a placeholder in, with that chunk's CRC to match.
-fn set_frame_count(file: &mut File, frames: u32) -> Result<(), String> {
-    const SIGNATURE: u64 = 8;
+/// Where a PNG's chunks begin, past its signature.
+const CHUNKS: u64 = 8;
+
+/// A chunk's length, name and CRC, which lie around its data.
+const AROUND_DATA: u64 = 12;
+
+/// The name and data length of the chunk at `at`,
+/// the file left where its data begins.
+fn chunk_at(file: &mut File, at: u64) -> Result<([u8; 4], u32), String> {
+    file.seek(SeekFrom::Start(at)).map_err(|e| e.to_string())?;
+    let mut head = [0; 8];
+    file.read_exact(&mut head).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => "the file ended before its last chunk".to_owned(),
+        _ => e.to_string(),
+    })?;
+    let [a, b, c, d, name @ ..] = head;
+    Ok((name, u32::from_be_bytes([a, b, c, d])))
+}
+
+/// Write the real size into `IHDR` and the real frame count into `acTL`,
+/// over the encoder's placeholders, with the CRCs to match.
+fn set_header(file: &mut File, size: (u32, u32), frames: u32) -> Result<(), String> {
     let io = |e: std::io::Error| e.to_string();
-    let mut at = SIGNATURE;
+    let mut at = CHUNKS;
     loop {
-        file.seek(SeekFrom::Start(at)).map_err(io)?;
-        let mut head = [0; 8];
-        file.read_exact(&mut head).map_err(|e| match e.kind() {
-            std::io::ErrorKind::UnexpectedEof => {
-                "the file ended before its `acTL` chunk".to_owned()
-            }
-            _ => e.to_string(),
-        })?;
-        let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
-        if &head[4..] == b"acTL" {
-            let mut data = [0; 8];
+        let (name, length) = chunk_at(file, at)?;
+        let start = match &name {
+            b"IHDR" => [size.0.to_be_bytes(), size.1.to_be_bytes()].concat(),
+            b"acTL" => frames.to_be_bytes().to_vec(),
+            b"IDAT" => return Err("no `acTL` chunk before the first frame".to_owned()),
+            _ => Vec::new(),
+        };
+        if !start.is_empty() {
+            let mut data = vec![0; length as usize];
             file.read_exact(&mut data).map_err(io)?;
-            data[..4].copy_from_slice(&frames.to_be_bytes());
+            data[..start.len()].copy_from_slice(&start);
             let mut crc = crc32fast::Hasher::new();
-            crc.update(b"acTL");
+            crc.update(&name);
             crc.update(&data);
             file.seek(SeekFrom::Start(at + 8)).map_err(io)?;
             file.write_all(&data).map_err(io)?;
             file.write_all(&crc.finalize().to_be_bytes()).map_err(io)?;
+        }
+        if &name == b"acTL" {
             return file.flush().map_err(io);
         }
-        if &head[4..] == b"IDAT" {
-            return Err("no `acTL` chunk before the first frame".to_owned());
-        }
-        // Length, type, data and CRC.
-        at += 12 + u64::from(length);
+        at += AROUND_DATA + u64::from(length);
     }
+}
+
+/// Write the file again with `first` for its first frame, which in an APNG
+/// covers the whole picture; those after it follow as they are.
+fn replace_first(
+    file: &mut File,
+    first: &RgbaImage,
+    (shows, fps): (u16, u16),
+    frames: u32,
+) -> Result<(), String> {
+    let io = |e: std::io::Error| e.to_string();
+    let png = |e: png::EncodingError| e.to_string();
+    let mut at = CHUNKS;
+    let mut seen = false;
+    let rest = loop {
+        let (name, length) = chunk_at(file, at)?;
+        let image = &name == b"IDAT";
+        if seen && !image {
+            break at;
+        }
+        seen |= image;
+        at += AROUND_DATA + u64::from(length);
+    };
+    file.seek(SeekFrom::Start(rest)).map_err(io)?;
+    let mut after = Vec::new();
+    file.read_to_end(&mut after).map_err(io)?;
+
+    let mut head = Vec::new();
+    let mut writer = apng_header(&mut head, first.dimensions(), frames)?;
+    writer.set_frame_delay(shows, fps).map_err(png)?;
+    writer.write_image_data(first.as_raw()).map_err(png)?;
+    drop(writer);
+    // Its `IEND`, as `after` ends in one.
+    head.truncate(head.len() - AROUND_DATA as usize);
+
+    file.seek(SeekFrom::Start(0)).map_err(io)?;
+    file.write_all(&head).map_err(io)?;
+    file.write_all(&after).map_err(io)?;
+    let end = file.stream_position().map_err(io)?;
+    file.set_len(end).map_err(io)?;
+    file.flush().map_err(io)
 }
 
 /// A written frame as a viewer shows it:
@@ -707,43 +855,155 @@ pub(crate) struct Shown {
     pub(crate) delay: (u16, u16),
 }
 
-/// The frame count `acTL` declares,
-/// and every frame as a viewer shows it.
-#[cfg(test)]
-pub(crate) fn decode(path: &Utf8Path) -> (u32, Vec<Shown>) {
-    let decoder = png::Decoder::new(std::io::BufReader::new(
-        File::open(path).expect("the recording"),
-    ));
-    let mut reader = decoder.read_info().expect("a PNG header");
-    let declared = reader
+/// Every frame of an APNG as a viewer shows it, with its delay;
+/// and how many there are.
+fn each_shown(
+    path: &Utf8Path,
+    mut show: impl FnMut(&RgbaImage, (u16, u16)) -> Result<(), String>,
+) -> Result<u32, String> {
+    let file = File::open(path).map_err(|e| format!("open `{path}`: {e}"))?;
+    let error = |e: png::DecodingError| format!("read `{path}`: {e}");
+    let broken = || format!("`{path}` is no recording");
+    let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+        .read_info()
+        .map_err(error)?;
+    let frames = reader
         .info()
         .animation_control
-        .expect("an animated PNG")
+        .ok_or_else(broken)?
         .num_frames;
-    let (width, height) = (reader.info().width, reader.info().height);
-    let mut canvas = RgbaImage::new(width, height);
-    let mut buffer = vec![0; reader.output_buffer_size().expect("a buffer size")];
-    let mut shown = Vec::new();
-    while let Ok(output) = reader.next_frame(&mut buffer) {
-        let control = *reader.info().frame_control().expect("a frame control");
-        let frame = RgbaImage::from_raw(
-            output.width,
-            output.height,
-            buffer[..output.buffer_size()].to_vec(),
-        )
-        .expect("frame pixels");
+    let mut canvas = RgbaImage::new(reader.info().width, reader.info().height);
+    let mut buffer = vec![0; reader.output_buffer_size().ok_or_else(broken)?];
+    for _ in 0..frames {
+        let output = reader.next_frame(&mut buffer).map_err(error)?;
+        let control = *reader.info().frame_control().ok_or_else(broken)?;
+        let pixels = buffer[..output.buffer_size()].to_vec();
+        let frame = RgbaImage::from_raw(output.width, output.height, pixels).ok_or_else(broken)?;
         image::imageops::replace(
             &mut canvas,
             &frame,
             i64::from(control.x_offset),
             i64::from(control.y_offset),
         );
-        shown.push(Shown {
-            image: canvas.clone(),
-            delay: (control.delay_num, control.delay_den),
-        });
+        show(&canvas, (control.delay_num, control.delay_den))?;
     }
+    Ok(frames)
+}
+
+/// Why an MP4 can't hold frames of `size`, if it can't:
+/// OpenH264 encodes up to 3840×2160, either way up (`encoder.rs` in openh264 0.9).
+pub(crate) fn too_large((width, height): (u32, u32)) -> Option<String> {
+    let (long, short) = (width.max(height), width.min(height));
+    (long > 3_840 || short > 2_160)
+        .then(|| format!("{width}×{height} is past the 3840×2160 a video can be"))
+}
+
+/// Write the APNG recording at `apng` into `mp4`, each frame at its time,
+/// with what `over` has for it laid on by `lay`.
+///
+/// # Errors
+/// When it can't be read, is too large for H.264, or `lay` fails.
+pub(crate) fn to_mp4<T: PartialEq>(
+    apng: &Utf8Path,
+    mp4: File,
+    over: &[T],
+    mut lay: impl FnMut(&T, &mut RgbaImage) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut file = Some(mp4);
+    let mut stream: Option<Mp4> = None;
+    let mut at = 0;
+    each_shown(apng, |image, (shows, fps)| {
+        for repeat in 0..shows {
+            let now = over.get(at);
+            let repeats = repeat > 0 && now == over.get(at - 1);
+            at += 1;
+            if let Some(stream) = stream.as_mut().filter(|_| repeats) {
+                stream.hold(1)?;
+                continue;
+            }
+            let mut image = image.clone();
+            if let Some(now) = now {
+                lay(now, &mut image)?;
+            }
+            match (&mut stream, file.take()) {
+                (Some(stream), _) => stream.push(image)?,
+                (None, Some(file)) => stream = Some(Mp4::start(file, image, fps)?),
+                (None, None) => return Err("BUG: an MP4 started twice".to_owned()),
+            }
+        }
+        Ok(())
+    })?;
+    let stream = stream.ok_or_else(|| format!("`{apng}` has no frame"))?;
+    Box::new(stream).finish().map(drop)
+}
+
+/// The frame count `acTL` declares,
+/// and every frame as a viewer shows it.
+#[cfg(test)]
+pub(crate) fn decode(path: &Utf8Path) -> (u32, Vec<Shown>) {
+    let mut shown = Vec::new();
+    let declared = each_shown(path, |image, delay| {
+        shown.push(Shown {
+            image: image.clone(),
+            delay,
+        });
+        Ok(())
+    })
+    .expect("a recording");
     (declared, shown)
+}
+
+/// An MP4's size and how many frames it holds.
+#[cfg(test)]
+pub(crate) fn mp4_frames(path: &Utf8Path) -> ((u16, u16), u32) {
+    let bytes = std::fs::read(path).expect("the recording");
+    let size = bytes.len() as u64;
+    let mp4 = mp4::Mp4Reader::read_header(std::io::Cursor::new(bytes), size).expect("an MP4");
+    let (&id, track) = mp4.tracks().iter().next().expect("a video track");
+    let frames = mp4.sample_count(id).expect("samples");
+    ((track.width(), track.height()), frames)
+}
+
+/// Every frame of an MP4.
+#[cfg(test)]
+pub(crate) fn decode_mp4(path: &Utf8Path) -> Vec<image::RgbImage> {
+    use openh264::formats::YUVSource as _;
+
+    let bytes = std::fs::read(path).expect("the recording");
+    let size = bytes.len() as u64;
+    let mut mp4 = mp4::Mp4Reader::read_header(std::io::Cursor::new(bytes), size).expect("an MP4");
+    let (&id, track) = mp4.tracks().iter().next().expect("a video track");
+    let start = [0, 0, 0, 1];
+    let mut annex_b = [
+        &start,
+        track.sequence_parameter_set().expect("an SPS"),
+        &start,
+        track.picture_parameter_set().expect("a PPS"),
+    ]
+    .concat();
+    let mut decoder = openh264::decoder::Decoder::new().expect("a decoder");
+    (1..=mp4.sample_count(id).expect("samples"))
+        .map(|n| {
+            let sample = mp4.read_sample(id, n).expect("a sample").expect("present");
+            let mut units = &sample.bytes[..];
+            while let Some((length, rest)) = units.split_first_chunk::<4>() {
+                let (unit, rest) = rest.split_at(u32::from_be_bytes(*length) as usize);
+                annex_b.extend_from_slice(&start);
+                annex_b.extend_from_slice(unit);
+                units = rest;
+            }
+            let decoded = decoder
+                .decode(&annex_b)
+                .expect("the frame decodes")
+                .expect("a picture");
+            annex_b.clear();
+            let (width, height) = decoded.dimensions();
+            let mut rgb = vec![0; width * height * 3];
+            decoded.write_rgb8(&mut rgb);
+            let size = |side: usize| u32::try_from(side).expect("a canvas's side");
+            image::RgbImage::from_raw(size(width), size(height), rgb).expect("every pixel")
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -915,17 +1175,150 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_of_another_size_fails_the_recording() {
-        let path = scratch("sizes");
-        let mut sink = Recorder::create(&path, 10, VideoFormat::Apng).expect("a recording");
-        sink.frame(solid(4, 4, 0))
-            .expect("the first frame sets the size");
-        sink.frame(solid(5, 4, 0))
-            .expect("queued before the encoder sees it");
-        let error = sink.finish().expect_err("the encoder refuses it");
-        assert!(
-            error.contains("a frame of (5, 4) in a recording of (4, 4)"),
-            "{error}"
+    fn an_apng_grows_with_its_frames() {
+        let small = solid(4, 4, 10);
+        let wide = solid(8, 4, 20);
+        let tall = solid(8, 8, 30);
+        let frames = [
+            small.clone(),
+            small.clone(),
+            dotted(&small, 3, 3),
+            wide.clone(),
+            tall.clone(),
+            dotted(&tall, 7, 7),
+        ];
+        let path = scratch("grows");
+        let mut sink = Recorder::growing(&path, 10).expect("a recording");
+        for frame in frames {
+            sink.frame(frame).expect("the encoder takes the frame");
+        }
+        let encoded = sink.finish().expect("the recording closes");
+        let (declared, shown) = decode(&path);
+        assert_eq!((encoded.written, declared, shown.len()), (5, 5, 5));
+        let expected = [
+            grown(&small, (8, 8)),
+            grown(&dotted(&small, 3, 3), (8, 8)),
+            grown(&wide, (8, 8)),
+            tall.clone(),
+            dotted(&tall, 7, 7),
+        ];
+        for (at, (shown, expected)) in shown.iter().zip(&expected).enumerate() {
+            assert_eq!(shown.image, *expected, "frame {at}");
+        }
+        let delays: Vec<_> = shown.iter().map(|frame| frame.delay).collect();
+        assert_eq!(delays, [(2, 10), (1, 10), (1, 10), (1, 10), (1, 10)]);
+    }
+
+    #[test]
+    fn an_apng_becomes_an_mp4_of_its_last_size_with_every_frame_and_hold() {
+        let small = solid(64, 32, 10);
+        let tall = solid(64, 47, 30);
+        let path = scratch("to-mp4");
+        let mut sink = Recorder::growing(&path, 10).expect("a recording");
+        for frame in [&small, &small, &tall] {
+            sink.frame(frame.clone()).expect("a frame");
+        }
+        sink.hold(4).expect("a hold");
+        sink.finish().expect("the recording closes");
+        let mp4 = path.with_extension("mp4");
+        let over = ["key", "key", "click", "click", "click", "gone"];
+        let mut laid = Vec::new();
+        let file = File::create(&mp4).expect("created");
+        to_mp4(&path, file, &over, |shown, image| {
+            assert_eq!(
+                image.dimensions(),
+                (64, 47),
+                "every frame is of the last size"
+            );
+            laid.push(*shown);
+            Ok(())
+        })
+        .expect("an MP4");
+        assert_eq!(mp4_frames(&mp4), ((64, 48), 7));
+        assert_eq!(laid, ["key", "click", "gone"], "once for each it is on");
+    }
+
+    #[test]
+    fn a_frame_of_another_size_fails_a_recording_that_does_not_grow() {
+        for format in VideoFormat::ALL {
+            let mut sink = Recorder::create(&scratch("sizes"), 10, format).expect("a recording");
+            sink.frame(solid(16, 16, 0))
+                .expect("the first frame sets the size");
+            sink.frame(solid(32, 16, 0))
+                .expect("queued before the encoder sees it");
+            let error = sink.finish().expect_err("the encoder refuses it");
+            assert!(
+                error.contains("the canvas went from 16×16 to 32×16 while it was recorded"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recording_that_failed_says_why_however_often_it_is_asked() {
+        let mut sink = Recorder::create(&scratch("failed"), 10, VideoFormat::Apng).expect("begun");
+        sink.frame(solid(16, 16, 0)).expect("the first frame");
+        let mut sizes = (17..).map(|width| sink.frame(solid(width, 16, 0)));
+        let error = sizes.find_map(Result::err).expect("it stops");
+        assert!(error.contains("the canvas went from"), "{error}");
+        assert_eq!(sink.hold(1), Err(error.clone()));
+        assert_eq!(sink.finish(), Err(error));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_recording_a_full_disk_has_no_room_for_is_an_error_however_short() {
+        for format in VideoFormat::ALL {
+            let mut sink =
+                Recorder::create(Utf8Path::new("/dev/full"), 10, format).expect("a recording");
+            sink.frame(solid(16, 16, 0)).expect("the first frame");
+            let error = sink.finish().expect_err("nothing can be written");
+            assert!(error.contains("No space left"), "{format:?}: {error}");
+        }
+        let apng = scratch("full");
+        let mut sink = Recorder::growing(&apng, 10).expect("a recording");
+        sink.frame(solid(16, 16, 0)).expect("the first frame");
+        sink.finish().expect("the recording closes");
+        let full = File::options().write(true).open("/dev/full");
+        let kept = to_mp4::<()>(&apng, full.expect("opened"), &[], |(), _| Ok(()));
+        let error = kept.expect_err("nothing can be written");
+        assert!(error.contains("No space left"), "{error}");
+    }
+
+    #[test]
+    fn a_growing_recording_stands_a_smaller_frame_in_its_corner() {
+        let path = scratch("shrinks");
+        let mut sink = Recorder::growing(&path, 10).expect("a recording");
+        let (first, small, odd) = (solid(8, 8, 10), solid(4, 4, 90), solid(12, 2, 50));
+        for frame in [&first, &small, &odd] {
+            sink.frame(frame.clone()).expect("the encoder takes it");
+        }
+        sink.finish().expect("the recording closes");
+        let (_, shown) = decode(&path);
+        let shown: Vec<_> = shown.into_iter().map(|frame| frame.image).collect();
+        assert_eq!(
+            shown,
+            [first, small, odd].map(|frame| grown(&frame, (12, 8)))
+        );
+    }
+
+    #[test]
+    fn a_recording_dropped_keeps_what_it_holds_unless_it_was_growing() {
+        let frames = |mut sink: Recorder| {
+            sink.frame(solid(4, 4, 0)).expect("the first frame");
+            sink.frame(solid(4, 4, 9)).expect("the next frame");
+        };
+        let path = scratch("dropped");
+        frames(Recorder::create(&path, 10, VideoFormat::Apng).expect("a recording"));
+        assert_eq!(decode(&path).1.len(), 2);
+
+        frames(Recorder::growing(&path, 10).expect("a recording"));
+        let bytes = std::fs::read(&path).expect("the file");
+        let width = bytes.get(16..20);
+        assert_ne!(
+            width,
+            Some(&4_u32.to_be_bytes()[..]),
+            "its header is not patched"
         );
     }
 
@@ -1005,8 +1398,6 @@ mod tests {
     /// The stage's checkerboard is a step of a few shades, the first detail a coarse quantiser smears away.
     #[test]
     fn an_mp4_keeps_a_low_contrast_pattern_sharp() {
-        use openh264::formats::YUVSource;
-
         let checker = RgbaImage::from_fn(64, 64, |x, y| {
             let shade = if (x / 8 + y / 8) % 2 == 0 { 40 } else { 56 };
             image::Rgba([shade, shade, shade, 255])
@@ -1017,41 +1408,13 @@ mod tests {
             .expect("the encoder takes the frame");
         sink.finish().expect("the recording closes");
 
-        let bytes = std::fs::read(&path).expect("the recording");
-        let size = bytes.len() as u64;
-        let mut mp4 =
-            mp4::Mp4Reader::read_header(std::io::Cursor::new(bytes), size).expect("an MP4");
-        let (&id, track) = mp4.tracks().iter().next().expect("a video track");
-        let start = [0, 0, 0, 1];
-        let mut annex_b = [
-            &start,
-            track.sequence_parameter_set().expect("an SPS"),
-            &start,
-            track.picture_parameter_set().expect("a PPS"),
-        ]
-        .concat();
-        let sample = mp4.read_sample(id, 1).expect("a sample").expect("present");
-        let mut units = &sample.bytes[..];
-        while let Some((length, rest)) = units.split_first_chunk::<4>() {
-            let (unit, rest) = rest.split_at(u32::from_be_bytes(*length) as usize);
-            annex_b.extend_from_slice(&start);
-            annex_b.extend_from_slice(unit);
-            units = rest;
-        }
-
-        let mut decoder = openh264::decoder::Decoder::new().expect("a decoder");
-        let decoded = decoder
-            .decode(&annex_b)
-            .expect("the keyframe decodes")
-            .expect("a picture");
-        assert_eq!(decoded.dimensions(), (64, 64));
-        let mut rgb = vec![0; 64 * 64 * 3];
-        decoded.write_rgb8(&mut rgb);
-
+        let frames = decode_mp4(&path);
+        let rgb = frames[0].as_raw();
+        assert_eq!(frames[0].dimensions(), (64, 64));
         let squared: f64 = checker
             .pixels()
             .flat_map(|pixel| &pixel.0[..3])
-            .zip(&rgb)
+            .zip(rgb)
             .map(|(&want, &got)| (f64::from(want) - f64::from(got)).powi(2))
             .sum();
         let psnr = 10.0 * (255.0_f64.powi(2) / (squared / rgb.len() as f64)).log10();
