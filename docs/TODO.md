@@ -1,45 +1,5 @@
 # TODO
 
-## Publishing to crates.io (deferred)
-
-Not required while the repo is source-only — each consumer's Cargo fetches the crates themselves. Do this only before an
-actual `cargo publish`. Research: crates.io Trusted Publishing (RFC 3691), Cargo publishing reference.
-
-### Manifests
-
-- [ ] Flip `publish` in `[workspace.package]`, which all three inherit — one line, not three. `repository` is inherited
-  from there too (it is the repo a Trusted Publisher binds to), and
-  `license`/`description`/`readme`/`keywords`/`categories` are already set per crate.
-
-### Publish order (path-dep rule)
-
-- [ ] crates.io forbids publishing a crate with a path-only dependency, so publish `gallery-macros` + `gallery-build`
-  first, then `gallery` (it path-depends on `gallery-macros`). `release-plz` / `cargo-release` handle this ordering.
-
-### Template
-
-- [ ] `template/` depends on `gallery = { git = … }`; add a registry-dep variant (`gallery = "0.1"`) for post-publish
-  consumers, or keep git while pre-release.
-
-### Trusted Publishing (the only provenance mechanism crates.io has)
-
-- [ ] Register a Trusted Publisher per crate on crates.io: owner `kubijo`, repo `rs-gallery`, workflow `release.yml`,
-  environment `release`.
-- [ ] Add `.github/workflows/release.yml`: tag-triggered, `permissions: id-token: write`,
-  `rust-lang/crates-io-auth-action` → `cargo publish`. No long-lived `CRATES_IO_TOKEN` secret.
-- [ ] crates.io account needs a verified email.
-- Artifact provenance / sigstore attestation is explicitly out of scope on crates.io (RFC 3691) — nothing to set up
-  there.
-
-### Tagging
-
-Settled: a single `v<version>` tag while the three crates version in lockstep, and the CHANGELOG section it belongs to
-is headed `## [<version>] - <date>` — the shape `--check-updates` reads. Per-crate `<pkg>-v<version>` tags only become
-necessary if they ever diverge. Date-based versions were weighed and dropped: semver's three segments are numeric and
-its dash suffix is a *pre*-release, so a same-day re-cut had nowhere to go that both git and cargo would order alike.
-
-- [ ] Consider `release-plz` — release PR from the Keep-a-Changelog `CHANGELOG.md` → tag → publish.
-
 ## Perf: honest measurement, profiling, scene snapshots
 
 The shape to aim for, borrowed from a wasm runtime's own harness: samply CPU sampling plus per-frame and per-section
@@ -134,6 +94,10 @@ past a handful of images, and a structural target beside the pixel one.
   directory, which cargo watches whole, and under nextest every test builds the scenes, about 7 s for the next one with
   `-j1`. They could go to the tests' output alone, or such a directory be left unwatched, as one with the output in it
   is.
+- [ ] CI uploads nothing that `just demo::plays` leaves: the catalog tests' report, with its snapshots and videos, which
+  links only to files beside it so that it can be. Uploaded before the step that fails on them.
+- [ ] A screenshot within its budget passes without a word, though it may be the first of a drift. A verdict of its own,
+  *tolerated*, would show in the log and the report how many pixels of the allowed ones differ, without failing.
 - [ ] With cargo's `build-dir` apart from a target directory beneath the scenes, every nextest test recompiles them: of
   what the build writes, only `OUT_DIR` is known to be in there, and not where the dylib lands.
 - [ ] A recording's pointer jumps from widget to widget, since a gesture moves it in one frame. A glide only in the

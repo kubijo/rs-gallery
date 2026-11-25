@@ -532,7 +532,6 @@ A check with no reference yet fails, as does one that differs past its budget, a
 then take it with `UPDATE_SNAPSHOTS=1 just test`; `UPDATE_SNAPSHOTS=force` retakes every reference that differs at all,
 within budget or not. The variable takes the values `egui_kittest` gives it. A catalog ignores the leftovers with
 `**/__snapshots__/**/*.new.*` and `**/__snapshots__/**/*.diff.*` in its `.gitignore`.
-
 The budget is set once in `gallery.toml`, and per renderer over it; a check's own `Screenshot` outranks both:
 
 ```toml
@@ -743,7 +742,7 @@ CI runs the same `release::check` on a tag push, along with the rest of the gate
 
 Discovery, the tree, hot-reload, knobs — reading and writing them from the scene — source view, SVG icons and headless
 capture all work, on either renderer. Open: a wgpu offscreen texture path (glow has `ctx.offscreen`; wgpu draws inline
-through `ctx.render_state`) and publishing to crates.io.
+through `ctx.render_state`).
 
 ## License
 
