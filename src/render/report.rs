@@ -200,9 +200,9 @@ impl FailedShot {
         }
     }
 
-    /// The failed play's log as the terminal shows it.
-    pub(super) fn tree(&self) -> String {
-        step_list(&self.name, &self.play, &self.log, true)
+    /// Its play's `log` as the terminal shows it.
+    pub(super) fn tree(&self, log: &[Entry]) -> String {
+        step_list(&self.name, &self.play, log, true)
     }
 }
 
@@ -587,8 +587,9 @@ pub(super) fn failures(failed: usize, ended: bool) -> Option<String> {
     }
 }
 
-/// A phrase on one line: googletest lays a compound matcher's parts out on lines of their own.
-fn one_line(phrase: &str) -> String {
+/// A phrase on one line: googletest lays
+/// a compound matcher's parts out on lines of their own.
+pub(crate) fn one_line(phrase: &str) -> String {
     phrase.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -664,18 +665,9 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
     let aside = Style::new().dimmed();
     let passed = paint(Style::new().fg_color(Some(AnsiColor::Green.into())), "✓");
     let failed = paint(Style::new().fg_color(Some(AnsiColor::Red.into())), "×");
-    let recorded = run.written.iter().any(|w| !w.videos.is_empty())
-        || run.failed.iter().any(|shot| !shot.videos.is_empty());
-    let mut header = vec!["", "shot", "size", "steps", "screenshots"];
-    if recorded {
-        header.push("recording");
-    }
-    let mut table = comfy_table::Table::new();
-    table
-        .load_style(comfy_table::presets::UTF8_FULL_CONDENSED.with_rounded_corners())
-        .set_header(header.into_iter().map(|title| paint(aside, title)));
     let linked = |path: &Utf8Path| style::path(path, stream);
-    // The width is padded on its own account, so the `×` holds still down the column.
+    // The width is padded on its own account,
+    // so the `×` holds still down the column.
     let digits = run
         .written
         .iter()
@@ -689,8 +681,9 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
             .map(linked)
             .unwrap_or_default()
     };
+    let mut rows = Vec::new();
     for slot in run.order {
-        let row = match *slot {
+        rows.push(match *slot {
             Slot::Written(at) => {
                 let w = &run.written[at];
                 let mut size = format!("{:>digits$}×{}", w.size.width, w.size.height);
@@ -708,10 +701,11 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
                     .videos
                     .iter()
                     .map(|video| {
+                        let length = f64::from(video.frames + video.held) / f64::from(video.fps);
                         format!(
                             "{}  {}",
                             linked(&video.path),
-                            paint(aside, &format!("{} frames", video.frames))
+                            paint(aside, &format!("{} frames · {length:.1} s", video.frames))
                         )
                     })
                     .collect::<Vec<_>>()
@@ -740,8 +734,17 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
                         .join("\n"),
                 ]
             }
-        };
-        table.add_row(if recorded { row } else { row[..5].to_vec() });
+        });
+    }
+    let titles = ["", "shot", "size", "steps", "screenshots", "recording"];
+    let filled = |column: &usize| rows.iter().any(|row| !row[*column].is_empty());
+    let columns: Vec<usize> = (0..titles.len()).filter(filled).collect();
+    let mut table = comfy_table::Table::new();
+    table
+        .load_style(comfy_table::presets::UTF8_FULL_CONDENSED.with_rounded_corners())
+        .set_header(columns.iter().map(|&at| paint(aside, titles[at])));
+    for row in &rows {
+        table.add_row(columns.iter().map(|&at| &row[at]));
     }
     let framed = table
         .lines()

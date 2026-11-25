@@ -57,7 +57,7 @@ mod snapshot;
 mod tests;
 
 use self::film::Film;
-pub(crate) use self::film::Films;
+pub(crate) use self::film::{Filmed, Films, create_output, place_at, play_dir_in};
 pub(crate) use self::log_view::LogMode;
 use self::log_view::LogView;
 pub(crate) use self::overlay::Corner;
@@ -498,14 +498,50 @@ pub(crate) struct Testing {
     pub(crate) styled: bool,
 }
 
+/// What a shot drawn for a test came to.
+#[derive(Default)]
+pub(crate) struct Checked {
+    /// What a capture would report for the shot,
+    /// a failed play or a panicking scene included.
+    pub(crate) failure: Option<Diagnostic>,
+    /// A failed play's log as a terminal shows it.
+    tree: Option<String>,
+    pub(crate) log: Vec<Entry>,
+    /// The play's video, when it is kept.
+    pub(crate) filmed: Option<Filmed>,
+    /// What is amiss that fails nothing.
+    pub(crate) warnings: Vec<Diagnostic>,
+}
+
+impl Checked {
+    pub(crate) fn failed(failure: Diagnostic) -> Self {
+        Self {
+            failure: Some(failure),
+            ..Self::default()
+        }
+    }
+
+    /// # Errors
+    /// Its failure, with colour and links if `styled`;
+    /// a failed play's log follows.
+    pub(crate) fn outcome(&self, styled: bool) -> Result<(), String> {
+        let Some(failure) = &self.failure else {
+            return Ok(());
+        };
+        let (report, log) = if styled {
+            (failure.panel(style::Stream::Stdout), self.tree.clone())
+        } else {
+            (failure.plain(), self.tree.as_deref().map(style::plain))
+        };
+        Err(match log {
+            Some(log) => format!("{report}\n\n{log}"),
+            None => report,
+        })
+    }
+}
+
 /// One shot drawn for a test, its play's snapshots judged
-/// and the play filmed as `testing` has it:
-/// only whether it failed, and what it warns of.
-///
-/// # Errors
-/// What a capture would report for the shot,
-/// a failed play or a panicking scene included;
-/// a failed play's log follows its report.
+/// and the play filmed as `testing` has it.
 pub(crate) fn check_shot(
     manifest: &Manifest,
     globals: Option<GlobalEntry>,
@@ -514,7 +550,7 @@ pub(crate) fn check_shot(
     setup: &impl Fn(&egui::Context),
     shot: &Shot,
     testing: &Testing,
-) -> Result<(), String> {
+) -> Checked {
     let mut view = LogView::off();
     let mut watch = Watch::new(&mut view);
     watch.snapshots = Some(&testing.snapshots);
@@ -522,18 +558,20 @@ pub(crate) fn check_shot(
     watch.stream = style::Stream::Stdout;
     let outcome = shoot_with_globals(manifest, globals, plays, session, setup, shot, &mut watch);
     watch.warnings.iter().for_each(testing.warn);
-    outcome.map(drop).map_err(|failure| {
-        let log = watch.failed.as_ref().map(FailedShot::tree);
-        let (report, log) = if testing.styled {
-            (failure.panel(watch.stream), log)
-        } else {
-            (failure.plain(), log.map(|log| style::plain(&log)))
-        };
-        match log {
-            Some(log) => format!("{report}\n\n{log}"),
-            None => report,
-        }
-    })
+    let log = match (&mut watch.failed, watch.played) {
+        (Some(failed), _) => std::mem::take(&mut failed.log),
+        (None, Some(played)) => played.log,
+        (None, None) => Vec::new(),
+    };
+    let mut checked = Checked {
+        failure: outcome.err(),
+        tree: None,
+        log,
+        filmed: watch.filmed,
+        warnings: watch.warnings,
+    };
+    checked.tree = watch.failed.map(|failed| failed.tree(&checked.log));
+    checked
 }
 
 /// [`check_shot`], with the play's log and the warnings: what a test of it reads.

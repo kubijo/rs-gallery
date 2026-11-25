@@ -232,6 +232,11 @@ pub(super) struct Watch<'a> {
     /// How to film the play.
     /// `None` in a capture, which records what its shot asks for.
     pub(super) films: Option<&'a Films>,
+    /// What a play that passed did, of a shot
+    /// that writes no image to report it with.
+    pub(super) played: Option<PlayOutcome>,
+    /// The play's video, when it is kept.
+    pub(super) filmed: Option<Filmed>,
     /// Where a failure is reported.
     pub(super) stream: Stream,
     /// What is amiss that fails nothing.
@@ -245,6 +250,8 @@ impl<'a> Watch<'a> {
             failed: None,
             snapshots: None,
             films: None,
+            played: None,
+            filmed: None,
             stream: Stream::Stderr,
             warnings: Vec::new(),
         }
@@ -351,7 +358,10 @@ pub(super) fn shoot_with_globals(
             let mut with_video = |mut report: Diagnostic, film: Result<Option<Film>, String>| {
                 let keep = |film: Film| film.keep(session, shot.scale);
                 match film.and_then(|film| film.map(keep).transpose()) {
-                    Ok(kept) => video_paths.extend(kept),
+                    Ok(kept) => {
+                        video_paths.extend(kept.iter().map(|film| film.path.clone()));
+                        watch.filmed = kept;
+                    }
                     Err(why) => report = report.hint(format!("the play is not recorded: {why}")),
                 }
                 if !video_paths.is_empty() {
@@ -359,8 +369,8 @@ pub(super) fn shoot_with_globals(
                         .iter()
                         .map(|path| crate::style::path(path, watch.stream))
                         .collect();
-                    report =
-                        report.hint(format!("the play is recorded in {}", paths.join(" and ")));
+                    let paths = paths.join(" and ");
+                    report = report.recorded(format!("the play is recorded in {paths}"));
                 }
                 (report, std::mem::take(&mut video_paths))
             };
@@ -492,8 +502,9 @@ pub(super) fn shoot_with_globals(
             }
             if watch.films.is_some_and(Films::keeps_passing) {
                 let keep = |film: Film| film.keep(session, shot.scale);
-                if let Err(why) = film.and_then(|film| film.map(keep).transpose()) {
-                    watch.unfilmed(&play.name, why);
+                match film.and_then(|film| film.map(keep).transpose()) {
+                    Ok(kept) => watch.filmed = kept,
+                    Err(why) => watch.unfilmed(&play.name, why),
                 }
             }
             // Only now has the shot passed, so only now are its step screenshots let go.
@@ -614,6 +625,7 @@ pub(super) fn shoot_with_globals(
         };
         return Ok(Some(ShotOutput { written, image }));
     }
+    watch.played = played;
     Ok(None)
 }
 

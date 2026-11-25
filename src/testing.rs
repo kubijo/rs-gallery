@@ -14,11 +14,12 @@ use crate::{
     diagnostic::Diagnostic,
     hot::{HotDylib, profile_dir},
     render::{
-        self, DEFAULT_SCALE, DEFAULT_SIZE, Films, Overrides, Session, Shot, ShotPlay, Snapshots,
-        Testing, Trace, Update,
+        self, Checked, DEFAULT_SCALE, DEFAULT_SIZE, Films, Overrides, Session, Shot, ShotPlay,
+        Snapshots, Testing, Trace, Update,
     },
     style::Stream,
     tree::scene_key,
+    verdicts::{self, Results, Tested},
 };
 
 /// A catalog's test binary:
@@ -73,55 +74,94 @@ pub fn __test_main(
     let globals = source.globals();
     let plays: Arc<[PlayEntry]> = source.plays().into();
     let update = Update::from_env().unwrap_or_else(|e| panic!("{e}"));
-    let testing = Arc::new(Testing {
+    let output = config.tests.output.unwrap_or_else(|| in_target("gallery"));
+    let krate = package.replace('-', "_");
+    let testing = Testing {
         snapshots: Snapshots::new(&config.snapshots, renderer, update),
         films: Films::new(
-            config.tests.output.unwrap_or_else(|| in_target("gallery")),
+            output.clone(),
             in_target("gallery-recordings"),
             config.tests.video,
-            package.replace('-', "_"),
+            krate.clone(),
         ),
         warn: Diagnostic::report,
         styled: styled_for(&args, crate::style::coloured(Stream::Stdout)),
+    };
+    let tests = tests_of(&manifest, &plays);
+    let names = tests.iter().map(|test| test.name.clone());
+    let tested = Tested {
+        output,
+        krate,
+        manifest_dir: manifest_dir.into(),
+        renderer: renderer.name(),
+    };
+    let results = Results::new(tested, names, testing.warn);
+    let catalog = Arc::new(Catalog {
+        manifest,
+        globals,
+        plays,
+        renderer,
+        setup,
+        testing,
+        results,
     });
 
-    let mut trials = Vec::new();
-    for scene in &manifest.scenes {
-        let key = scene_key(scene);
-        let catalog = Catalog {
-            manifest: Arc::clone(&manifest),
-            globals,
-            plays: Arc::clone(&plays),
-            renderer,
-            setup,
-            testing: Arc::clone(&testing),
-        };
-        trials.push(
-            Trial::test(format!("smoke::{key}"), move || {
-                catalog.shoot(shot(key, None))
-            })
-            .with_kind("smoke"),
-        );
+    let trials = tests
+        .into_iter()
+        .map(|test| {
+            let catalog = Arc::clone(&catalog);
+            let kind = test.kind();
+            Trial::test(test.name.clone(), move || catalog.run(&test)).with_kind(kind)
+        })
+        .collect();
+    let conclusion = libtest_mimic::run(&args, trials);
+    let page = catalog.results.close();
+    // Under nextest every test is a process, and would say so.
+    if let Some(page) = page
+        && std::env::var_os("NEXTEST").is_none()
+        && !args.quiet
+    {
+        anstream::eprintln!("report: {}", crate::style::path_on_stderr(&page));
     }
-    for play in plays.iter() {
-        let key = play.scene.to_string();
-        let catalog = Catalog {
-            manifest: Arc::clone(&manifest),
-            globals,
-            plays: Arc::clone(&plays),
-            renderer,
-            setup,
-            testing: Arc::clone(&testing),
-        };
-        let name = play.name;
-        trials.push(
-            Trial::test(format!("play::{key}::{name}"), move || {
-                catalog.shoot(shot(key, Some(name)))
-            })
-            .with_kind("play"),
-        );
+    conclusion.exit_code()
+}
+
+/// One test of a catalog.
+struct Test {
+    name: String,
+    scene: String,
+    /// The play it runs, if it does not just draw the scene.
+    play: Option<PlayEntry>,
+}
+
+impl Test {
+    fn kind(&self) -> &'static str {
+        match self.play {
+            Some(_) => "play",
+            None => "smoke",
+        }
     }
-    libtest_mimic::run(&args, trials).exit_code()
+}
+
+/// A test for each scene of `manifest`, and one for each of `plays`.
+fn tests_of(manifest: &Manifest, plays: &[PlayEntry]) -> Vec<Test> {
+    let smoke = manifest.scenes.iter().map(|scene| {
+        let scene = scene_key(scene);
+        Test {
+            name: format!("smoke::{scene}"),
+            scene,
+            play: None,
+        }
+    });
+    let played = plays.iter().map(|play| {
+        let scene = play.scene.to_string();
+        Test {
+            name: format!("play::{scene}::{}", play.name),
+            scene,
+            play: Some(*play),
+        }
+    });
+    smoke.chain(played).collect()
 }
 
 /// `name` in cargo's target directory.
@@ -144,7 +184,8 @@ struct Catalog {
     plays: Arc<[PlayEntry]>,
     renderer: Renderer,
     setup: fn(&egui::Context),
-    testing: Arc<Testing>,
+    testing: Testing,
+    results: Results,
 }
 
 thread_local! {
@@ -157,13 +198,30 @@ thread_local! {
 }
 
 impl Catalog {
-    fn shoot(&self, shot: Shot) -> Result<(), Failed> {
+    fn run(&self, test: &Test) -> Result<(), Failed> {
+        let trial = verdicts::Trial {
+            name: &test.name,
+            scene: &test.scene,
+            play: test.play.as_ref(),
+        };
+        let shot = shot(test.scene.clone(), test.play.map(|play| play.name));
+        let checked = self.results.of(trial, || self.shoot(&shot, Session::open));
+        checked.outcome(self.testing.styled).map_err(Failed::from)
+    }
+
+    /// Draw `shot` in the thread's session, which it is to `open` if there is none.
+    fn shoot(
+        &self,
+        shot: &Shot,
+        open: impl FnOnce(Renderer) -> Result<Session, Diagnostic>,
+    ) -> Checked {
         SESSION.with_borrow_mut(|session| {
             let session = match session {
                 Some(session) => session,
-                None => session.insert(ManuallyDrop::new(
-                    Session::open(self.renderer).map_err(|e| e.plain())?,
-                )),
+                None => match open(self.renderer) {
+                    Ok(opened) => session.insert(ManuallyDrop::new(opened)),
+                    Err(failure) => return Checked::failed(failure),
+                },
             };
             render::check_shot(
                 &self.manifest,
@@ -171,10 +229,9 @@ impl Catalog {
                 &self.plays,
                 session,
                 &self.setup,
-                &shot,
+                shot,
                 &self.testing,
             )
-            .map_err(Failed::from)
         })
     }
 }
@@ -205,7 +262,116 @@ fn shot(scene: String, play: Option<&str>) -> Shot {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use gallery_build::Video;
+
     use super::*;
+    use crate::{Play, PlayResult, SceneCtx, SceneEntry, SceneKey};
+
+    /// A catalog of one scene, with a play that passes and one that fails;
+    /// and what its report warns of.
+    fn catalog(dir: &Utf8Path) -> (Catalog, Vec<Test>, Arc<Mutex<Vec<String>>>) {
+        fn says_hello(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+            ui.label("Hello");
+        }
+        fn passes(p: &mut Play<'_>) -> PlayResult {
+            p.expect("Hello").to_exist()
+        }
+        fn fails(p: &mut Play<'_>) -> PlayResult {
+            p.expect("Goodbye").within(0).to_exist()
+        }
+        let manifest = Manifest {
+            scenes: vec![SceneEntry {
+                render: says_hello,
+                name: "Greeting",
+                module_path: "plays",
+                default: true,
+                order: 0,
+                source: "",
+            }],
+            groups: Vec::new(),
+        };
+        let play = |name, run| PlayEntry {
+            scene: SceneKey {
+                module_path: "plays",
+                name: "Greeting",
+            },
+            name,
+            module_path: "plays",
+            file: file!(),
+            run,
+        };
+        let plays = [play("passes", passes), play("fails", fails)];
+        let tests = tests_of(&manifest, &plays);
+        let manifest_of_plays = "[package]\nname = \"plays\"\n";
+        std::fs::write(dir.join("Cargo.toml"), manifest_of_plays).expect("written");
+        let tested = Tested {
+            output: dir.join("out"),
+            krate: "plays".to_owned(),
+            manifest_dir: dir.to_owned(),
+            renderer: "glow",
+        };
+        let warn: fn(&Diagnostic) = |warning| panic!("{}", warning.plain());
+        let warned = Arc::new(Mutex::new(Vec::new()));
+        let warnings = Arc::clone(&warned);
+        let names = tests.iter().map(|test| test.name.clone());
+        let catalog = Catalog {
+            manifest: Arc::new(manifest),
+            globals: None,
+            plays: Arc::new(plays),
+            renderer: Renderer::Glow,
+            setup: |_| {},
+            testing: Testing {
+                snapshots: Snapshots::default(),
+                films: Films::new(
+                    dir.join("out"),
+                    dir.join("recordings"),
+                    Video::Off,
+                    "plays".to_owned(),
+                ),
+                warn,
+                styled: false,
+            },
+            results: Results::new(tested, names, move |warning: &Diagnostic| {
+                warnings.lock().expect("no panic").push(warning.plain());
+            }),
+        };
+        (catalog, tests, warned)
+    }
+
+    #[test]
+    fn a_test_passes_or_fails_as_its_scene_and_play_do() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let dir = Utf8Path::from_path(dir.path()).expect("UTF-8");
+        let (catalog, tests, warned) = catalog(dir);
+        let outcomes: Vec<_> = tests
+            .iter()
+            .map(|test| (test.name.as_str(), catalog.run(test).is_ok()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("smoke::plays::Greeting", true),
+                ("play::plays::Greeting::passes", true),
+                ("play::plays::Greeting::fails", false),
+            ]
+        );
+        let page = catalog.results.close().expect("the report");
+        assert_eq!(*warned.lock().expect("no panic"), Vec::<String>::new());
+        let page = std::fs::read_to_string(page).expect("read");
+        assert!(page.contains("<title>1 failed"), "{page}");
+    }
+
+    #[test]
+    fn a_test_fails_that_there_is_nothing_to_draw_on_for() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let (catalog, tests, _) = catalog(Utf8Path::from_path(dir.path()).expect("UTF-8"));
+        let shot = shot(tests[0].scene.clone(), None);
+        let checked = catalog.shoot(&shot, |_| Err(Diagnostic::new("no EGL device")));
+        let failure = checked.outcome(false).expect_err("it was not drawn");
+        assert!(failure.contains("no EGL device"), "{failure}");
+    }
 
     #[test]
     fn a_log_file_takes_no_colour_whatever_the_terminal_does() {

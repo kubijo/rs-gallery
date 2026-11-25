@@ -167,8 +167,8 @@ impl Session {
     pub(crate) fn renderer_name(&self) -> &'static str {
         match self {
             #[cfg(not(target_vendor = "apple"))]
-            Self::Glow(_) => "glow",
-            Self::Wgpu(_) => "wgpu",
+            Self::Glow(_) => crate::Renderer::Glow.name(),
+            Self::Wgpu(_) => crate::Renderer::Wgpu.name(),
         }
     }
 

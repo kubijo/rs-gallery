@@ -152,7 +152,10 @@ impl Config {
             .check()
             .map_err(|e| format!("`{path}`: {e}"))?;
         let tests = Tests {
-            output: declared.tests.output.map(|output| dir.join(output)),
+            output: declared
+                .tests
+                .output
+                .map(|output| canonical(&dir.join(output))),
             ..declared.tests
         };
         Ok(Self {
@@ -164,6 +167,17 @@ impl Config {
             path,
         })
     }
+}
+
+/// `path` as far as it is there canonicalised, and the rest as it is.
+fn canonical(path: &Utf8Path) -> Utf8PathBuf {
+    let found = path.ancestors().find_map(|there| {
+        let rest = path.strip_prefix(there).ok()?;
+        let mut whole = there.canonicalize_utf8().ok()?;
+        whole.extend(rest);
+        Some(whole)
+    });
+    found.unwrap_or_else(|| path.to_owned())
 }
 
 /// Resolve a config-relative glob to an absolute one.
@@ -187,7 +201,9 @@ fn resolve_glob(config_dir: &Utf8Path, glob: &str) -> String {
 pub fn discover_from_env() {
     println!("cargo:rerun-if-env-changed=GALLERY_CONFIG");
     println!("cargo:rerun-if-env-changed=GALLERY_SCENE_GLOBS");
-    discover(env_globs());
+    let config = Config::read(&config_path()).ok();
+    let output = config.and_then(|config| config.tests.output);
+    discover_beside(output.as_deref(), env_globs());
     warn_on_shared_rlibs();
 }
 
@@ -355,10 +371,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    discover_beside(None, globs)
+}
+
+/// [`discover`], where tests write to `tests_output`.
+fn discover_beside<I, S>(tests_output: Option<&Utf8Path>, globs: I) -> Utf8PathBuf
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let out_dir = env::var("OUT_DIR").expect("discover() must run from a build script");
     let out_dir = Utf8PathBuf::from(out_dir);
     let generated = out_dir.join("gallery_scenes.rs");
-    let modules = includes(globs, &out_dir);
+    let written = tests_output.into_iter().chain([out_dir.as_path()]);
+    let modules = includes(globs, &written.collect::<Vec<_>>());
     // Left alone when it would say the same thing: the crate `include!`s this file,
     // so a fresh mtime recompiles it even where not a byte moved.
     if fs::read_to_string(&generated).is_ok_and(|current| current == modules) {
@@ -370,12 +396,12 @@ where
 
 /// The `#[path] mod …;` line for every scene file the globs match,
 /// and the `rerun-if-changed` directives that go with them.
-fn includes<I, S>(globs: I, out: &Utf8Path) -> String
+fn includes<I, S>(globs: I, written: &[&Utf8Path]) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let found = scan(globs, Some(out));
+    let found = scan(globs, written);
     for path in &found.watch {
         println!("cargo:rerun-if-changed={path}");
     }
@@ -395,9 +421,10 @@ struct Discovered {
 /// so the build dirties any directory it writes into.
 /// A glob's static prefix is a repo root where scenes sit beside their components,
 /// `target/` and `.git` under it, so a `git status` between two builds rebuilt the dylib.
-/// A scene's own directory is not that — unless `out` sits beneath it, as the scaffold's does.
+/// A scene's own directory is not that — unless what is `written` sits beneath it, as the scaffold's
+/// build does.
 /// Skipping that one costs notice of a scene *added* there; the files are watched either way.
-fn scan<I, S>(globs: I, out: Option<&Utf8Path>) -> Discovered
+fn scan<I, S>(globs: I, written: &[&Utf8Path]) -> Discovered
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -423,7 +450,7 @@ where
             }
             let abs = path.canonicalize_utf8().unwrap_or(path);
             if let Some(dir) = abs.parent()
-                && !out.is_some_and(|out| out.starts_with(dir))
+                && !written.iter().any(|written| written.starts_with(dir))
                 && watched.insert(dir.to_owned())
             {
                 watch.push(dir.to_owned());
@@ -512,7 +539,7 @@ mod tests {
                 "target/debug/stale.scene.rs",
             ],
         );
-        let modules = scan([format!("{root}/**/*.scene.rs")], None).modules;
+        let modules = scan([format!("{root}/**/*.scene.rs")], &[]).modules;
         assert!(modules.contains("mod good;"), "the source scene: {modules}");
         assert!(
             !modules.contains("stale"),
@@ -528,7 +555,7 @@ mod tests {
             "named",
             &["crates/targets/dial.scene.rs", "target/mine.scene.rs"],
         );
-        let modules = scan([format!("{root}/**/*.scene.rs")], None).modules;
+        let modules = scan([format!("{root}/**/*.scene.rs")], &[]).modules;
         assert!(modules.contains("mod dial;"), "under `targets/`: {modules}");
         assert!(modules.contains("mod mine;"), "under `target/`: {modules}");
     }
@@ -554,7 +581,7 @@ mod tests {
                 ".git/HEAD",
             ],
         );
-        let found = scan([format!("{root}/**/*.scene.rs")], None);
+        let found = scan([format!("{root}/**/*.scene.rs")], &[]);
 
         assert!(
             found.watch.contains(&root.join("components")),
@@ -583,7 +610,7 @@ mod tests {
         let root = tree("writes-into", &["loose.scene.rs", "target/CACHEDIR.TAG"]);
         let out = root.join("target/debug/build/app-gallery-1234/out");
 
-        let found = scan([format!("{root}/**/*.scene.rs")], Some(&out));
+        let found = scan([format!("{root}/**/*.scene.rs")], &[&out]);
 
         assert!(
             !found.watch.contains(&root),
@@ -595,6 +622,49 @@ mod tests {
             "the scene is still watched, so editing it still rebuilds: {:?}",
             found.watch
         );
+    }
+
+    /// Under nextest every test is a process that builds the scenes,
+    /// and every test writes to the tests' output.
+    #[test]
+    fn a_scene_directory_the_tests_write_into_is_not_watched() {
+        let root = tree(
+            "tests-write-into",
+            &["crate/loose.scene.rs", "elsewhere/dial.scene.rs"],
+        );
+        let globs = [format!("{root}/**/*.scene.rs")];
+        let watches = |output: &Utf8Path, dir: &str| {
+            let out = Utf8Path::new("/build/out");
+            let found = scan(&globs, &[out, output]);
+            assert!(found.watch.contains(&root.join("crate/loose.scene.rs")));
+            found.watch.contains(&root.join(dir))
+        };
+        for inside in ["crate", "crate/target/tests"] {
+            assert!(!watches(&root.join(inside), "crate"), "{inside}");
+            assert!(watches(&root.join(inside), "elsewhere"), "{inside}");
+        }
+        assert!(watches(&root.join("crate-tests"), "crate"));
+    }
+
+    #[test]
+    fn the_tests_output_is_one_path_however_it_is_spelled() {
+        let root = tree("output-spelled", &["crate/gallery.toml", "out/kept"]);
+        let output = |declared: &str| {
+            let path = root.join("crate/gallery.toml");
+            let toml = format!("scene_globs = []\n[tests]\noutput = \"{declared}\"\n");
+            fs::write(&path, toml).expect("write the config");
+            let config = Config::read(&path).expect("a config");
+            config.tests.output.expect("an output")
+        };
+        for (declared, resolved) in [
+            ("target/tests", "crate/target/tests"),
+            ("../out/kept", "out/kept"),
+            ("../out/new/tests", "out/new/tests"),
+            ("../new", "new"),
+            ("../crate/./tests", "crate/tests"),
+        ] {
+            assert_eq!(output(declared), root.join(resolved), "{declared}");
+        }
     }
 
     /// A bare `cargo build` has no environment from the launcher, and has to find the same scenes
@@ -621,7 +691,7 @@ mod tests {
             config.title, "Gallery",
             "an omitted title has a useful default"
         );
-        let modules = scan(&config.globs, None).modules;
+        let modules = scan(&config.globs, &[]).modules;
         assert!(modules.contains("mod dial;"), "under a subdir: {modules}");
         assert!(modules.contains("mod loose;"), "beside it: {modules}");
         assert!(
@@ -819,7 +889,7 @@ mod tests {
         // Caught rather than left to unwind: not panicking is the whole property, and the directory
         // has to be readable again either way or every later run trips over it instead.
         let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan([format!("{root}/**/*.scene.rs")], None).modules
+            scan([format!("{root}/**/*.scene.rs")], &[]).modules
         }));
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock the dir");
 

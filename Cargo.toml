@@ -74,6 +74,12 @@ strsim = "0.11"
 # Its default turns on every `image` codec; it is handed decoded images only.
 dify = { version = "0.8", default-features = false }
 similar = "3"
+# Its default's `config` feature needs basic-toml, unmaintained (RUSTSEC-2026-0374).
+askama = { version = "0.16", default-features = false, features = ["derive", "std"] }
+jiff = { version = "1", default-features = false, features = ["std", "serde"] }
+percent-encoding = "2"
+sanitize-filename = "0.6"
+walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", default-features = false, features = ["std", "stdio"] }

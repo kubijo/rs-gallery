@@ -668,12 +668,27 @@ A panic in a paint callback of the scene's (`egui_wgpu::Callback`, `egui_glow::C
 is raised while the frame is rendered, not drawn, and the dylib's `std` and the host's can't catch each other's panics.
 It ends the process, a capture's or the window's too, after its message and a line naming the scene.
 
+Every run of a test leaves an HTML report of them all, `index.html` in the tests' output, with each play's log,
+snapshots and video; the test binary ends with its path, unless it is quiet or nextest's. A minimap jumps to a scene or
+a play, the buttons show only what failed, a log line's time seeks the play's video, if that is kept, to it, and an
+image opens to be zoomed into and flickered between the reference and what was seen. It links only to files in the
+output, which CI can upload as it is, and reads without JavaScript.
+
+A test that was not run keeps its last result, marked with when it ran, until gallery's version changes; one that ends
+its process is shown unfinished; one that is gone is dropped, but for its play's files. Several crates' tests, or both
+renderers', share a report when they share an output: a crate that is gone is left out, the results of a renderer no
+longer tested stay until its `results-<renderer>` in there is deleted, and a crate's test binaries on one renderer write
+over each other's. So do two projects whose crates have one name, as with a target directory they share: give each an
+`output` of its own. A report that can't be written, or has less than all results, is warned of and fails nothing; on a
+file system without locks, processes at it together may leave one that is behind.
+
 A play that fails leaves a video of itself, which its report points at. `gallery.toml` says which are kept, and where:
 
 ```toml
 [tests]
 video = "failing" # the default; or "off", "always"
-output = "target/tests" # relative to this file; `gallery/` in cargo's target directory unless set
+# Of the report and the videos, relative to this file; `gallery/` in cargo's target directory unless set.
+output = "target/tests"
 ```
 
 A video is an MP4 at `<catalog's crate>/<module>/<play>/video.<renderer>.mp4` in there, the crate's dashes as

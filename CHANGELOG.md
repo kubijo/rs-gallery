@@ -122,7 +122,8 @@ so a minor release may carry a breaking change.
   the template runs them. To add it to an existing instance, copy `tests/scenes.rs` and its `[[test]]` entry from the
   template. A failing play's report points at a video of it, its input shown; `gallery.toml`'s `[tests]` sets `video` to
   `"off"`, `"failing"` (the default) or `"always"`, and `output` to the directory they go to. Recording costs less with
-  the `[profile.dev.package]` of the template's `Cargo.toml`.
+  the `[profile.dev.package]` of the template's `Cargo.toml`. Every run leaves an HTML report of the tests in there,
+  `index.html`, with their logs, snapshots and videos.
 
 - **A panicking scene no longer takes everything down.** `#[scene]` catches the panic in the scenes dylib, where it was
   raised: the window shows it in place of the scene, a capture fails just that shot, and a test just that scene's test,

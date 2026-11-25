@@ -46,6 +46,25 @@ pub(super) struct Film<'f> {
     at: Utf8PathBuf,
 }
 
+/// Where in the tests' `output` the files of a `play`
+/// of the catalog `krate` go: `<catalog>/<module>/<play>`.
+///
+/// A play of another crate is kept apart
+/// by a dash, which no module's name has.
+pub(crate) fn play_dir_in(
+    output: &Utf8Path,
+    krate: &str,
+    play: &PlayEntry,
+) -> Result<Utf8PathBuf, String> {
+    let mut dir = output.join(component(krate)?);
+    let own = play.module_path.split("::").next().unwrap_or_default();
+    if own != krate {
+        dir.push(format!("extern-{}", component(own)?));
+    }
+    dir.push(play_path(play.module_path, play.name)?);
+    Ok(dir)
+}
+
 impl Films {
     pub(crate) fn new(
         output: Utf8PathBuf,
@@ -62,15 +81,8 @@ impl Films {
         }
     }
 
-    /// `<catalog>/<module>/<play>/video.<renderer>.mp4`. A play of another crate is kept
-    /// apart by a dash, which no module's name has.
     fn place(&self, play: &PlayEntry, renderer: &str) -> Result<Utf8PathBuf, String> {
-        let mut dir = self.output.join(component(&self.krate)?);
-        let krate = play.module_path.split("::").next().unwrap_or_default();
-        if krate != self.krate {
-            dir.push(format!("extern-{}", component(krate)?));
-        }
-        dir.push(play_path(play.module_path, play.name)?);
+        let dir = play_dir_in(&self.output, &self.krate, play)?;
         Ok(dir.join(format!("video.{renderer}.mp4")))
     }
 
@@ -149,11 +161,11 @@ impl Film<'_> {
     ///
     /// # Errors
     /// When it cannot be written, or an error had stopped it.
-    pub(super) fn keep(self, session: &Session, scale: f32) -> Result<Utf8PathBuf, String> {
+    pub(super) fn keep(self, session: &Session, scale: f32) -> Result<Filmed, String> {
         guarded("keep the video", || self.kept(session, scale))
     }
 
-    fn kept(self, session: &Session, scale: f32) -> Result<Utf8PathBuf, String> {
+    fn kept(self, session: &Session, scale: f32) -> Result<Filmed, String> {
         let Self {
             films,
             recording,
@@ -161,12 +173,12 @@ impl Film<'_> {
             at,
         } = self;
         let recording = recording.expect("BUG: a video kept before its play was over");
-        let input = recording.close()?;
+        let footage = recording.close()?;
         let path = films.files()?.next("mp4");
         let file = fs::File::create_new(&path).map_err(|e| format!("create `{path}`: {e}"))?;
         let video = temporary(&path)?;
         let mut layer: Option<InputLayer> = None;
-        to_mp4(utf8(&recorded)?, file, &input, |shown, frame| {
+        to_mp4(utf8(&recorded)?, file, &footage.input, |shown, frame| {
             let layer = match &mut layer {
                 Some(layer) => layer,
                 None => {
@@ -184,13 +196,45 @@ impl Film<'_> {
             moved(|| fs::rename(&video, &at), || fs::copy(&video, &at), &at)
         })
         .map_err(|e| format!("write `{at}`: {e}"))?;
-        Ok(landed(&at))
+        Ok(Filmed {
+            path: landed(&at),
+            at: footage.at,
+            frames: u32::try_from(footage.input.len()).unwrap_or(u32::MAX),
+        })
     }
 }
 
-/// Have `put` put a file at `at`. Another test may be removing the directories on the way
-/// there, which it finds empty, so they are made again, a few times, when they have gone.
-fn place_at(at: &Utf8Path, mut put: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+/// A kept video.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct Filmed {
+    pub(crate) path: Utf8PathBuf,
+    /// Where in it each frame of the play is.
+    at: Vec<u32>,
+    /// How many it has.
+    frames: u32,
+}
+
+impl Filmed {
+    /// Where in it, in seconds, the play is about to draw `frame`,
+    /// any pause before that being over.
+    pub(crate) fn before(&self, frame: u32) -> Option<f64> {
+        let frame = (frame as usize).min(self.at.len().checked_sub(1)?);
+        let next = self.at.get(frame + 1).unwrap_or(&self.frames);
+        let at = self.at[frame].max(next.saturating_sub(1));
+        // Within the frame rather than on its edge, which a player may round down.
+        Some((f64::from(at) + 0.5) / f64::from(FPS))
+    }
+}
+
+/// Have `put` put a file at `at`.
+///
+/// Another test may be removing the directories on the way
+/// there, which it finds empty, so they are made again,
+/// a few times, when they have gone.
+pub(crate) fn place_at(
+    at: &Utf8Path,
+    mut put: impl FnMut() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let mut attempt = || {
         if let Some(dir) = at.parent() {
             fs::create_dir_all(dir)?;
@@ -206,8 +250,8 @@ fn place_at(at: &Utf8Path, mut put: impl FnMut() -> std::io::Result<()>) -> std:
     attempt()
 }
 
-/// `rename` a file to `to`, or `copy` it there when that is on another file system:
-/// whole, or not at all.
+/// `rename` a file to `to`, or `copy` it there when
+/// that is on another file system: whole, or not at all.
 fn moved(
     rename: impl FnOnce() -> std::io::Result<()>,
     copy: impl FnOnce() -> std::io::Result<u64>,
@@ -289,9 +333,10 @@ fn sweep(recordings: &Utf8Path) {
     }
 }
 
-/// Create the tests' output directory, unless it is there: the topmost directory made for it
-/// is tagged as a cache, which keeps the hot-reload watcher off it, and ignored by git.
-fn create_output(
+/// Create the tests' output directory, unless it is there:
+/// the topmost directory made for it is tagged as a cache,
+/// which keeps the hot-reload watcher off it, and ignored by git.
+pub(crate) fn create_output(
     output: &Utf8Path,
     write: impl FnMut(&Utf8Path, &str) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
@@ -387,6 +432,33 @@ mod tests {
             "a living run keeps its lock and file: {left:?}"
         );
         assert_eq!(left.len(), 5, "a run that ends leaves nothing: {left:?}");
+    }
+
+    #[test]
+    fn a_frame_is_sought_at_the_end_of_the_pause_before_it() {
+        let film = Filmed {
+            path: Utf8PathBuf::new(),
+            at: vec![0, 1, 2, 11, 11, 12],
+            frames: 21,
+        };
+        let before = |frame| film.before(frame).map(|seconds| seconds * 15.0);
+        for (frame, expected) in [
+            (0, 0.5),
+            (1, 1.5),
+            (2, 10.5),
+            (3, 11.5),
+            (4, 11.5),
+            (5, 20.5),
+        ] {
+            let found = before(frame).expect("it is in there");
+            assert!((found - expected).abs() < 1e-9, "{frame}: {found}");
+        }
+        assert_eq!(before(99), before(5), "a frame past its end is its last");
+        let nothing = Filmed {
+            at: Vec::new(),
+            ..film
+        };
+        assert_eq!(nothing.before(0), None);
     }
 
     #[test]

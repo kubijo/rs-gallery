@@ -125,6 +125,8 @@
               # Kept over the library's: it would reflow to 120 columns and single quotes,
               # and drop the rule selection under `[tool.ruff.lint]`.
               python.configFile = ./tools/pyproject.toml;
+              askama.includes = [ "templates/*.html" ];
+              css = true;
               javascript = true;
               svg.configFile = ./svgo.config.js;
             };
@@ -132,6 +134,7 @@
             lint = {
               python.configFile = ./tools/pyproject.toml;
               javascript = true;
+              askama.includes = [ "*.html" ];
               links.extraOptions = [ "--include-fragments" ];
               deptry.projects.tools = {
                 root = "tools";
@@ -140,6 +143,35 @@
               basedpyright.projects.tools = {
                 configFile = "tools/pyproject.toml";
                 python = pythonTools;
+              };
+              extraCheckers = {
+                # nix-tools lints JavaScript with biome but has no toggle for CSS.
+                css = {
+                  command = lib.getExe toolPkgs.biome;
+                  options = [
+                    "lint"
+                    "--error-on-warnings"
+                    "--config-path=${nix-tools.lib.conf.biome}"
+                  ];
+                  includes = [ "*.css" ];
+                  batch = true;
+                };
+                # The report's script has its types in JSDoc.
+                types = {
+                  command = lib.getExe' toolPkgs.typescript "tsc";
+                  options = [
+                    "--noEmit"
+                    "--allowJs"
+                    "--checkJs"
+                    "--strict"
+                    "--noUncheckedIndexedAccess"
+                    "--target"
+                    "es2024"
+                    "--lib"
+                    "es2024,dom,dom.iterable"
+                  ];
+                  includes = [ "page.js" ];
+                };
               };
             };
 

@@ -15,8 +15,8 @@ title = "{{title}}"
 # tolerance = 200
 
 # Which plays' videos the tests keep, "off", "failing" or "always",
-# and where: relative to this file, or `gallery/` in cargo's target
-# directory unless set.
+# and where they go, with the tests' HTML report: relative to this file,
+# or `gallery/` in cargo's target directory unless set.
 # [tests]
 # video = "failing"
 # output = "target/tests"

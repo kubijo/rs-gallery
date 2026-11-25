@@ -33,6 +33,7 @@ echo "demo-plays: as meant, the passing plays passed and the failing plays faile
 # The same catalog's own tests: each `/// Fails:` above fails its trial,
 # a panic only its own, and every other scene and play passes.
 # A crash would leave no summary line to count.
+printf '\n[tests]\noutput = "%s"\n' "$out/tests" >>"$repo/.tmp/demo-wgpu/gallery.toml"
 tests_status=0
 tests=$(cd "$repo/.tmp/demo-wgpu" && cargo test --quiet --test scenes 2>&1) || tests_status=$?
 failed=$(grep -oE '[0-9]+ failed' <<<"$tests" | grep -oE '[0-9]+' || echo none)
@@ -42,6 +43,19 @@ if [ "$tests_status" -eq 0 ] || [ "$failed" != "$meant" ]; then
     echo "demo-plays: expected the catalog's tests to fail exactly $meant trials; exit $tests_status, failed: $failed" >&2
     exit 1
 fi
+
+# There is a result of every one of them, and the report has it, as passed or failed as the terminal has it.
+"$repo/scripts/check-tree.sh" "$out/tests" scripts/plays-tests.dirspec.toml
+for verdict in passed failed; do
+    ran=$(grep -oE "[0-9]+ $verdict" <<<"$tests" | grep -oE '[0-9]+' || echo none)
+    kept=$(find "$out/tests/app_gallery/results-wgpu" -mindepth 2 -name '*.json' -exec jq -r .verdict {} + \
+        | grep -cx "$verdict" || true)
+    reported=$({ grep -oE "<(details|span) class=\"(plain )?trial $verdict\"" "$out/tests/index.html" || true; } | wc -l)
+    if [ "$kept" != "$ran" ] || [ "$reported" != "$ran" ]; then
+        echo "demo-plays: $ran tests $verdict; results of $kept, $reported in the report" >&2
+        exit 1
+    fi
+done
 
 # A panic the play catches is reported at its own line, and is no end of the process.
 if grep -q 'panicked after it was drawn' <<<"$tests" \
@@ -76,6 +90,10 @@ if [ "$ended_status" -eq 0 ] || ! grep -q 'the callback panics' <<<"$ended" \
     || ! grep -q 'scene .Calls back. panicked after it was drawn' <<<"$ended"; then
     echo "$ended" >&2
     echo "demo-plays: expected the panicking callback's scene and message; exit $ended_status" >&2
+    exit 1
+fi
+if ! grep -A1 '<details class="trial unfinished"' "$out/tests/index.html" | grep -q 'paints_with_a_callback'; then
+    echo "demo-plays: expected the report to have the test that ended its process as unfinished" >&2
     exit 1
 fi
 

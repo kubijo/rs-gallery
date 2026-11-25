@@ -1,0 +1,52 @@
+<li class="{{ line.kind }} {{ line.outcome }}"
+    style="--depth: {{ line.depth }}">
+    <div class="line">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="unseen">{{ line.outcome }}:</span>
+        <span class="text">{{ line.text }}</span>
+        {% if let Some(found) = line.found %}
+            <span class="found">{% if line.outcome == LineOutcome::Failed %}got {% endif %}{{ found }}</span>
+        {% endif %}
+        <span class="aside">
+            {{ line.frames }} frame{{ line.frames|pluralize }}
+            {% if let Some(seek) = line.seek %}
+                <span class="seeks">· <a class="seek"
+    href="{{ seek.href }}"
+    data-at="{{ seek.at }}"
+    aria-label="video at {{ seek.shown }}">{{ seek.shown }}</a></span>
+            {% endif %}
+        </span>
+    </div>
+    {% if line.has_more() %}
+        <div class="more">
+            {% for note in line.notes %}<p class="note">{{ note }}</p>{% endfor %}
+            {% if let Some(source) = line.source %}<p class="aside">{{ source }}</p>{% endif %}
+            {% if !line.images.is_empty() %}
+                <div class="images">
+                    {% for image in line.images %}
+                        <figure>
+                            <a href="{{ image.href }}" aria-label="{{ image.name }}">
+                                <img loading="lazy" src="{{ image.href }}" alt="">
+                            </a>
+                            <figcaption>{{ image.name }}</figcaption>
+                        </figure>
+                    {% endfor %}
+                </div>
+            {% endif %}
+            {% if !line.diff.is_empty() %}
+                <pre class="diff">{% for line in line.diff %}<span class="{{ line.kind }}">{{ line.text }}</span>{% endfor %}</pre>
+            {% endif %}
+            {% if !line.texts.is_empty() %}
+                <p class="links">
+                    {% for text in line.texts %}<a href="{{ text.href }}">{{ text.name }}</a>{% endfor %}
+                </p>
+            {% endif %}
+            {% if line.taking == Some(Taking::Offered) %}
+                <p class="aside">
+                    <code>UPDATE_SNAPSHOTS=1</code> takes what it saw as the reference.
+                </p>
+            {% endif %}
+            {% if line.taking == Some(Taking::Taken) %}<p class="aside">Taken as the reference.</p>{% endif %}
+        </div>
+    {% endif %}
+</li>

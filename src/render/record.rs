@@ -108,8 +108,8 @@ struct Sink {
     recorder: Recorder,
 }
 
-/// Remove the file at `path`, which would pass for a whole recording, or the link to it;
-/// why it could not be.
+/// Remove the file at `path`, which would pass for a whole recording,
+/// or the link to it; why it could not be.
 fn remove(path: &Utf8Path) -> Option<String> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -119,7 +119,8 @@ fn remove(path: &Utf8Path) -> Option<String> {
     }
 }
 
-/// [`remove`] the file at `path`, which is not whole for `why`; all there is to tell of it.
+/// [`remove`] the file at `path`, which is not
+/// whole for `why`; all there is to tell of it.
 fn lose(path: &Utf8Path, why: String) -> String {
     match remove(path) {
         Some(left) => format!("{why}; {left}"),
@@ -132,24 +133,40 @@ fn lose(path: &Utf8Path, why: String) -> String {
 struct Watched {
     log: InputLog,
     shown: Vec<Shown>,
+    /// Where in the recording each frame handed
+    /// to it is, whatever pauses there are between.
+    at: Vec<u32>,
     /// What the last frame recorded was drawn from.
     painted: Option<Painted>,
 }
 
+/// What a closed recording that only watched is of.
+#[derive(Debug, Default)]
+pub(super) struct Footage {
+    /// What its every frame shows of the input.
+    pub(super) input: Vec<Shown>,
+    /// Where in it each frame handed to it is:
+    /// the one it began with, then each the play drew.
+    pub(super) at: Vec<u32>,
+}
+
 impl Recording {
-    /// Close it: what its every frame shows of the input, its file complete.
+    /// Close it, its file complete.
     ///
     /// # Errors
     /// When the file could not be written, or an error had stopped it.
-    pub(super) fn close(self) -> Result<Vec<Shown>, String> {
-        let shown = self.watched.map(|watched| watched.shown);
+    pub(super) fn close(self) -> Result<Footage, String> {
+        let footage = self.watched.map(|watched| Footage {
+            input: watched.shown,
+            at: watched.at,
+        });
         if let Some(why) = self.lost.into_iter().next() {
             return Err(why);
         }
         for sink in self.sinks {
             sink.recorder.finish()?;
         }
-        Ok(shown.unwrap_or_default())
+        Ok(footage.unwrap_or_default())
     }
 
     /// Add `image` to every file.
@@ -397,6 +414,7 @@ pub(super) fn watch(
         watched: Some(Watched {
             log: InputLog::new(fps),
             shown: Vec::new(),
+            at: Vec::new(),
             painted: None,
         }),
     });
@@ -550,6 +568,9 @@ fn record_frame(
         && let Some(watched) = &mut recording.watched
     {
         watched.log.frame(events);
+        watched
+            .at
+            .push(u32::try_from(watched.shown.len()).unwrap_or(u32::MAX));
         watched.shown.push(watched.log.shown(zoom));
         let same = painted.is_some() && painted == watched.painted;
         watched.painted = painted;

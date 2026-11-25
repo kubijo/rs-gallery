@@ -126,6 +126,16 @@ past a handful of images, and a structural target beside the pixel one.
   pointer ring outlines a cursor already drawn. Shown only while a button is held, the ring would mark presses alone.
 - [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one
   run reports every check that failed. The log already keeps every check; what is missing is a play that outlives one.
+- [ ] Highlight the source a failure points at, in the terminal and in the HTML report, which shows it plain. miette's
+  `syntect-highlighter` did, and was dropped in 0ed73b9 for what syntect brings in: bincode (RUSTSEC-2025-0141) and
+  yaml-rust (RUSTSEC-2024-0320), both unmaintained. miette's `Highlighter` trait takes another one in its place;
+  whatever it is has to pass `just dev::audit` without an exception.
+- [ ] A red snapshot check recompiles the scenes: what it saw and the diff go to `__snapshots__/` beneath the scenes'
+  directory, which cargo watches whole, and under nextest every test builds the scenes, about 7 s for the next one with
+  `-j1`. They could go to the tests' output alone, or such a directory be left unwatched, as one with the output in it
+  is.
+- [ ] With cargo's `build-dir` apart from a target directory beneath the scenes, every nextest test recompiles them: of
+  what the build writes, only `OUT_DIR` is known to be in there, and not where the dylib lands.
 - [ ] A recording's pointer jumps from widget to widget, since a gesture moves it in one frame. A glide only in the
   file, as `hold` pauses only there: `--record-cursor [EASING]`, off by default, adds frames between the pointer's last
   place and the gesture's target while the scene's frame stays still, then the gesture runs as before. The play draws

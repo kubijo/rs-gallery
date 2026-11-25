@@ -99,6 +99,7 @@ fn checked(
     };
     let setup = |_: &egui::Context| {};
     crate::render::check_shot(&manifest, None, &plays, &session, &setup, &shot, &testing)
+        .outcome(testing.styled)
 }
 
 fn video(dir: &Utf8Path) -> Utf8PathBuf {

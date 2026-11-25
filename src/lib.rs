@@ -77,6 +77,7 @@ mod svg;
 mod testing;
 mod tree;
 mod update;
+mod verdicts;
 mod video;
 mod watch;
 mod window;
@@ -310,6 +311,15 @@ pub enum Renderer {
     /// FBO — and show it via [`SceneCtx::register_native_texture`];
     /// [`SceneCtx::render_state`] is `None`.
     Glow,
+}
+
+impl Renderer {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Wgpu => "wgpu",
+            Self::Glow => "glow",
+        }
+    }
 }
 
 /// One process-wide signal handler points at the currently running window.

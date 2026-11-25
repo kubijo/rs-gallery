@@ -2,6 +2,7 @@
 //! leaves behind, and how a run takes a new reference.
 
 mod films;
+mod reports;
 mod tree;
 
 use super::*;

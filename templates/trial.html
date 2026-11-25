@@ -1,0 +1,12 @@
+<details class="{{ trial.classes }}"
+         id="{{ trial.id }}"
+         {% if trial.verdict != Verdict::Passed %}open{% endif %}>
+    <summary>
+        {% include "outcome.html" %}
+        <span class="name">{{ trial.name }}</span>
+        {% if trial.verdict != Verdict::Unfinished %}<span class="took aside">{{ trial.took }}</span>{% endif %}
+        {% include "earlier.html" %}
+        {% if trial.warned %}<span class="chip warning">warned</span>{% endif %}
+    </summary>
+    <div class="body">{{ trial.body|safe }}</div>
+</details>

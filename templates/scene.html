@@ -1,0 +1,36 @@
+<section class="scene {{ scene.verdict }}" id="{{ scene.id }}">
+    <h3>
+        {% if let Some(trial) = scene.only() %}
+            <span class="plain {{ trial.classes }}" id="{{ trial.id }}">{% include "outcome.html" %}</span>
+        {% else %}
+            <span class="mark" aria-hidden="true"></span>
+            <span class="unseen">{{ scene.verdict }}:</span>
+        {% endif %}
+        <span class="path">
+            {%- if !scene.module.is_empty() -%}<span class="aside">{{ scene.module }}::</span>{%- endif -%}
+            {{ scene.name }}
+        </span>
+        <span class="took aside">{{ scene.took() }}</span>
+        {% if let Some(trial) = scene.only() %}
+            {% if trial.earlier.is_some() %}
+                <span class="since {{ trial.classes }}">{% include "earlier.html" %}</span>
+            {% endif %}
+        {% endif %}
+    </h3>
+    {% if scene.only().is_none() %}
+        <div class="trials">
+            {% for trial in scene.trials %}
+                {% if trial.plain %}
+                    <span class="plain {{ trial.classes }}" id="{{ trial.id }}">
+                        {% include "outcome.html" %}
+                        <span class="name">{{ trial.name }}</span>
+                        <span class="took aside">{{ trial.took }}</span>
+                        {% include "earlier.html" %}
+                    </span>
+                {% else %}
+                    {% include "trial.html" %}
+                {% endif %}
+            {% endfor %}
+        </div>
+    {% endif %}
+</section>

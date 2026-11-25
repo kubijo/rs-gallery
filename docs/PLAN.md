@@ -110,8 +110,22 @@ Three pieces, each committed on its own.
   can upload the directory as it is. It reads top to bottom without JavaScript.
 - A minimap of scenes and their plays that jumps to each, a filter by verdict, and a lightbox with zoom that steps
   through reference, actual and diff. A line of the log seeks the play's video to it.
-- Under nextest each test writes its own result, then rebuilds the page from all of them under a file lock. One that did
-  not run keeps its earlier result, marked as such.
+- Each test writes its own result as it begins, unfinished, and as it ends. The page is made of all of them as a test
+  begins, so one that ends its process is told of, as a process is done, and a quarter of a second after a result at
+  most, or later where rebuilding is slow. Those that wait for it together, threads or nextest's processes, have it
+  rebuilt once, for what all of them had written; one whose rebuild is cut short leaves it to the next. One that fails
+  is tried again, ever later.
+- A result is written as JSON and as the part of the page it makes, after a line of what the rest of the page says of
+  it. A rebuild reads those lines and copies the parts: no log is parsed or laid out twice.
+- No process is the last, so each can make the page, and it comes out the same whichever does: of what is on disk. Each
+  catalog's newest process lists its tests beside their results, and one that is not on that list is left off; its own
+  catalog removes it when it is from before that process. A list dated ahead of the clock gives way to any other. What
+  cannot be read is left off too, but that rebuild counts as failed.
+- One that did not run keeps its earlier result, marked as such. One of a crate whose manifest is gone or names another
+  is left off the page, and so is another gallery version's. A run is nextest's, or else the process's.
+- Hot reload knows what tests write by the files' own names, as the output may hold sources.
+- A recording notes which of its frames shows each the play drew, so a log line seeks past the pauses between them.
+- Snapshots are copied into the output, beside the play's video. Filter and minimap are CSS and anchors.
 - The terminal summary drops its empty columns and gives a recording's length beside its frame count.
 
 ### Slice 5 — an interactions panel driving the live canvas

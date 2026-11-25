@@ -425,7 +425,7 @@ fn watch_roots(paths: &[Utf8PathBuf]) -> Vec<WatchRoot> {
 ///
 /// Out: what cargo wrote (a directory the build writes into is one it would rebuild for ever),
 /// a repository's bookkeeping, which `git status` alone stirs,
-/// the references plays' snapshots are compared with, which no build reads,
+/// the references plays' snapshots are compared with and what tests report, which no build reads,
 /// and what an editor leaves beside the file it is saving.
 ///
 /// Everything else rebuilds, `.rs` or not: a shader or an `include_bytes!` asset is a source too,
@@ -434,7 +434,16 @@ fn rebuilds_for(path: &Utf8Path) -> bool {
     !gallery_build::build_output(path)
         && !repository(path)
         && !references(path)
+        && !reported(path)
         && !editor_debris(path)
+}
+
+/// Whether the path is what tests write to their output, which may be among the sources.
+fn reported(path: &Utf8Path) -> bool {
+    let outputs = path.ancestors().skip(1);
+    outputs
+        .into_iter()
+        .any(|output| crate::verdicts::is_written(output, path))
 }
 
 /// Whether the path is inside a directory of references, or is one.
@@ -933,6 +942,73 @@ mod tests {
         let taken = "src/__snapshots__/form/saves/saved.wgpu.new.png";
         assert!(!rebuilds_for(Utf8Path::new(taken)));
         assert!(!rebuilds_for(Utf8Path::new("src/__snapshots__")));
+    }
+
+    #[test]
+    fn what_tests_write_to_a_source_directory_rebuilds_nothing() {
+        let root = tree(
+            "tested",
+            &[
+                "site/.gallery-writes",
+                "site/.gallery-writing-x1y2",
+                "site/app_gallery/results-wgpu/order.json",
+                "site/app_gallery/results-wgpu/smoke/form.fragment",
+                "site/app_gallery/plays/saves/video.wgpu.mp4",
+                "site/app_gallery/plays/saves/snapshots-glow/one.png",
+                "site/app_gallery/src/lib.rs",
+                "site/app_gallery/src/video.mp4",
+                "site/src/button.rs",
+                "site/src/results.rs",
+                "site/src/results-view.svg",
+                "site/src/video.wgpu.mp4",
+                "site/results-wgpu",
+                "site/snapshots-wgpu/one.png",
+                "site/video.wgpu.mp4",
+                "other/app_gallery/results-wgpu/order.json",
+                "other/app_gallery/plays/saves/video.wgpu.mp4",
+            ],
+        );
+        let title = "<title>1 failed · catalog tests</title>";
+        std::fs::write(root.join("site/index.html"), title).expect("written");
+        for written in [
+            "site/.gallery-writes",
+            "site/.gallery-writing-x1y2",
+            "site/index.html",
+            "site/app_gallery/results-wgpu",
+            "site/app_gallery/results-wgpu/order.json",
+            "site/app_gallery/results-wgpu/smoke/form.fragment",
+            "site/app_gallery/plays/saves/video.wgpu.mp4",
+            "site/app_gallery/plays/saves/snapshots-glow",
+            "site/app_gallery/plays/saves/snapshots-glow/one.png",
+        ] {
+            assert!(
+                !rebuilds_for(&root.join(written)),
+                "`{written}` is of a test"
+            );
+        }
+        for source in [
+            "site",
+            "site/app_gallery/src/lib.rs",
+            "site/app_gallery/src/video.mp4",
+            "site/src/button.rs",
+            "site/src/results.rs",
+            "site/src/results-view.svg",
+            "site/src/video.wgpu.mp4",
+            "site/results-wgpu",
+            "site/snapshots-wgpu/one.png",
+            "site/video.wgpu.mp4",
+            "other/app_gallery/results-wgpu/order.json",
+            "other/app_gallery/plays/saves/video.wgpu.mp4",
+        ] {
+            assert!(rebuilds_for(&root.join(source)), "`{source}` is a source");
+        }
+        let page = root.join("site/index.html");
+        for own in ["<h1>My site</h1>", ""] {
+            std::fs::write(&page, own).expect("written");
+            assert!(rebuilds_for(&page), "a page of its own: {own}");
+        }
+        std::fs::remove_file(&page).expect("removed");
+        assert!(rebuilds_for(&page), "it may have been the site's");
     }
 
     #[test]

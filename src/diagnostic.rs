@@ -28,7 +28,13 @@ pub(crate) struct Diagnostic {
     candidates: Vec<String>,
     /// The source line to show, read when the report is drawn.
     source: Option<Box<SourceLine>>,
-    hints: Vec<String>,
+    hints: Vec<Hint>,
+}
+
+struct Hint {
+    text: String,
+    /// It says where a play is recorded.
+    of_recording: bool,
 }
 
 /// A line of a source file, and what to say beneath it.
@@ -104,7 +110,19 @@ impl Diagnostic {
 
     /// What to do next, in the imperative; each call adds a line.
     pub(crate) fn hint(mut self, hint: impl Into<String>) -> Self {
-        self.hints.push(hint.into());
+        self.hints.push(Hint {
+            text: hint.into(),
+            of_recording: false,
+        });
+        self
+    }
+
+    /// A [`hint`](Self::hint) at where a play is recorded.
+    pub(crate) fn recorded(mut self, hint: impl Into<String>) -> Self {
+        self.hints.push(Hint {
+            text: hint.into(),
+            of_recording: true,
+        });
         self
     }
 
@@ -115,6 +133,11 @@ impl Diagnostic {
     }
 
     fn render(&self, handler: &dyn ReportHandler) -> String {
+        self.render_with(handler, |_| true)
+    }
+
+    /// Render it with the hints that are `shown`.
+    fn render_with(&self, handler: &dyn ReportHandler, shown: fn(&Hint) -> bool) -> String {
         struct Rendered<'a>(&'a dyn ReportHandler, &'a Report);
         impl fmt::Display for Rendered<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -134,6 +157,8 @@ impl Diagnostic {
             }
             shown
         });
+        let hints = self.hints.iter().filter(|hint| shown(hint));
+        let hints: Vec<String> = hints.map(|hint| highlight(&hint.text)).collect();
         let report = Report {
             severity: match self.severity {
                 Severity::Error => miette::Severity::Error,
@@ -145,13 +170,8 @@ impl Diagnostic {
                 .rev()
                 .fold(None, |next, cause| Some(Cause(cause, next.map(Box::new)))),
             source,
-            hint: (!self.hints.is_empty()).then(|| {
-                self.hints
-                    .iter()
-                    .map(|hint| highlight(hint))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }),
+            // The first may be set apart from one that is not shown.
+            hint: (!hints.is_empty()).then(|| hints.join("\n").trim_start().to_owned()),
         };
         Rendered(handler, &report).to_string()
     }
@@ -231,12 +251,22 @@ impl Diagnostic {
     /// The report as a pipe or a CI log sees it, unwrapped,
     /// which is what assertions elsewhere in the crate should read.
     pub(crate) fn plain(&self) -> String {
+        self.plain_with(|_| true)
+    }
+
+    /// As [`plain`](Self::plain), for a reader who is shown the recordings,
+    /// and may be on another machine than the paths of them.
+    pub(crate) fn beside_recordings(&self) -> String {
+        self.plain_with(|hint| !hint.of_recording)
+    }
+
+    fn plain_with(&self, shown: fn(&Hint) -> bool) -> String {
         let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor())
             .with_links(false)
             .with_wrap_lines(false)
             .without_syntax_highlighting();
         // miette sets every line in by two spaces, which is margin, not content.
-        textwrap::dedent(&crate::style::plain(&self.render(&handler)))
+        textwrap::dedent(&crate::style::plain(&self.render_with(&handler, shown)))
             .trim_end()
             .to_owned()
     }
@@ -256,7 +286,7 @@ impl Diagnostic {
         }
         for hint in &self.hints {
             summary.push_str("; ");
-            summary.push_str(hint);
+            summary.push_str(&hint.text);
         }
         // A cause laid out over several lines for a terminal is one run of words here.
         crate::style::plain(&summary)

@@ -63,6 +63,58 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
 }
 
 #[test]
+fn a_summary_has_no_empty_column_and_says_how_long_a_recording_is() {
+    let written = |videos| OutputFile {
+        path: "/tmp/a.png".into(),
+        size: Size {
+            width: 640,
+            height: 360,
+        },
+        scale: DEFAULT_SCALE,
+        bytes: 1,
+        globals: BTreeMap::new(),
+        frames: Frames {
+            drawn: 1,
+            motion: Motion::Settled,
+        },
+        play: None,
+        videos,
+    };
+    let shown = |written: &[OutputFile]| {
+        let ran = Ran {
+            order: &[Slot::Written(0)],
+            written,
+            failed: &[],
+            ended: false,
+            findings: &[],
+            sheet: None,
+        };
+        crate::style::plain(&table(ran, style::Stream::Stdout))
+    };
+    let plain = shown(&[written(Vec::new())]);
+    assert!(plain.contains("size"), "{plain}");
+    for title in ["steps", "screenshots", "recording"] {
+        assert!(!plain.contains(title), "{plain}");
+    }
+    let recorded = shown(&[written(vec![VideoOutcome {
+        format: VideoFormat::Mp4,
+        path: "/tmp/a.mp4".into(),
+        fps: 30,
+        frames: 45,
+        held: 30,
+        written: 75,
+        draw: std::time::Duration::ZERO,
+        capture: std::time::Duration::ZERO,
+        encode: std::time::Duration::ZERO,
+        deepest_queue: 0,
+    }])]);
+    assert!(
+        recorded.contains("recording") && recorded.contains("45 frames · 2.5 s"),
+        "with its pauses: {recorded}"
+    );
+}
+
+#[test]
 fn the_shot_that_ended_a_run_is_told_apart_from_those_that_failed() {
     let told = [
         (0, false),
