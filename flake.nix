@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nix-tools.url = "github:kubijo/nix-tools/v0.3.0";
+    nix-tools.url = "github:kubijo/nix-tools/v0.12.0";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -95,6 +95,7 @@
           rustLlvmTools = "${rustToolchain}/lib/rustlib/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/bin";
           softwareVulkanIcd = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json";
           pythonTools = pythonToolsFor pkgs;
+          toolPkgs = nix-tools.lib.toolPkgsFor system;
           test = import ./nix/test.nix { inherit pkgs; };
 
           project = nix-tools.lib.configure {
@@ -131,6 +132,15 @@
             lint = {
               python.configFile = ./tools/pyproject.toml;
               javascript = true;
+              links.extraOptions = [ "--include-fragments" ];
+              deptry.projects.tools = {
+                root = "tools";
+                sourceRoots = [ "src" ];
+              };
+              basedpyright.projects.tools = {
+                configFile = "tools/pyproject.toml";
+                python = pythonTools;
+              };
             };
 
             validate = {
@@ -138,7 +148,6 @@
                 rustToolchain
                 pkgs.cargo-llvm-cov
                 pkgs.cargo-nextest
-                pkgs.basedpyright
                 test
                 pythonTools
               ];
@@ -149,9 +158,7 @@
                 "cargo clippy --workspace --release --all-targets -- -D warnings"
                 # The forwarded `egui_extras` gates are off by default, so nothing else builds them.
                 "cargo clippy --workspace --all-targets --all-features -- -D warnings"
-                # tools/ is its own uv project and both resolve imports from its root —
-                # something repochk's file-by-file lint never sees.
-                "(cd tools && basedpyright --pythonpath ${pythonTools}/bin/python && pytest -q)"
+                "(cd tools && pytest -q)"
                 {
                   name = "tests under coverage";
                   # One step: the gate keeps going after a failure, and a report built
@@ -189,9 +196,10 @@
               pythonTools
               # Kept beside the built environment, to maintain the lockfile it is built from.
               pkgs.uv
-              # The pinned one, so what a shell or an editor reports is what the gate enforces.
-              (nix-tools.lib.toolPkgsFor system).ruff
-              pkgs.basedpyright
+              # The pinned ones, so what a shell or an editor reports is what the gate enforces.
+              toolPkgs.ruff
+              toolPkgs.basedpyright
+              (nix-tools.lib.packagesFor pkgs).dirspec
               pkgs.samply
               pkgs.binutils
               pkgs.pkg-config

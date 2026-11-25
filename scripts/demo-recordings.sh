@@ -16,6 +16,10 @@ for backend in wgpu femtovg; do
         problems+=("$backend: the capture failed")
         continue
     fi
+    if ! "$repo/scripts/check-tree.sh" "$out" scripts/recordings.dirspec.toml; then
+        problems+=("$backend: not the files it should leave")
+        continue
+    fi
     for tour in studio-tour checks-tour; do
         played=$(jq --arg name "$tour" '.shots[] | select(.name == $name) | .play.frames' \
             "$out/report.json")
@@ -24,9 +28,7 @@ for backend in wgpu femtovg; do
             read -r recorded held < <(jq -r --arg name "$tour" --arg format "$format" \
                 '.shots[] | select(.name == $name) | .videos[] | select(.format == $format)
                     | "\(.frames) \(.held)"' "$out/report.json") || true
-            if [ ! -s "$video" ]; then
-                problems+=("$backend: no $video")
-            elif ! [[ ${recorded:-} =~ ^[0-9]+$ ]] || [ "$recorded" != "$played" ]; then
+            if ! [[ ${recorded:-} =~ ^[0-9]+$ ]] || [ "$recorded" != "$played" ]; then
                 problems+=("$backend: $video holds ${recorded:-no} frames of the ${played:-?} its play drew")
             elif [ "${held:-0}" -eq 0 ]; then
                 problems+=("$backend: $video never paused at a step's end")

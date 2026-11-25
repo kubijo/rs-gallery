@@ -706,8 +706,8 @@ Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` 
 ## Dependency compatibility
 
 Gallery and scenes use compatible egui 0.36 dependencies. Native accessibility uses `eframe/accesskit`, and runtime
-capture uses `egui_kittest`. `gallery-build` has no accessibility stack. `just dev::audit` runs with no advisory
-exceptions.
+capture uses `egui_kittest`. `gallery-build` has no accessibility stack. `just dev::audit` excepts only the unmaintained
+crates egui 0.36's accessibility pins, in [`deny.toml`](deny.toml).
 
 ## Cutting a release
 
