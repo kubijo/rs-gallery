@@ -66,7 +66,7 @@ pub(super) struct RunReport<'a> {
     /// What the run got on with despite, each a one-line summary of what it printed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
-    /// Each shot whose play failed, step by step, in recipe order.
+    /// Each shot that failed and let the run go on, its play step by step, in recipe order.
     /// Absent unless one did.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failed_shots: Vec<FailedShotReport<'a>>,
@@ -126,6 +126,7 @@ impl<'a> RunReport<'a> {
                     check: failed.error.check().map(CheckReport::of),
                     log: failed.log.iter().map(EntryReport::of).collect(),
                     videos: &failed.videos,
+                    lost_videos: &failed.lost_videos,
                 })
                 .collect(),
         }
@@ -153,12 +154,15 @@ struct FailedShotReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     check: Option<CheckReport<'a>>,
     log: Vec<EntryReport<'a>>,
-    /// The play's recording in each format the shot asked for.
+    /// The play's recording in each format that was written.
     #[serde(skip_serializing_if = "<[Utf8PathBuf]>::is_empty")]
     videos: &'a [Utf8PathBuf],
+    /// What was lost of the recordings the shot asked for, and why.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    lost_videos: &'a [String],
 }
 
-/// What a play that failed had done, kept for the report.
+/// A shot that failed, and what its play had done, kept for the report.
 pub(super) struct FailedShot {
     name: String,
     scene: String,
@@ -166,10 +170,11 @@ pub(super) struct FailedShot {
     error: crate::play::PlayError,
     pub(super) log: Vec<Entry>,
     videos: Vec<Utf8PathBuf>,
+    pub(super) lost_videos: Vec<String>,
 }
 
 impl FailedShot {
-    /// `shot`, whose `play` failed with `error`, taking the log out of `run`.
+    /// `shot`, which failed with `error`, taking the log of its `play` out of `run`.
     pub(super) fn of(
         shot: &Shot,
         scene: &SceneEntry,
@@ -177,6 +182,7 @@ impl FailedShot {
         error: crate::play::PlayError,
         run: &mut crate::play::PlayRun,
         videos: Vec<Utf8PathBuf>,
+        lost_videos: Vec<String>,
     ) -> Self {
         Self {
             name: shot
@@ -190,6 +196,7 @@ impl FailedShot {
             error,
             log: std::mem::take(&mut run.log),
             videos,
+            lost_videos,
         }
     }
 
@@ -399,7 +406,7 @@ pub(crate) enum Motion {
 }
 
 /// A shot's place in the summary:
-/// an index into the images written, or into the plays that failed.
+/// an index into the images written, or into the shots that failed.
 #[derive(Clone, Copy)]
 pub(super) enum Slot {
     Written(usize),
@@ -407,7 +414,7 @@ pub(super) enum Slot {
 }
 
 /// What the run came to: a table of every shot,
-/// then each failed play's report, numbered.
+/// then each failed one's report, numbered.
 ///
 /// Each block opens on a blank line and closes on none,
 /// so the shell prompt lands one line under whichever block came last.
@@ -434,11 +441,9 @@ pub(super) fn report(
         let good = Style::new().bold().fg_color(Some(AnsiColor::Green.into()));
         let bad = Style::new().bold().fg_color(Some(AnsiColor::Red.into()));
         let dir = shared_dir(run.written);
-        let failed = match run.failed.len() {
-            0 => String::new(),
-            1 => format!(", {}", paint(bad, "1 play failed")),
-            n => format!(", {}", paint(bad, &format!("{n} plays failed"))),
-        };
+        let failed = failures(run.failed.len(), run.ended)
+            .map(|failures| format!(", {}", paint(bad, &failures)))
+            .unwrap_or_default();
         let headline = format!(
             "{} {} image{}{}{failed}",
             paint(good, "Gallery wrote"),
@@ -569,6 +574,19 @@ fn line(entry: &Entry) -> String {
     }
 }
 
+/// What the summary's headline says of the `failed` shots,
+/// and of one more that `ended` the run.
+pub(super) fn failures(failed: usize, ended: bool) -> Option<String> {
+    let ending = ended.then_some("ended the run");
+    match (failed, ending) {
+        (0, ending) => ending.map(|it| format!("1 shot {it}")),
+        (1, None) => Some("1 shot failed".to_owned()),
+        (1, Some(it)) => Some(format!("1 shot failed, 1 {it}")),
+        (n, None) => Some(format!("{n} shots failed")),
+        (n, Some(it)) => Some(format!("{n} shots failed, 1 {it}")),
+    }
+}
+
 /// A phrase on one line: googletest lays a compound matcher's parts out on lines of their own.
 fn one_line(phrase: &str) -> String {
     phrase.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -580,6 +598,8 @@ pub(super) struct Ran<'a> {
     pub(super) order: &'a [Slot],
     pub(super) written: &'a [OutputFile],
     pub(super) failed: &'a [FailedShot],
+    /// Whether one more shot failed, and ended the run.
+    pub(super) ended: bool,
     /// Each failed shot's report, unless the run's one shot failed and its report stands alone.
     pub(super) findings: &'a [Diagnostic],
     pub(super) sheet: Option<&'a Utf8Path>,

@@ -636,8 +636,11 @@ drags and scrolls across a scene filling its stage.
 
 Several formats (`--record-format apng,mp4`) are written from one run of the shot, every file from the same frames.
 
-A play whose recording cannot be written fails, though its every check held. So does one whose canvas changes size as it
-is recorded, since a recording's frames are all of one size.
+A recording that does not come out whole is removed and fails its shot, even one whose play passed, which then has no
+image either; the run goes on, as after a play that fails. Without a play, it ends the run. A canvas that changes size
+as it is recorded fails every format, since a recording's frames are all of one size. Where only one format fails, the
+report points at the other, and a play shot's `lost_videos` say why. A recording that cannot be written where it goes
+ends the run, and a file there that cannot be written over stays as it is.
 
 The report's `videos` has an entry per format: its path, the frames drawn, held and written, and what a frame cost on
 average: drawing the scene, rendering and reading it back, and encoding it.

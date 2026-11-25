@@ -309,7 +309,8 @@ pub(super) fn shoot_with_globals(
             }
             harness.state_mut().actions = Some(Vec::new());
             if let Some((record, out)) = recording {
-                start(&mut harness, session, shot.scale, out, record)?;
+                start(&mut harness, session, shot.scale, out, record)
+                    .map_err(|why| unrecorded(out).cause(why))?;
             }
             let mut film = watch
                 .films
@@ -342,11 +343,8 @@ pub(super) fn shoot_with_globals(
             if let Ok(Some(film)) = &mut film {
                 film.end(&mut harness);
             }
-            let (videos, lost) = finish(&mut harness);
-            if run.failure.is_none() && !lost.is_empty() {
-                run.failure = Some(crate::play::PlayError::new(lost.join("; ")));
-            }
             watch.view.end(run.failure.is_some(), run.frames);
+            let (videos, lost) = finish(&mut harness);
             let mut video_paths: Vec<Utf8PathBuf> =
                 videos.iter().map(|video| video.path.clone()).collect();
             // A failure's report, with where its play is recorded.
@@ -428,8 +426,7 @@ pub(super) fn shoot_with_globals(
                         crate::style::path(&landed(dir), watch.stream)
                     ));
                 }
-                report = with_lost(report, &lost, failure.reason());
-                let (report, video_paths) = with_video(report, film);
+                let (report, video_paths) = with_video(with_lost(report, &lost), film);
                 let kept = failure.check().and_then(|check| check.kept.as_ref());
                 let report = with_offer(report, kept);
                 watch.failed = Some(FailedShot::of(
@@ -439,6 +436,7 @@ pub(super) fn shoot_with_globals(
                     failure.clone(),
                     &mut run,
                     video_paths,
+                    lost,
                 ));
                 return Err(report);
             }
@@ -458,15 +456,29 @@ pub(super) fn shoot_with_globals(
                     &mut frames,
                 )
             });
-            // What the play left behind is the shot's finding, not the run's end.
-            if let Err(report) = settled {
-                let error = crate::play::PlayError::new(report.summary());
-                let report = Diagnostic::new(format!(
-                    "play `{}` on `{}` passed, but the state it left fails the shot",
+            // What the play left behind is the shot's finding, not the run's end;
+            // so is a recording it asked for and does not have.
+            let failed = match settled {
+                Err(report) => Some((
+                    "the state it left fails the shot",
+                    vec![report.summary()],
+                    &lost[..],
+                )),
+                Ok(()) if !lost.is_empty() => {
+                    Some(("its recording failed", lost.clone(), Default::default()))
+                }
+                Ok(()) => None,
+            };
+            if let Some((what, reasons, untold)) = failed {
+                let error = crate::play::PlayError::new(reasons.join("; "));
+                let headline = format!(
+                    "play `{}` on `{}` passed, but {what}",
                     play.name, scene.name
-                ))
-                .cause(report.summary());
-                let (report, video_paths) = with_video(report, film);
+                );
+                let report = reasons
+                    .into_iter()
+                    .fold(Diagnostic::new(headline), Diagnostic::cause);
+                let (report, video_paths) = with_video(with_lost(report, untold), film);
                 watch.failed = Some(FailedShot::of(
                     shot,
                     &scene,
@@ -474,6 +486,7 @@ pub(super) fn shoot_with_globals(
                     error,
                     &mut run,
                     video_paths,
+                    lost,
                 ));
                 return Err(report);
             }
@@ -492,15 +505,12 @@ pub(super) fn shoot_with_globals(
                     entry.trace = None;
                 }
             }
-            let videos = match shot.record {
-                Some(Record {
-                    keep: Trace::Failing,
-                    ..
-                }) => {
+            let videos = match recording {
+                Some((record, out)) if record.keep == Trace::Failing => {
                     for video in &videos {
-                        std::fs::remove_file(&video.path).map_err(|e| {
-                            format!("remove the passing play's `{}`: {e}", video.path)
-                        })?;
+                        let path = video_path(out, video.format);
+                        std::fs::remove_file(&path)
+                            .map_err(|e| format!("remove the passing play's `{path}`: {e}"))?;
                     }
                     Vec::new()
                 }
@@ -517,15 +527,14 @@ pub(super) fn shoot_with_globals(
     if shot.play.is_none()
         && let Some((record, out)) = recording
     {
-        start(&mut harness, session, shot.scale, out, record)?;
-        let recorded = record_frames(&mut harness, shot, record.frames());
-        let (finished, lost) = finish(&mut harness);
-        if let Err(report) = recorded {
-            let told = report.summary();
-            return Err(with_lost(report, &lost, &told));
+        start(&mut harness, session, shot.scale, out, record)
+            .map_err(|why| unrecorded(out).cause(why))?;
+        if let Err(report) = record_frames(&mut harness, shot, record.frames()) {
+            return Err(discard(&mut harness, report));
         }
+        let (finished, lost) = finish(&mut harness);
         if !lost.is_empty() {
-            let mut report = Diagnostic::new(lost.join("; "));
+            let mut report = lost.into_iter().fold(unrecorded(out), Diagnostic::cause);
             for video in &finished {
                 let path = crate::style::path(&video.path, watch.stream);
                 report = report.hint(format!("the shot is recorded in {path}"));
@@ -623,13 +632,17 @@ pub(super) fn with_kept(mut report: Diagnostic, kept: &Kept, stream: Stream) -> 
     report
 }
 
-/// `report` with why each recording `lost` was, unless it has `told` that already.
-fn with_lost(report: Diagnostic, lost: &[String], told: &str) -> Diagnostic {
-    lost.iter()
-        .filter(|why| !told.contains(*why))
-        .fold(report, |report, why| {
-            report.hint(format!("not recorded: {why}"))
-        })
+/// That the shot written to `out` is not recorded, which ends the run.
+fn unrecorded(out: &Utf8Path) -> Diagnostic {
+    let name = out.file_stem().unwrap_or("shot");
+    Diagnostic::new(format!("the recording of shot `{name}` failed"))
+}
+
+/// `report` with why each recording `lost` was.
+pub(super) fn with_lost(report: Diagnostic, lost: &[String]) -> Diagnostic {
+    lost.iter().fold(report, |report, why| {
+        report.hint(format!("not recorded: {why}"))
+    })
 }
 
 /// `report` with how to take what a failed snapshot check saw, if that is on offer:

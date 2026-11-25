@@ -323,7 +323,7 @@ fn a_failed_play_does_not_stop_the_shots_after_it() {
     .expect_err("one play failed")
     .plain();
 
-    assert!(failure.contains("1 of 2 plays failed"), "{failure}");
+    assert!(failure.contains("1 of 2 shots failed"), "{failure}");
     assert!(
         dir.join("second.png").exists(),
         "the shot after the failure still ran"
@@ -550,7 +550,7 @@ fn a_knob_no_frame_declares_fails_its_play_and_not_the_run() {
     .expect_err("the misspelt play fails")
     .plain();
 
-    assert!(failure.contains("1 of 2 plays failed"), "{failure}");
+    assert!(failure.contains("1 of 2 shots failed"), "{failure}");
     assert!(dir.join("second.png").exists(), "the run went on");
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
@@ -1382,13 +1382,13 @@ fn widens(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
 }
 
 #[test]
-fn a_recording_whose_canvas_changes_size_fails_its_play() {
+fn a_recording_whose_canvas_changes_size_fails_its_shot_and_no_play() {
     for format in [VideoFormat::Apng, VideoFormat::Mp4] {
         for input in [None, Some(crate::render::Corner::BottomLeft)] {
             let (dir, outcome) = record_pointing("widens", widens, 1.0, format, input);
             let failure = outcome.expect_err("it can't be recorded").plain();
             assert!(
-                failure.contains("play `points` on `scene` failed"),
+                failure.contains("play `points` on `scene` passed, but its recording failed"),
                 "{failure}"
             );
             assert!(
@@ -1396,10 +1396,7 @@ fn a_recording_whose_canvas_changes_size_fails_its_play() {
                 "{failure}"
             );
             let left = trace_files(&dir);
-            assert!(
-                input.is_some() || !left.contains(&format!("shot.{}", format.extension())),
-                "{left:?}"
-            );
+            assert_eq!(left, ["shot.steps"], "its image and its recording");
         }
     }
 }
@@ -1424,34 +1421,62 @@ fn a_recording_without_a_play_whose_canvas_changes_size_leaves_no_file() {
     });
     let failure = capture(&manifest, &plays, shot, None).expect_err("it can't be recorded");
     let failure = failure.plain();
-    assert!(failure.contains("the canvas went from"), "{failure}");
+    assert!(
+        failure.contains("the recording of shot `shot` failed"),
+        "{failure}"
+    );
+    let times = failure.matches("the canvas went from").count();
+    assert_eq!(times, 1, "for both formats: {failure}");
     assert_eq!(trace_files(&dir), Vec::<String>::new());
 }
 
 #[test]
-fn a_recording_that_fails_its_play_fails_no_other_shot() {
+fn a_recording_whose_directory_cannot_be_made_says_so_once() {
+    let (manifest, plays) = catalog(two_buttons, &[]);
+    let dir = scratch("record-nowhere");
+    std::fs::create_dir_all(&dir).expect("made");
+    let file = dir.join("renders");
+    std::fs::write(&file, "a file where the directory goes").expect("written");
+    let mut shot = shot("plays::scene", &file.join("shot.png"), "", Trace::Failing);
+    shot.play = None;
+    shot.record = Some(pointing_record(VideoFormat::Mp4, None));
+    let failure = capture(&manifest, &plays, shot, None).expect_err("there is nowhere to put it");
+    let failure = failure.plain();
+    assert!(
+        failure.contains("the recording of shot `shot` failed"),
+        "{failure}"
+    );
+    let times = failure.matches(&format!("create `{file}")).count();
+    assert_eq!(times, 1, "{failure}");
+}
+
+#[test]
+fn a_recording_that_fails_its_shot_fails_no_other() {
     fn fails_first(p: &mut Play<'_>) -> PlayResult {
         p.expect("Nowhere").within(0).to_exist()
     }
     let (manifest, plays) = catalog(widens, &[("points", points), ("fails_first", fails_first)]);
     let dir = scratch("record-others");
     let shots = [
-        ("resized", "points"),
-        ("unseen", "fails_first"),
-        ("fine", "points"),
+        ("resized", Some("points")),
+        ("unseen", Some("fails_first")),
+        ("fine", Some("points")),
+        ("without_a_play", None),
     ];
     let shots = shots.map(|(name, play)| {
         let mut shot = shot(
             "plays::scene",
             &dir.join(format!("{name}.png")),
-            play,
+            play.unwrap_or_default(),
             Trace::Failing,
         );
-        shot.record = (name != "fine").then(|| pointing_record(VideoFormat::Mp4, None));
+        shot.play = shot.play.filter(|_| play.is_some());
+        let recorded = matches!(name, "resized" | "unseen");
+        shot.record = recorded.then(|| pointing_record(VideoFormat::Mp4, None));
         shot
     });
     let report = dir.join("capture.json");
-    render_with_globals(
+    let verdict = render_with_globals(
         &manifest,
         None,
         &plays,
@@ -1464,7 +1489,9 @@ fn a_recording_that_fails_its_play_fails_no_other_shot() {
         },
         LogMode::Off,
     )
-    .expect_err("two plays fail");
+    .expect_err("two shots fail")
+    .plain();
+    assert!(verdict.contains("2 of 4 shots failed"), "{verdict}");
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
     let failed = json["failed_shots"].as_array().expect("the failed shots");
@@ -1477,7 +1504,71 @@ fn a_recording_that_fails_its_play_fails_no_other_shot() {
         unseen.contains("Nowhere"),
         "the play's own failure, though nothing was recorded: {unseen}"
     );
+    let failed = &failed[0];
+    assert_eq!(failed.get("failed_step"), None, "no step of it: {failed:#}");
+    assert_eq!(failed["log"][0]["outcome"], "passed", "{failed:#}");
+    assert_eq!(failed["lost_videos"][0], failed["reason"], "{failed:#}");
     assert!(dir.join("fine.png").exists(), "the shots after still run");
+}
+
+#[test]
+fn a_recording_there_is_no_writing_to_ends_the_run_and_is_left_alone() {
+    let (manifest, plays) = catalog(two_buttons, &[]);
+    for play in [None, Some("idles")] {
+        fn idles(p: &mut Play<'_>) -> PlayResult {
+            p.idle(1)
+        }
+        let plays = match play {
+            Some(name) => catalog(two_buttons, &[(name, idles)]).1,
+            None => plays.clone(),
+        };
+        let dir = scratch("record-blocked");
+        let blocked = dir.join("blocked.mp4");
+        std::fs::create_dir_all(&blocked).expect("a directory where a file goes");
+        std::fs::write(blocked.join("kept"), "").expect("written");
+        let shots = ["blocked", "after"].map(|name| {
+            let out = dir.join(format!("{name}.png"));
+            let mut shot = shot(
+                "plays::scene",
+                &out,
+                play.unwrap_or_default(),
+                Trace::Failing,
+            );
+            shot.play = shot.play.filter(|_| play.is_some());
+            let both = [VideoFormat::Apng, VideoFormat::Mp4];
+            shot.record = Some(crate::render::Record {
+                seconds: Some(0.1),
+                formats: crate::render::VideoFormats::of(both).expect("two formats"),
+                ..pointing_record(VideoFormat::Mp4, None)
+            });
+            shot
+        });
+        let failure = render_with_globals(
+            &manifest,
+            None,
+            &plays,
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &Capture {
+                shots: shots.into(),
+                sheet: None,
+                report: None,
+            },
+            LogMode::Off,
+        )
+        .expect_err("the run ends")
+        .plain();
+        assert!(
+            failure.contains("the recording of shot `blocked` failed"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains(&format!("create `{blocked}`")),
+            "{failure}"
+        );
+        assert_eq!(trace_files(&dir), ["blocked.mp4"], "with {play:?}");
+        assert!(blocked.join("kept").exists());
+    }
 }
 
 fn points(p: &mut Play<'_>) -> PlayResult {
@@ -1560,21 +1651,40 @@ fn a_zoomed_scenes_recording_shows_the_pointer_where_it_is() {
 }
 
 #[test]
-fn a_recording_too_large_for_its_format_says_so_before_it_is_made() {
+fn a_recording_too_large_for_its_format_is_not_made_and_says_so() {
     fn wide(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
         ui.ctx().set_zoom_factor(2.0);
         ui.set_min_width(2_000.0);
         ui.label("Hello");
     }
-    let (dir, outcome) = record_pointing("zoomed-large", wide, 1.0, VideoFormat::Mp4, None);
-    let failure = outcome.expect_err("4000 pixels wide").plain();
+    let (manifest, plays) = catalog(wide, &[("points", points)]);
+    let dir = scratch("zoomed-large");
+    let mp4 = dir.join("shot.mp4");
+    std::fs::create_dir_all(&dir).expect("made");
+    std::fs::write(&mp4, "an earlier run's").expect("written");
+    let mut large = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "points",
+        Trace::Failing,
+    );
+    let both = [VideoFormat::Apng, VideoFormat::Mp4];
+    large.record = Some(crate::render::Record {
+        formats: crate::render::VideoFormats::of(both).expect("two formats"),
+        ..pointing_record(VideoFormat::Mp4, None)
+    });
+    let failure = capture(&manifest, &plays, large, None).expect_err("4000 pixels wide");
+    let failure = failure.plain();
     assert!(failure.contains("is past the 3840×2160"), "{failure}");
-    assert!(failure.contains("`format = \"apng\"`"), "{failure}");
-    assert!(!dir.join("shot.mp4").exists());
+    assert!(!failure.contains("an APNG"), "it records one: {failure}");
+    assert!(!mp4.exists());
 
-    let (dir, outcome) = record_pointing("zoomed-large", wide, 1.0, VideoFormat::Apng, None);
-    outcome.unwrap_or_else(|failure| panic!("{}", failure.plain()));
-    assert!(dir.join("shot.apng").exists(), "as the hint says");
+    let apng = dir.join("shot.apng");
+    assert!(!crate::video::decode(&apng).1.is_empty(), "it is recorded");
+    assert!(
+        failure.contains(&format!("the play is recorded in {apng}")),
+        "{failure}"
+    );
 }
 
 #[test]
@@ -1713,6 +1823,30 @@ fn a_passing_play_drops_a_recording_kept_only_on_failure() {
     let (video, report) = recorded_play("flip-kept-on-failure", flip, Trace::Failing, None);
     assert!(!video.exists(), "the play passed, so `{video}` is gone");
     assert!(report["shots"][0].get("videos").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_passing_play_drops_the_link_to_a_recording_and_not_the_file() {
+    let (manifest, plays) = catalog(switch, &[("flip", flip)]);
+    let dir = scratch("flip-linked");
+    std::fs::create_dir_all(&dir).expect("made");
+    let (link, file) = (dir.join("shot.mp4"), dir.join("linked.mp4"));
+    std::fs::write(&file, "").expect("written");
+    std::os::unix::fs::symlink(&file, &link).expect("linked");
+    let mut linked = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "flip",
+        Trace::Failing,
+    );
+    linked.record = Some(crate::render::Record {
+        keep: Trace::Failing,
+        ..pointing_record(VideoFormat::Mp4, None)
+    });
+    capture(&manifest, &plays, linked, None).unwrap_or_else(|failure| panic!("{failure:?}"));
+    assert!(link.symlink_metadata().is_err());
+    assert!(file.exists());
 }
 
 #[test]

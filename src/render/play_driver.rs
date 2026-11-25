@@ -212,8 +212,8 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
         Ok(Some(landed(&path)))
     }
 
-    fn end_step(&mut self) -> Result<(), String> {
-        hold(self.harness)
+    fn end_step(&mut self) {
+        hold(self.harness);
     }
 
     fn logged(&mut self, index: usize, entry: &Entry) {

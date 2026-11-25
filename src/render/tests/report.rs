@@ -48,6 +48,7 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
         order: &[Slot::Written(0), Slot::Written(1)],
         written: &written,
         failed: &[],
+        ended: false,
         findings: &[],
         sheet: None,
     };
@@ -59,6 +60,31 @@ fn a_report_lines_the_sizes_up_however_long_the_paths_before_them_are() {
         .collect();
     assert_eq!(columns.len(), 2, "a row per image:\n{table}");
     assert_eq!(columns[0], columns[1], "the sizes line up:\n{table}");
+}
+
+#[test]
+fn the_shot_that_ended_a_run_is_told_apart_from_those_that_failed() {
+    let told = [
+        (0, false),
+        (0, true),
+        (1, false),
+        (1, true),
+        (2, false),
+        (2, true),
+    ]
+    .map(|(failed, ended)| failures(failed, ended));
+    let told = told.each_ref().map(Option::as_deref);
+    assert_eq!(
+        told,
+        [
+            None,
+            Some("1 shot ended the run"),
+            Some("1 shot failed"),
+            Some("1 shot failed, 1 ended the run"),
+            Some("2 shots failed"),
+            Some("2 shots failed, 1 ended the run"),
+        ]
+    );
 }
 
 /// A log entry as a play leaves it, finished with `outcome`.

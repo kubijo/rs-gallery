@@ -506,6 +506,8 @@ fn a_canvas_past_what_a_video_can_be_says_so() {
         panel.contains("the play is not recorded: ") && panel.contains("is past the 3840×2160"),
         "{panel}"
     );
+    let (outcome, _) = filmed(tall, |p| p.idle(1), &dir, Video::Failing);
+    outcome.expect("its play passes");
 }
 
 #[test]

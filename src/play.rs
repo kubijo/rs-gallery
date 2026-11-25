@@ -401,10 +401,7 @@ pub(crate) trait PlayDriver {
     fn trace(&mut self, index: usize, label: &str) -> Result<Option<Utf8PathBuf>, String>;
 
     /// A step has ended: a recording pauses on it, so the step can be followed.
-    ///
-    /// # Errors
-    /// When the recording has failed.
-    fn end_step(&mut self) -> Result<(), String>;
+    fn end_step(&mut self);
 
     /// The play's log entry `index` began, or ended as `entry` now says.
     fn logged(&mut self, index: usize, entry: &Entry);
@@ -725,9 +722,7 @@ impl Play<'_> {
                 Err(failed) => outcome = outcome.and(Err(PlayError::new(failed))),
             }
             self.steps_done += 1;
-            if let Err(failed) = self.driver.end_step() {
-                outcome = outcome.and(Err(PlayError::new(failed)));
-            }
+            self.driver.end_step();
         }
         let entry = &mut self.log[index];
         entry.frames.end = self.frame;

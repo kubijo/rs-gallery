@@ -327,6 +327,15 @@ impl Recorder {
             ..encoded
         })
     }
+
+    /// Close the file of a recording that is given up:
+    /// why it would not have been whole anyway, if it would not.
+    pub(crate) fn give_up(self) -> Option<String> {
+        if self.count == 0 {
+            return None;
+        }
+        self.finish().err()
+    }
 }
 
 /// A recording given up leaves no thread behind that still has its file open.

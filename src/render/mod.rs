@@ -355,8 +355,9 @@ pub(crate) fn render_with_globals(
         // rather than as the last run's, which a loop would take for this one's.
         _ = std::fs::remove_file(out);
     }
-    // A play that fails is a finding, and the run goes on to the next shot.
-    // Anything else wrong is the run's own failure, and it stops.
+    // A shot fails with its play, or for what that leaves or its recording comes to: a finding,
+    // and the run goes on to the next. Anything else wrong is the run's own failure, and it stops.
+    let mut ended = false;
     let mut failed_shots: Vec<FailedShot> = Vec::new();
     // Each failed shot's report, in the same order.
     let mut findings: Vec<Diagnostic> = Vec::new();
@@ -389,13 +390,12 @@ pub(crate) fn render_with_globals(
                 }
                 None => {
                     outcome = Err(failure);
+                    ended = true;
                     break;
                 }
             },
         }
     }
-    // The plays that ran: those that failed, and those whose shot was written.
-    let played = failed_shots.len() + written.iter().filter(|w| w.play.is_some()).count();
     // One shot's failure is reported as it stands;
     // several get a verdict over the lot.
     let single = capture.shots.len() == 1;
@@ -436,9 +436,10 @@ pub(crate) fn render_with_globals(
             findings.pop().expect("a failure to report")
         } else {
             Diagnostic::new(format!(
-                "{} of {played} play{} failed",
+                "{} of {} shot{} failed",
                 failed_shots.len(),
-                if played == 1 { "" } else { "s" }
+                order.len(),
+                if order.len() == 1 { "" } else { "s" }
             ))
         });
     }
@@ -476,6 +477,7 @@ pub(crate) fn render_with_globals(
             order: &order,
             written: &written[..shots],
             failed: &failed_shots,
+            ended,
             findings: &findings,
             sheet: gathered.as_deref(),
         },
