@@ -37,6 +37,11 @@ const LIVE: Duration = Duration::from_millis(100);
 /// where it cannot hard-link it, and a copy is not atomic.
 const SETTLE: Duration = Duration::from_millis(200);
 
+/// What the dylib of the library `lib_name` is called.
+pub(crate) fn dylib_file(lib_name: &str) -> String {
+    format!("{PREFIX}{lib_name}.{EXTENSION}")
+}
+
 /// The directory cargo builds the running executable's
 /// profile into, where the scenes dylib lands.
 /// A test binary sits a level down, in `deps/`.
@@ -111,10 +116,17 @@ impl HotDylib {
     /// # Errors
     /// If the executable path can't be read, or the dylib can't be opened from that directory.
     pub fn new(lib_name: &str, watching: bool) -> Result<Self, Box<dyn std::error::Error>> {
-        let dir = profile_dir()?;
+        Self::at(profile_dir()?.join(dylib_file(lib_name)), watching)
+    }
+
+    /// As [`new`](Self::new), from `dylib`.
+    pub(crate) fn at(
+        dylib: Utf8PathBuf,
+        watching: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut scenes = Self {
             loaded: ManuallyDrop::new(Vec::new()),
-            dylib: dir.join(format!("{PREFIX}{lib_name}.{EXTENSION}")),
+            dylib,
             copy: None,
             from: None,
             seen: None,

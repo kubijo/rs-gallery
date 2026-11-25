@@ -449,7 +449,7 @@ fn reported(path: &Utf8Path) -> bool {
 /// Whether the path is inside a directory of references, or is one.
 fn references(path: &Utf8Path) -> bool {
     path.components()
-        .any(|part| part.as_str() == crate::play::snapshot::DIR)
+        .any(|part| part.as_str() == gallery_build::SNAPSHOTS)
 }
 
 /// Whether the path is inside a version control system's own storage.

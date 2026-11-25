@@ -531,7 +531,10 @@ A check with no reference yet fails, as does one that differs past its budget, a
 `saved.wgpu.new.png`, with a `.diff.png` marking each pixel that differs in red over the reference in grey. Look at it,
 then take it with `UPDATE_SNAPSHOTS=1 just test`; `UPDATE_SNAPSHOTS=force` retakes every reference that differs at all,
 within budget or not. The variable takes the values `egui_kittest` gives it. A catalog ignores the leftovers with
-`**/__snapshots__/**/*.new.*` and `**/__snapshots__/**/*.diff.*` in its `.gitignore`.
+`**/__snapshots__/**/*.new.*` and `**/__snapshots__/**/*.diff.*` in its `.gitignore`. As these come and go, cargo does
+not watch a scenes' directory with snapshots beneath it, only the scene files: one added there is found with the next
+edit to another.
+
 The budget is set once in `gallery.toml`, and per renderer over it; a check's own `Screenshot` outranks both:
 
 ```toml

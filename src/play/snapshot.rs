@@ -6,9 +6,6 @@ use std::panic::Location;
 use super::log::{Acceptance, Check, Kept, Outcome};
 use super::{By, Play, PlayResult};
 
-/// The directory references are kept in, beside the file of the plays they are of.
-pub(crate) const DIR: &str = "__snapshots__";
-
 /// What a play asks the host to compare with a reference.
 pub(crate) struct Ask<'a> {
     /// Where the play is written; its references sit beside it.

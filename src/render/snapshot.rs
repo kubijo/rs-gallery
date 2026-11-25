@@ -402,7 +402,7 @@ fn reference_path(
                 std::env::current_dir().map_err(|e| format!("find the working directory: {e}"))?;
             let here = Utf8PathBuf::from_path_buf(here)
                 .map_err(|dir| format!("the working directory `{}` is not UTF-8", dir.display()))?;
-            play_dir(ask.file, &here)?.join(crate::play::snapshot::DIR)
+            play_dir(ask.file, &here)?.join(gallery_build::SNAPSHOTS)
         }
     };
     path.push(play_path(ask.module_path, ask.play)?);

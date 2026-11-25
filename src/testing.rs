@@ -6,13 +6,13 @@
 
 use std::{cell::RefCell, mem::ManuallyDrop, process::ExitCode, sync::Arc};
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use libtest_mimic::{Arguments, Failed, Trial};
 
 use crate::{
     GlobalEntry, Manifest, PlayEntry, Renderer, SceneSource as _,
     diagnostic::Diagnostic,
-    hot::{HotDylib, profile_dir},
+    hot::HotDylib,
     render::{
         self, Checked, DEFAULT_SCALE, DEFAULT_SIZE, Films, Overrides, Session, Shot, ShotPlay,
         Snapshots, Testing, Trace, Update,
@@ -67,9 +67,14 @@ pub fn __test_main(
     let args = Arguments::from_args();
     let config = gallery_build::Config::read(&Utf8Path::new(manifest_dir).join("gallery.toml"))
         .unwrap_or_else(|e| panic!("{e}"));
-    crate::launcher::build_lib(manifest_dir, &config.path, true);
-    let mut source = HotDylib::new(&package.replace('-', "_"), false)
-        .expect("load the freshly built scenes dylib");
+    let dylib = crate::launcher::build_lib(package, manifest_dir, &config.path, true);
+    // `name` in cargo's target directory.
+    let in_target = |name: &str| {
+        let profile = dylib.parent().unwrap_or(&dylib);
+        profile.with_file_name(name)
+    };
+    let mut source =
+        HotDylib::at(dylib.clone(), false).expect("load the freshly built scenes dylib");
     let manifest = Arc::new(source.manifest());
     let globals = source.globals();
     let plays: Arc<[PlayEntry]> = source.plays().into();
@@ -162,12 +167,6 @@ fn tests_of(manifest: &Manifest, plays: &[PlayEntry]) -> Vec<Test> {
         }
     });
     smoke.chain(played).collect()
-}
-
-/// `name` in cargo's target directory.
-fn in_target(name: &str) -> Utf8PathBuf {
-    let profile = profile_dir().unwrap_or_else(|e| panic!("find the target directory: {e}"));
-    profile.with_file_name(name)
 }
 
 /// Whether failures are printed in colour, with links, when stdout is `coloured`:

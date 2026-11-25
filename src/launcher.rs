@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{IsTerminal as _, Write as _},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -76,13 +76,11 @@ pub fn launch(
         .unwrap_or_else(|| Utf8Path::new(manifest_dir).join("gallery.toml"));
     let config = gallery_build::Config::read(&config_path).unwrap_or_else(|e| panic!("{e}"));
 
-    build_lib(manifest_dir, &config.path, headless(&cli));
+    let dylib = build_lib(package, manifest_dir, &config.path, headless(&cli));
     // Made here because both sides are handed it from here: the watcher reports into it,
     // and the shell draws from it.
     let hot = HotStatus::new();
-    // The dylib is `lib<crate>.so`; the crate's lib name is the package name with dashes as underscores.
-    let mut source = HotDylib::new(&package.replace('-', "_"), cli.hot)
-        .expect("load the freshly built scenes dylib");
+    let mut source = HotDylib::at(dylib, cli.hot).expect("load the freshly built scenes dylib");
     if cli.hot {
         source.hot = Some(hot.clone());
     }
@@ -345,19 +343,46 @@ struct Cli {
     out: Option<Utf8PathBuf>,
 }
 
-/// Build the scenes dylib once, blocking, so the loader finds a `.so` on first launch.
+/// Build the scenes dylib of `package` once, blocking, so the loader finds it on first launch;
+/// where it is, which only cargo knows: its `build-dir` may be apart from where it puts it.
 ///
 /// A headless run's entire output is the paths it wrote, which a screen of `Compiling` lines
 /// buries. `--quiet` drops that progress and still lets errors through.
-pub(crate) fn build_lib(manifest_dir: &str, config: &Utf8Path, quiet: bool) {
+pub(crate) fn build_lib(
+    package: &str,
+    manifest_dir: &str,
+    config: &Utf8Path,
+    quiet: bool,
+) -> Utf8PathBuf {
     let mut command = build_command(manifest_dir, config);
     if quiet {
         command.arg("--quiet");
     }
+    command
+        .arg("--message-format=json-render-diagnostics")
+        .stderr(Stdio::inherit());
     let progress = Progress::start(quiet);
-    let built = command.status().is_ok_and(|status| status.success());
+    let built = command.output().ok();
     progress.clear();
-    assert!(built, "`cargo build --lib` for the scenes dylib failed");
+    let built = built.filter(|built| built.status.success());
+    let built = built.expect("`cargo build --lib` for the scenes dylib failed");
+    let file = crate::hot::dylib_file(&package.replace('-', "_"));
+    let dylib = dylib_in(&built.stdout, &file);
+    let dylib = dylib.filter(|dylib| dylib.is_file());
+    dylib.unwrap_or_else(|| panic!("`cargo build --lib` made no `{file}`; is it a dylib's crate?"))
+}
+
+/// Where cargo put `file`, as it `said` in its JSON messages.
+fn dylib_in(said: &[u8], file: &str) -> Option<Utf8PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Artifact {
+        filenames: Vec<Utf8PathBuf>,
+    }
+    let lines = said.split(|byte| *byte == b'\n');
+    let artifacts = lines.filter_map(|line| serde_json::from_slice::<Artifact>(line).ok());
+    artifacts
+        .flat_map(|artifact| artifact.filenames)
+        .find(|path| path.file_name() == Some(file))
 }
 
 /// A line saying the scenes are compiling, rubbed out again when they are.
@@ -558,6 +583,27 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn the_dylib_is_where_cargo_says_it_put_it() {
+        let artifact = |files: &[&str]| {
+            serde_json::json!({ "reason": "compiler-artifact", "filenames": files }).to_string()
+        };
+        let file = crate::hot::dylib_file("app_gallery");
+        let (apart, other) = (
+            format!("/target/debug/{file}"),
+            "/target/debug/libserde.rlib",
+        );
+        let said = [
+            artifact(&[other]),
+            "a line of something else's".to_owned(),
+            artifact(&["/target/debug/libapp_gallery.rlib", &apart]),
+            serde_json::json!({ "reason": "build-finished", "success": true }).to_string(),
+        ];
+        let found = dylib_in(said.join("\n").as_bytes(), &file);
+        assert_eq!(found, Some(Utf8PathBuf::from(apart)));
+        assert_eq!(dylib_in(artifact(&[other]).as_bytes(), &file), None);
+    }
 
     #[test]
     fn assignments_parse_like_recipe_scalars() {

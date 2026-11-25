@@ -11,6 +11,9 @@ use std::{collections::HashSet, env, fmt::Write as _, fs};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+/// What the directory of the references plays' snapshots are compared with is called.
+pub const SNAPSHOTS: &str = "__snapshots__";
+
 /// A `gallery.toml`, canonicalised and resolved — the reading both the launcher
 /// and a scenes `build.rs` go through.
 pub struct Config {
@@ -422,7 +425,7 @@ struct Discovered {
 /// A glob's static prefix is a repo root where scenes sit beside their components,
 /// `target/` and `.git` under it, so a `git status` between two builds rebuilt the dylib.
 /// A scene's own directory is not that — unless what is `written` sits beneath it, as the scaffold's
-/// build does.
+/// build does, or [a run writes there](is_written_into).
 /// Skipping that one costs notice of a scene *added* there; the files are watched either way.
 fn scan<I, S>(globs: I, written: &[&Utf8Path]) -> Discovered
 where
@@ -432,7 +435,7 @@ where
     let mut modules = String::new();
     let mut used = HashSet::new();
     let mut watch = Vec::new();
-    let mut watched = HashSet::new();
+    let mut seen = HashSet::new();
     for pattern in globs {
         let pattern = pattern.as_ref();
         let matches =
@@ -450,8 +453,9 @@ where
             }
             let abs = path.canonicalize_utf8().unwrap_or(path);
             if let Some(dir) = abs.parent()
+                && seen.insert(dir.to_owned())
                 && !written.iter().any(|written| written.starts_with(dir))
-                && watched.insert(dir.to_owned())
+                && !is_written_into(dir)
             {
                 watch.push(dir.to_owned());
             }
@@ -462,6 +466,16 @@ where
         }
     }
     Discovered { modules, watch }
+}
+
+/// Whether a run writes beneath `dir`: to a tagged cache,
+/// or what a failed snapshot check saw beside its reference.
+fn is_written_into(dir: &Utf8Path) -> bool {
+    let dir = glob::Pattern::escape(dir.as_str());
+    ["CACHEDIR.TAG", SNAPSHOTS].iter().any(|name| {
+        let found = glob::glob(&format!("{dir}/**/{name}"));
+        found.is_ok_and(|mut found| found.any(|path| path.is_ok()))
+    })
 }
 
 /// Whether a path came out of a build directory rather than a source tree.
@@ -622,6 +636,53 @@ mod tests {
             "the scene is still watched, so editing it still rebuilds: {:?}",
             found.watch
         );
+    }
+
+    /// With cargo's `build-dir` set apart `out` is elsewhere,
+    /// and the dylib still lands in the target directory.
+    #[test]
+    fn a_scene_directory_with_a_cache_beneath_it_is_not_watched() {
+        let root = tree(
+            "cache-beneath",
+            &[
+                "crate/loose.scene.rs",
+                "crate/target/CACHEDIR.TAG",
+                "deep/loose.scene.rs",
+                "deep/down/cache/CACHEDIR.TAG",
+                "elsewhere/dial.scene.rs",
+                "elsewhere/target/plain.rs",
+            ],
+        );
+        let found = scan([format!("{root}/**/*.scene.rs")], &[]);
+        let watched = |path: &str| found.watch.contains(&root.join(path));
+        assert!(!watched("crate") && !watched("deep"), "{:?}", found.watch);
+        assert!(watched("crate/loose.scene.rs"), "{:?}", found.watch);
+        assert!(watched("elsewhere"), "its `target` is a source directory");
+    }
+
+    /// A check that fails leaves what it saw beside the reference.
+    #[test]
+    fn a_scene_directory_with_snapshots_beneath_it_is_not_watched() {
+        let root = tree(
+            "snapshots-beneath",
+            &[
+                "played/form.scene.rs",
+                "played/__snapshots__/form/saves/saved.wgpu.png",
+                "deep/loose.scene.rs",
+                "deep/down/form.scene.rs",
+                "deep/down/__snapshots__/form/saves/saved.wgpu.png",
+                "[odd]/loose.scene.rs",
+                "[odd]/__snapshots__/form/saves/saved.wgpu.png",
+                "drawn/dial.scene.rs",
+            ],
+        );
+        let found = scan([format!("{root}/**/*.scene.rs")], &[]);
+        let watched = |path: &str| found.watch.contains(&root.join(path));
+        for dir in ["played", "deep", "deep/down", "[odd]"] {
+            assert!(!watched(dir), "{dir}: {:?}", found.watch);
+        }
+        assert!(watched("played/form.scene.rs"), "{:?}", found.watch);
+        assert!(watched("drawn"), "{:?}", found.watch);
     }
 
     /// Under nextest every test is a process that builds the scenes,
