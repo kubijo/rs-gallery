@@ -674,7 +674,15 @@ Every run of a test leaves an HTML report of them all, `index.html` in the tests
 snapshots and video; the test binary ends with its path, unless it is quiet or nextest's. A minimap jumps to a scene or
 a play, the buttons show only what failed, a log line's time seeks the play's video, if that is kept, to it, and an
 image opens to be zoomed into and flickered between the reference and what was seen. It links only to files in the
-output, which CI can upload as it is, and reads without JavaScript.
+output and reads without JavaScript, so CI can upload it as it is:
+
+```yaml
+- uses: actions/upload-artifact@v7
+  if: ${{ !cancelled() }}
+  with:
+    name: catalog-tests
+    path: target/gallery
+```
 
 A test that was not run keeps its last result, marked with when it ran, until gallery's version changes; one that ends
 its process is shown unfinished; one that is gone is dropped, but for its play's files. Several crates' tests, or both

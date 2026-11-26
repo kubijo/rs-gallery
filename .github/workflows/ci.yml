@@ -38,6 +38,16 @@ jobs:
       - run: nix develop --command gallery-test
       # Plays through a scaffolded catalog's own scenes dylib, which the tests above cannot reach.
       - run: nix develop --command just demo::plays
+      # The catalog tests' report, of which some fail on purpose.
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: catalog-tests
+          path: .tmp/plays/report
+          # `.tmp` is one; there are none in the report.
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
       - run: nix develop --command cargo llvm-cov report | tee coverage.txt
       # Surface coverage in the UI (run summary + sticky PR comment) — self-contained, no third party.
       - env:

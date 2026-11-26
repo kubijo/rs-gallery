@@ -90,8 +90,6 @@ past a handful of images, and a structural target beside the pixel one.
   `syntect-highlighter` did, and was dropped in 0ed73b9 for what syntect brings in: bincode (RUSTSEC-2025-0141) and
   yaml-rust (RUSTSEC-2024-0320), both unmaintained. miette's `Highlighter` trait takes another one in its place;
   whatever it is has to pass `just dev::audit` without an exception.
-- [ ] CI uploads nothing that `just demo::plays` leaves: the catalog tests' report, with its snapshots and videos, which
-  links only to files beside it so that it can be. Uploaded before the step that fails on them.
 - [ ] A screenshot within its budget passes without a word, though it may be the first of a drift. A verdict of its own,
   *tolerated*, would show in the log and the report how many pixels of the allowed ones differ, without failing.
 - [ ] A recording's pointer jumps from widget to widget, since a gesture moves it in one frame. A glide only in the

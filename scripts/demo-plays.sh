@@ -36,6 +36,9 @@ echo "demo-plays: as meant, the passing plays passed and the failing plays faile
 printf '\n[tests]\noutput = "%s"\n' "$out/tests" >>"$repo/.tmp/demo-wgpu/gallery.toml"
 tests_status=0
 tests=$(cd "$repo/.tmp/demo-wgpu" && cargo test --quiet --test scenes 2>&1) || tests_status=$?
+# As it is now, of every test: those below run only some again. CI uploads it, whatever comes of the checks.
+mkdir "$out/report"
+cp -r "$out/tests/index.html" "$out/tests/app_gallery" "$out/report" || true
 failed=$(grep -oE '[0-9]+ failed' <<<"$tests" | grep -oE '[0-9]+' || echo none)
 meant=$(grep -c '^/// Fails:' "$repo/scripts/plays.scene.rs")
 if [ "$tests_status" -eq 0 ] || [ "$failed" != "$meant" ]; then
