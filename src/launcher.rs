@@ -76,6 +76,7 @@ pub fn launch(
         .clone()
         .unwrap_or_else(|| Utf8Path::new(manifest_dir).join("gallery.toml"));
     let config = gallery_build::Config::read(&config_path).unwrap_or_else(|e| panic!("{e}"));
+    crate::render::use_cursor(config.record.cursor.as_ref()).unwrap_or_else(|e| panic!("{e}"));
 
     let dylib = build_lib(package, manifest_dir, &config.path, headless(&cli));
     // Made here because both sides are handed it from here: the watcher reports into it,

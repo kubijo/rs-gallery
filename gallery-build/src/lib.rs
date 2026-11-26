@@ -27,6 +27,62 @@ pub struct Config {
     pub hot_watch_paths: Vec<Utf8PathBuf>,
     pub snapshots: Snapshots,
     pub tests: Tests,
+    pub record: Record,
+}
+
+/// `[record]`: how a recording draws the pointer.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Record {
+    /// The catalog's own, else gallery's.
+    pub cursor: Option<Cursor>,
+}
+
+/// A pointer drawn from SVGs, which scale to any recording.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Cursor {
+    /// Absolute, as the two below.
+    pub image: Utf8PathBuf,
+    /// While a mouse button is held.
+    pub pressed: Utf8PathBuf,
+    /// The point of both that sits on the pointer, in their own units.
+    pub hotspot: [f32; 2],
+}
+
+/// `[record]` as written.
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclaredRecord {
+    cursor_default: Option<Utf8PathBuf>,
+    cursor_pressed: Option<Utf8PathBuf>,
+    cursor_hotspot: Option<[f32; 2]>,
+}
+
+impl DeclaredRecord {
+    fn resolve(self, dir: &Utf8Path) -> Result<Record, String> {
+        let svg = |file: Utf8PathBuf| {
+            let file = dir.join(file);
+            file.canonicalize_utf8()
+                .map_err(|e| format!("[record] cursor `{file}`: {e}"))
+        };
+        let cursor = match (self.cursor_default, self.cursor_pressed) {
+            (Some(image), Some(pressed)) => Some(Cursor {
+                image: svg(image)?,
+                pressed: svg(pressed)?,
+                hotspot: self.cursor_hotspot.unwrap_or_default(),
+            }),
+            (None, None) if self.cursor_hotspot.is_some() => {
+                return Err("[record] `cursor_hotspot` is of a cursor, and none is set".to_owned());
+            }
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "[record] `cursor_default` and `cursor_pressed` go together: set both or neither"
+                        .to_owned(),
+                );
+            }
+        };
+        Ok(Record { cursor })
+    }
 }
 
 /// `[tests]`: what a catalog's tests leave to look at.
@@ -116,6 +172,8 @@ struct Declared {
     snapshots: Snapshots,
     #[serde(default)]
     tests: Tests,
+    #[serde(default)]
+    record: DeclaredRecord,
 }
 
 fn default_title() -> String {
@@ -161,12 +219,17 @@ impl Config {
                 .map(|output| canonical(&dir.join(output))),
             ..declared.tests
         };
+        let record = declared
+            .record
+            .resolve(dir)
+            .map_err(|e| format!("`{path}`: {e}"))?;
         Ok(Self {
             title: declared.title,
             globs,
             hot_watch_paths,
             snapshots: declared.snapshots,
             tests,
+            record,
             path,
         })
     }
@@ -876,6 +939,64 @@ mod tests {
         .err()
         .expect("an unknown value is an error");
         assert!(error.contains("`off`, `failing`, `always`"), "{error}");
+    }
+
+    #[test]
+    fn a_record_table_names_both_cursors_and_where_they_point() {
+        let read = |name, record: &str| {
+            let root = tree(name, &["scene.rs", "art/cursor.svg", "art/pressed.svg"]);
+            let toml = format!("scene_globs = [\"scene.rs\"]\n{record}");
+            fs::write(root.join("gallery.toml"), toml).expect("write the config");
+            Config::read(&root.join("gallery.toml"))
+        };
+        let unset = read("record-unset", "").expect("a readable config");
+        assert_eq!(unset.record.cursor, None);
+
+        let config = read(
+            "record-set",
+            indoc::indoc! {r#"
+                [record]
+                cursor_default = "art/cursor.svg"
+                cursor_pressed = "art/pressed.svg"
+                cursor_hotspot = [1, 2.5]
+            "#},
+        )
+        .expect("a readable config");
+        let dir = config.path.parent().expect("a directory");
+        assert_eq!(
+            config.record.cursor,
+            Some(Cursor {
+                image: dir.join("art/cursor.svg"),
+                pressed: dir.join("art/pressed.svg"),
+                hotspot: [1.0, 2.5],
+            })
+        );
+
+        for (name, record, says) in [
+            (
+                "record-half",
+                "[record]\ncursor_default = \"art/cursor.svg\"",
+                "`cursor_default` and `cursor_pressed` go together",
+            ),
+            (
+                "record-hotspot-alone",
+                "[record]\ncursor_hotspot = [1, 1]",
+                "`cursor_hotspot` is of a cursor",
+            ),
+            (
+                "record-missing",
+                "[record]\ncursor_default = \"art/gone.svg\"\ncursor_pressed = \"art/pressed.svg\"",
+                "art/gone.svg",
+            ),
+            (
+                "record-unrenamed",
+                "[record]\ncursor = \"art/cursor.svg\"",
+                "unknown field `cursor`",
+            ),
+        ] {
+            let error = read(name, record).err().expect("an error");
+            assert!(error.contains(says), "{name}: {error}");
+        }
     }
 
     #[test]

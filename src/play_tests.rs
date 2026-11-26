@@ -1445,7 +1445,7 @@ fn widens(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
 fn a_recording_whose_canvas_changes_size_fails_its_shot_and_no_play() {
     for format in [VideoFormat::Apng, VideoFormat::Mp4] {
         for input in [None, Some(crate::render::Corner::BottomLeft)] {
-            let (dir, outcome) = record_pointing("widens", widens, 1.0, format, input);
+            let (dir, outcome) = record_pointing("widens", widens, points, 1.0, format, input);
             let failure = outcome.expect_err("it can't be recorded").plain();
             assert!(
                 failure.contains("play `points` on `scene` passed, but its recording failed"),
@@ -1635,6 +1635,29 @@ fn points(p: &mut Play<'_>) -> PlayResult {
     p.hover("Hello")
 }
 
+fn presses(p: &mut Play<'_>) -> PlayResult {
+    p.click("Hello")
+}
+
+/// Draws as many frames as a click, the pointer never coming.
+fn waits(p: &mut Play<'_>) -> PlayResult {
+    p.idle(4)
+}
+
+/// The last frame of the recording `record_pointing` makes of `run`.
+fn last_recorded(
+    name: &str,
+    scene: SceneFn,
+    run: PlayFn,
+    scale: f32,
+    input: Option<crate::render::Corner>,
+) -> image::RgbaImage {
+    let (dir, outcome) = record_pointing(name, scene, run, scale, VideoFormat::Apng, input);
+    outcome.unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let (_, mut frames) = crate::video::decode(&dir.join("shot.apng"));
+    frames.pop().expect("a frame").image
+}
+
 fn pointing_record(
     format: VideoFormat,
     input: Option<crate::render::Corner>,
@@ -1649,16 +1672,17 @@ fn pointing_record(
     }
 }
 
-/// A recording of a play that points at the `Hello` of `scene`,
+/// A recording of `run`, a play named `points` that points at the `Hello` of `scene`,
 /// and the directory it is in.
 fn record_pointing(
     name: &str,
     scene: SceneFn,
+    run: PlayFn,
     scale: f32,
     format: VideoFormat,
     input: Option<crate::render::Corner>,
 ) -> (Utf8PathBuf, Result<(), crate::diagnostic::Diagnostic>) {
-    let (manifest, plays) = catalog(scene, &[("points", points)]);
+    let (manifest, plays) = catalog(scene, &[("points", run)]);
     let dir = scratch(name);
     let mut recorded = shot(
         "plays::scene",
@@ -1687,26 +1711,95 @@ fn a_zoomed_scenes_recording_shows_the_pointer_where_it_is() {
     }
     for scale in [1.0, 1.5] {
         let corner = Some(crate::render::Corner::BottomLeft);
-        let [plain, shown] = [None, corner].map(|input| {
-            let apng = VideoFormat::Apng;
-            let (dir, outcome) = record_pointing("zoomed-input", tall, scale, apng, input);
-            outcome.unwrap_or_else(|failure| panic!("{}", failure.plain()));
-            let (_, mut frames) = crate::video::decode(&dir.join("shot.apng"));
-            frames.pop().expect("a frame").image
-        });
+        let shown = last_recorded("zoomed-input", tall, presses, scale, corner);
+        let shot = last_recorded("zoomed-waits", tall, waits, scale, corner);
         assert!(shown.height() as f32 > 800.0 * scale, "{}", shown.height());
-        let pixels_per_point = 2.0 * scale;
-        let aimed = *HELLO.lock().expect("the place") * pixels_per_point;
-        let off: Vec<f32> = shown
+        let aimed = *HELLO.lock().expect("the place") * 2.0 * scale;
+        // The panel in the corner lights the button too, far from the pointer.
+        let near = 100.0 * scale;
+        let added: Vec<egui::Pos2> = shown
             .enumerate_pixels()
-            .filter(|(x, y, pixel)| *pixel != plain.get_pixel(*x, *y))
-            .map(|(x, y, _)| aimed.distance(egui::pos2(x as f32, y as f32)))
+            .filter(|(x, y, pixel)| *pixel != shot.get_pixel(*x, *y))
+            .map(|(x, y, _)| egui::pos2(x as f32, y as f32))
+            .filter(|at| aimed.distance(*at) < near)
             .collect();
-        let farthest = off.iter().copied().fold(0.0, f32::max);
+        // The cursor keeps its 24 points whatever the zoom, its hotspot 1 in from its corner.
+        let corner = aimed - egui::Vec2::splat(scale + 1.0);
+        let reach = corner + egui::Vec2::splat(24.0 * scale + 1.0);
+        let inside = |at: &egui::Pos2| {
+            (corner.x..=reach.x).contains(&at.x) && (corner.y..=reach.y).contains(&at.y)
+        };
+        assert!(!added.is_empty(), "a cursor is drawn at {scale}");
         assert!(
-            (8.0 * scale..14.0 * scale).contains(&farthest),
-            "the pointer's ring, and no more, is around it: {farthest} at {scale}"
+            added.iter().all(inside),
+            "the cursor, and no more, is where the pointer is at {scale}"
         );
+    }
+}
+
+#[test]
+fn a_shot_has_no_cursor_where_the_pointer_hovers() {
+    fn hello(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.label("Hello");
+    }
+    let [hovered, untouched] =
+        [("points", points as PlayFn), ("waits", waits)].map(|(name, run)| {
+            let (manifest, plays) = catalog(hello, &[(name, run)]);
+            let dir = scratch(&format!("cursorless-{name}"));
+            let out = dir.join("shot.png");
+            capture(
+                &manifest,
+                &plays,
+                shot("plays::scene", &out, name, Trace::Failing),
+                None,
+            )
+            .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+            image::open(&out).expect("the shot").to_rgba8()
+        });
+    assert!(
+        hovered == untouched,
+        "a label looks the same hovered; only egui_kittest's cursor would tell them apart"
+    );
+}
+
+#[test]
+fn a_recording_draws_gallerys_cursor_on_the_pointer_and_its_pressed_one_on_a_press() {
+    fn hello(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.label("Hello");
+    }
+    let lit = |pixel: &image::Rgba<u8>| pixel.0[0] > 230 && pixel.0[2] < 120;
+    for (run, name, pressed) in [
+        (points as PlayFn, "hovering", false),
+        (presses, "pressing", true),
+    ] {
+        let recorded = last_recorded(name, hello, run, 1.0, None);
+        let shot = last_recorded(&format!("{name}-waits"), hello, waits, 1.0, None);
+        // A hovered canvas tints its scroll bar's track by a shade; the cursor stands out.
+        let stands_out = |a: &image::Rgba<u8>, b: &image::Rgba<u8>| {
+            a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 16)
+        };
+        let added: Vec<(u32, u32, &image::Rgba<u8>)> = recorded
+            .enumerate_pixels()
+            .filter(|(x, y, pixel)| stands_out(pixel, shot.get_pixel(*x, *y)))
+            .collect();
+        let xs = added.iter().map(|(x, _, _)| *x);
+        let ys = added.iter().map(|(_, y, _)| *y);
+        let width = xs
+            .clone()
+            .max()
+            .zip(xs.min())
+            .map(|(max, min)| max - min + 1);
+        let height = ys
+            .clone()
+            .max()
+            .zip(ys.min())
+            .map(|(max, min)| max - min + 1);
+        assert!(
+            width.zip(height).is_some_and(|(w, h)| w <= 24 && h <= 24),
+            "{name}: the cursor, and only it, is added to the frame: {width:?}×{height:?}"
+        );
+        let lights = added.iter().any(|(_, _, pixel)| lit(pixel));
+        assert_eq!(lights, pressed, "{name}: lit only while a button is held");
     }
 }
 

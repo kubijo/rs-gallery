@@ -27,12 +27,15 @@ pub(crate) fn open<A: eframe::App + 'static>(
     let builder = builder(size, scale);
     let (painter, builder) = match session {
         #[cfg(not(target_vendor = "apple"))]
-        Session::Glow(capture) => (Some(capture.painter()), builder.renderer(capture.clone())),
+        Session::Glow(capture) => (
+            Some(capture.painter()),
+            builder.renderer(Cursorless(capture.clone())),
+        ),
         // Eager, unlike the default lazy renderer, which builds its wgpu state on the first
         // `render()` — by which time the app has been drawing for frames. Built up front,
         // the state reaches the `CreationContext`, so `SceneCtx::render_state` is `Some`
         // here exactly as it is in a window. Same render options either way.
-        Session::Wgpu(capture) => (None, builder.renderer(capture.renderer()?)),
+        Session::Wgpu(capture) => (None, builder.renderer(Cursorless(capture.renderer()?))),
     };
     Ok(builder.build_eframe(|cc| {
         install_context(cc, setup);
@@ -56,10 +59,51 @@ pub(crate) fn open_apart<A: eframe::App + 'static>(
     let builder = builder(size, scale);
     let builder = match session {
         #[cfg(not(target_vendor = "apple"))]
-        Session::Glow(capture) => builder.renderer(capture.with_own_painter()?),
-        Session::Wgpu(capture) => builder.renderer(capture.renderer()?),
+        Session::Glow(capture) => builder.renderer(Cursorless(capture.with_own_painter()?)),
+        Session::Wgpu(capture) => builder.renderer(Cursorless(capture.renderer()?)),
     };
     Ok(builder.build_eframe(|cc| app(cc)))
+}
+
+/// A renderer drawing a harness's frames without the cursor egui_kittest adds to them:
+/// a screenshot has no cursor, as a real one has none, and a recording draws gallery's own.
+struct Cursorless<R>(R);
+
+impl<R: egui_kittest::TestRenderer> egui_kittest::TestRenderer for Cursorless<R> {
+    fn setup_eframe(&self, cc: &mut eframe::CreationContext<'_>, frame: &mut eframe::Frame) {
+        self.0.setup_eframe(cc, frame);
+    }
+
+    fn handle_delta(&mut self, delta: &mut egui::TexturesDelta) {
+        self.0.handle_delta(delta);
+    }
+
+    fn render(
+        &mut self,
+        ctx: &egui::Context,
+        output: &egui::FullOutput,
+    ) -> Result<image::RgbaImage, String> {
+        match without_cursor(ctx, output) {
+            Some(output) => self.0.render(ctx, &output),
+            None => self.0.render(ctx, output),
+        }
+    }
+}
+
+/// `output` without the cursor `Harness::render` of egui_kittest 0.36 pushes last
+/// where the pointer hovers (its `lib.rs`, "Paint a mouse cursor"), or `None` when it has none.
+/// Told by its exact corners, so a cursor drawn otherwise shows rather than taking a shape with it.
+fn without_cursor(ctx: &egui::Context, output: &egui::FullOutput) -> Option<egui::FullOutput> {
+    let at = ctx.input(|input| input.pointer.hover_pos())?;
+    let egui::Shape::Path(path) = &output.shapes.last()?.shape else {
+        return None;
+    };
+    let corners = [at, at + egui::vec2(16.0, 8.0), at + egui::vec2(8.0, 16.0)];
+    (path.points == corners).then(|| {
+        let mut output = output.clone();
+        output.shapes.pop();
+        output
+    })
 }
 
 fn builder<A>(size: egui::Vec2, scale: f32) -> egui_kittest::HarnessBuilder<A> {

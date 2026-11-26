@@ -77,8 +77,6 @@ past a handful of images, and a structural target beside the pixel one.
   the scene's panics, raised by the dylib's `std`, and abort on those instead.
 - [ ] A play's pointer gesture aims at a widget covered by a window or popup over it as at one in plain sight, and lands
   on whatever covers it. Catching it needs a hit test against the layers above the widget's.
-- [ ] egui_kittest's `Harness::render` paints its own cursor triangle at the hover position, so the input overlay's
-  pointer ring outlines a cursor already drawn. Shown only while a button is held, the ring would mark presses alone.
 - [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one
   run reports every check that failed. The log already keeps every check; what is missing is a play that outlives one.
 - [ ] A recording's pointer jumps from widget to widget, since a gesture moves it in one frame. A glide only in the
@@ -88,5 +86,4 @@ past a handful of images, and a structural target beside the pixel one.
   hovered.
   - Easing names map onto a few of `emath::easing`'s: `linear`, `cubic-in-out` (the default), `cubic-out`, `back-out`.
   - Travel time follows the distance, clamped to about 0.15–0.6 s, counted in frames so the file stays byte-identical.
-  - kittest's cursor triangle is painted into the scene's frame, so the recording hides it and the overlay draws the
-    cursor; the ring above then sits on that cursor.
+  - The overlay draws the pointer, so the glide moves that cursor alone.

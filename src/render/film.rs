@@ -183,7 +183,7 @@ impl Film<'_> {
                 Some(layer) => layer,
                 None => {
                     let size = egui::vec2(frame.width() as f32, frame.height() as f32) / scale;
-                    let opened = InputLayer::open(session, size, scale, Corner::default());
+                    let opened = InputLayer::open(session, size, scale, Some(Corner::default()));
                     layer.insert(opened.map_err(|e| e.summary())?)
                 }
             };

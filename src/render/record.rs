@@ -329,10 +329,9 @@ pub(super) fn start(
     )]
     let pixels = (size.x as u32, size.y as u32);
     let mut recording = begun(pixels, out, record)?;
-    if let Some(corner) = record.input
-        && !recording.sinks.is_empty()
-    {
-        let opened = InputOverlay::open(session, size / scale, scale, record.fps, corner);
+    // Always: the pointer is drawn by the overlay, the panel only where `input` puts it.
+    if !recording.sinks.is_empty() {
+        let opened = InputOverlay::open(session, size / scale, scale, record.fps, record.input);
         recording.show_input(opened);
     }
     harness.state_mut().recording = Some(recording);

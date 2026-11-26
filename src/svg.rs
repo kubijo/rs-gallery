@@ -130,6 +130,11 @@ impl Icon {
         hasher.finish()
     }
 
+    /// The SVG's own width and height, in its units.
+    pub(crate) fn size(&self) -> egui::Vec2 {
+        egui::vec2(self.svg.width, self.svg.height)
+    }
+
     /// Allocate a `size`×`size` slot. Coloured solid fills ignore `color`.
     pub fn show(&self, ui: &mut egui::Ui, size: f32, color: egui::Color32) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());

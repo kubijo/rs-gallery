@@ -42,6 +42,7 @@ use crate::{
 
 pub(crate) use crate::video::{VideoFormat, VideoFormats};
 
+mod cursor;
 mod film;
 mod log_view;
 mod overlay;
@@ -56,6 +57,7 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use self::cursor::use_cursor;
 use self::film::Film;
 pub(crate) use self::film::{Filmed, Films, create_output, place_at, play_dir_in};
 pub(crate) use self::log_view::LogMode;

@@ -548,24 +548,26 @@ fn a_zoomed_scenes_video_shows_the_pointer_where_it_is() {
         });
     }
     static AIMED: std::sync::Mutex<egui::Pos2> = std::sync::Mutex::new(egui::Pos2::ZERO);
-    fn points(p: &mut Play<'_>) -> PlayResult {
+    fn presses(p: &mut Play<'_>) -> PlayResult {
         *AIMED.lock().expect("the aim") = p.get("Hello").rect.center();
         p.idle(1)?;
-        p.hover("Hello")?;
+        p.click("Hello")?;
         p.expect("Nowhere").within(0).to_exist()
     }
     let dir = scratch("films-zoomed");
-    let (outcome, _) = filmed(zoomed, points, &dir, Video::Failing);
+    let (outcome, _) = filmed(zoomed, presses, &dir, Video::Failing);
     outcome.expect_err("it is nowhere");
     let frames = decode_mp4(&video(&dir));
     let [before, .., after] = frames.as_slice() else {
         panic!("{} frames", frames.len());
     };
     let aimed = *AIMED.lock().expect("the aim") * 2.0;
+    // The panel lights the button too, in the bottom left corner, far below.
+    let top = before.height() / 2;
     let strays = before.enumerate_pixels().filter(|(x, y, pixel)| {
         let moved = pixel.0[0].abs_diff(after.get_pixel(*x, *y).0[0]) > 60;
         let off = aimed.distance(egui::pos2(*x as f32, *y as f32));
-        moved && off > 40.0
+        *y < top && moved && off > 40.0
     });
     let near = |x: f32, y: f32| {
         after
@@ -574,8 +576,8 @@ fn a_zoomed_scenes_video_shows_the_pointer_where_it_is() {
     };
     assert_eq!(strays.count(), 0, "nothing is drawn away from the pointer");
     assert!(
-        (6..=10).any(|off| near(-(off as f32), 0.0) > 200),
-        "its ring is around it"
+        near(5.0, 5.0) > 200,
+        "its pressed cursor, lit inside, is on it"
     );
 }
 

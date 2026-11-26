@@ -20,3 +20,10 @@ title = "{{title}}"
 # [tests]
 # video = "failing"
 # output = "target/tests"
+
+# The pointer recordings draw, gallery's own unless set: an SVG of it, one of it while a button is held,
+# both relative to this file, and the point of them on the pointer, in their own units.
+# [record]
+# cursor_default = "assets/cursor.svg"
+# cursor_pressed = "assets/cursor-pressed.svg"
+# cursor_hotspot = [1, 1]

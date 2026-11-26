@@ -630,11 +630,23 @@ machine renders. egui's own animations and the text cursor's blink, off for stil
 A play clicks in a couple of frames, too fast to follow, so its recording pauses on each step's last frame for `hold`
 seconds (`--record-hold`). The pause is only in the file: the play draws the same frames whether it records or not.
 
-With `input` (`--record-input [CORNER]`), a play's recording shows its input as a tutorial's screencast would: the keys
-pressed in the last moment and a mouse with its pressed button lit, in a panel in one corner, and a ring where the
-pointer is. It is laid over the recorded frames only; the shot's PNG and step screenshots are drawn without it.
+A play's recording draws the pointer where it is, lit while a button is held. With `input` (`--record-input [CORNER]`),
+it also shows the input as a tutorial's screencast would: the keys pressed in the last moment and a mouse with its
+pressed button lit, in a panel in one corner. Both are laid over the recorded frames only; the shot's PNG, step
+screenshots and screenshot checks have no pointer, as a real screenshot has none.
 [`studio.scene.rs`](template/studio.scene.rs) is a scene to watch it on: a play that clicks, types, presses shortcuts,
 drags and scrolls across a scene filling its stage.
+
+The pointer is gallery's own unless `gallery.toml` names one, for a showcase in a product's own look. It takes an SVG,
+so it is sharp at any scale, and a second one for while a button is held; the hotspot is the point of both on the
+pointer, in their own units:
+
+```toml
+[record]
+cursor_default = "assets/cursor.svg"
+cursor_pressed = "assets/cursor-pressed.svg"
+cursor_hotspot = [1, 1]
+```
 
 - **MP4** (H.264), the default: small, and seekable and pausable in any player, with a keyframe every second. Up to
   3840×2160 pixels, either way up. Encoded by OpenH264, which builds from bundled C++, so a first build needs a C++
@@ -709,11 +721,11 @@ output = "target/tests"
 
 A video is an MP4 at `<catalog's crate>/<module>/<play>/video.<renderer>.mp4` in there, the crate's dashes as
 underscores; a play of another crate has an `extern-<crate>` before its module. It shows every frame the play drew at 15
-a second, a pause on each step's last, and the keys, mouse and pointer as a recording's `input` does, bottom-left. Where
-a check grows the canvas, the video grows with it, up to the 3840×2160 an MP4 can be. `failing` and `always` record
-every play alike, and differ in what they keep. Each test replaces its own video alone, so one whose play is gone stays
-until it's deleted. A directory gallery makes for them is ignored by git and by hot reload. Until a video is known to be
-kept it is in `gallery-recordings/` in cargo's target directory.
+a second, a pause on each step's last, the pointer, and the keys and mouse as a recording's `input` does, bottom-left.
+Where a check grows the canvas, the video grows with it, up to the 3840×2160 an MP4 can be. `failing` and `always`
+record every play alike, and differ in what they keep. Each test replaces its own video alone, so one whose play is gone
+stays until it's deleted. A directory gallery makes for them is ignored by git and by hot reload. Until a video is known
+to be kept it is in `gallery-recordings/` in cargo's target directory.
 
 The test keeps its own time and no animations, and trouble with a video fails nothing. Filming does render frames a test
 would not, which a scene can tell in two ways: its paint callbacks run, so a panic in one ends the process and every

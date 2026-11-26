@@ -204,7 +204,8 @@ fn button_index(button: PointerButton) -> Option<usize> {
 /// The overlay's own app: nothing but what [`Shown`] holds, on a clear canvas.
 pub(super) struct OverlayApp {
     shown: Shown,
-    corner: Corner,
+    /// Where the keys and mouse panel goes; `None` shows the pointer alone.
+    corner: Option<Corner>,
 }
 
 const INK: egui::Color32 = egui::Color32::WHITE;
@@ -215,16 +216,16 @@ const WHEEL: egui::Color32 = egui::Color32::from_gray(40);
 impl eframe::App for OverlayApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.shown.panel() {
+        if let Some(corner) = self.corner.filter(|_| self.shown.panel()) {
             egui::Area::new(egui::Id::new("gallery-input"))
-                .anchor(self.corner.align(), corner_offset(self.corner))
+                .anchor(corner.align(), corner_offset(corner))
                 .order(egui::Order::Foreground)
                 .show(&ctx, |ui| {
                     egui::Frame::new()
                         .fill(BACKDROP)
                         .corner_radius(8)
                         .inner_margin(10)
-                        .show(ui, |ui| self.panel(ui));
+                        .show(ui, |ui| self.panel(ui, corner));
                 });
         }
         if let Some(at) = self.shown.pointer {
@@ -232,18 +233,15 @@ impl eframe::App for OverlayApp {
                 egui::Order::Tooltip,
                 egui::Id::new("gallery-pointer"),
             ));
-            if self.shown.buttons.contains(&true) {
-                painter.circle_filled(at, 10.0, LIT.gamma_multiply(0.6));
-            }
-            painter.circle_stroke(at, 10.0, egui::Stroke::new(2.0, egui::Color32::BLACK));
-            painter.circle_stroke(at, 8.0, egui::Stroke::new(2.0, INK));
+            let pressed = self.shown.buttons.contains(&true);
+            super::cursor::cursor().paint(&painter, at, pressed);
         }
     }
 }
 
 impl OverlayApp {
-    /// The keys and the mouse, the newest key nearest the corner.
-    fn panel(&self, ui: &mut egui::Ui) {
+    /// The keys and the mouse, the newest key nearest the `corner`.
+    fn panel(&self, ui: &mut egui::Ui, corner: Corner) {
         // Left-aligned in every corner: aligned right,
         // a layout takes all the width offered.
         ui.vertical(|ui| {
@@ -251,7 +249,7 @@ impl OverlayApp {
             let key = |ui: &mut egui::Ui, text: &str| {
                 ui.label(egui::RichText::new(text).size(22.0).strong().color(INK));
             };
-            if self.corner.is_top() {
+            if corner.is_top() {
                 self.mouse(ui);
                 self.shown.keys.iter().rev().for_each(|text| key(ui, text));
             } else {
@@ -332,8 +330,8 @@ pub(super) struct InputOverlay {
 }
 
 impl InputOverlay {
-    /// An overlay for a canvas of `size` points at `scale`,
-    /// drawn on the shot's own renderer.
+    /// An overlay for a canvas of `size` points at `scale`, drawn on the shot's own renderer:
+    /// the pointer, and the keys and mouse panel in `corner` if there is one.
     ///
     /// # Errors
     /// When the renderer cannot open a harness.
@@ -342,7 +340,7 @@ impl InputOverlay {
         size: egui::Vec2,
         scale: f32,
         fps: u16,
-        corner: Corner,
+        corner: Option<Corner>,
     ) -> Result<Self, Diagnostic> {
         Ok(Self {
             log: InputLog::new(fps),
@@ -388,7 +386,7 @@ impl InputLayer {
         session: &Session,
         size: egui::Vec2,
         scale: f32,
-        corner: Corner,
+        corner: Option<Corner>,
     ) -> Result<Self, Diagnostic> {
         let harness = open_apart(size, scale, session, |_| OverlayApp {
             shown: Shown::default(),

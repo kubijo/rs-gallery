@@ -68,6 +68,7 @@ pub fn __test_main(
     crate::render::built_for(Utf8Path::new(manifest_dir));
     let config = gallery_build::Config::read(&Utf8Path::new(manifest_dir).join("gallery.toml"))
         .unwrap_or_else(|e| panic!("{e}"));
+    crate::render::use_cursor(config.record.cursor.as_ref()).unwrap_or_else(|e| panic!("{e}"));
     let dylib = crate::launcher::build_lib(package, manifest_dir, &config.path, true);
     // `name` in cargo's target directory.
     let in_target = |name: &str| {
