@@ -169,6 +169,10 @@ impl Diagnostic {
             }
             shown
         });
+        // miette sets the source right under the last line before it; an empty line sets it apart.
+        if source.is_some() {
+            causes.last_mut().unwrap_or(&mut message).push('\n');
+        }
         let hints = self.hints.iter().filter(|hint| shown(hint));
         let hints: Vec<String> = hints.map(|hint| highlight(&hint.text)).collect();
         let report = Report {
@@ -614,6 +618,33 @@ mod tests {
             .collect();
         assert!(tokens.contains(&("let", Kind::Keyword)), "{tokens:?}");
         assert!(tokens.contains(&("line!", Kind::Macro)), "{tokens:?}");
+        for name in ["p", "so", "it"] {
+            assert!(tokens.contains(&(name, Kind::Name)), "`{name}`: {tokens:?}");
+        }
+        let ticks = tokens
+            .iter()
+            .filter(|(text, kind)| (*text, *kind) == ("`", Kind::Tick));
+        assert_eq!(ticks.count(), 6, "two around each name: {tokens:?}");
+    }
+
+    #[test]
+    fn a_source_is_set_apart_from_what_comes_before_it_by_an_empty_line() {
+        let at = line!();
+        let with_cause =
+            Diagnostic::new("it failed")
+                .cause("because")
+                .source_at(file!(), at, 1, "here");
+        let without = Diagnostic::new("it failed").source_at(file!(), at, 1, "here");
+        for diagnostic in [with_cause, without] {
+            let plain = diagnostic.plain();
+            let lines: Vec<&str> = plain.lines().collect();
+            let frame = lines
+                .iter()
+                .position(|line| line.contains("╭─["))
+                .expect("a frame");
+            assert_eq!(lines[frame - 1].trim(), "", "{plain}");
+            assert_ne!(lines[frame - 2].trim(), "", "one empty line: {plain}");
+        }
     }
 
     #[test]

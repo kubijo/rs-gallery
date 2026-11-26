@@ -12,7 +12,9 @@ use miette::{
 };
 use owo_colors::{AnsiColors, Style, Styled, XtermColors};
 
-/// What a token is, of the kinds a frame tells apart; the others arborium knows stay plain.
+/// What a token is: of code, the kinds a frame tells apart,
+/// the others arborium knows staying plain; of the report's
+/// own words, a `` `name` `` and its backticks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
@@ -26,10 +28,13 @@ pub(crate) enum Kind {
     Constant,
     Attribute,
     Label,
+    Name,
+    Tick,
 }
 
 impl Kind {
-    /// In the order declared, so each is at its discriminant.
+    /// Those of code, in the order declared,
+    /// so each is at its discriminant.
     const ALL: [Self; 9] = [
         Self::Keyword,
         Self::Function,
@@ -74,6 +79,9 @@ impl Kind {
             Self::Constant => "constant",
             Self::Attribute => "attribute",
             Self::Label => "label",
+            // The page's `name` is a test's.
+            Self::Name => "named",
+            Self::Tick => "tick",
         }
     }
 
@@ -84,9 +92,10 @@ impl Kind {
             Self::Function => style.color(AnsiColors::Blue),
             Self::Macro => style.color(AnsiColors::Cyan),
             Self::String => style.color(AnsiColors::Green),
-            Self::Comment | Self::Attribute => style.dimmed(),
+            Self::Comment | Self::Attribute | Self::Tick => style.dimmed(),
             Self::Type | Self::Label => style.color(AnsiColors::Yellow),
             Self::Constant => style.color(AnsiColors::Red),
+            Self::Name => style.bold(),
         }
     }
 
@@ -279,7 +288,10 @@ impl Perform for Splitter {
         }
     }
 
-    /// A style begun ends the token before it; a mark begins one.
+    /// A style begun ends the token before it. A mark begins one,
+    /// as do the bold of a name and the dim of its backticks:
+    /// the only other styles in a report, which miette draws
+    /// with no colour of its own.
     fn csi_dispatch(&mut self, params: &Params, _: &[u8], _: bool, action: u8) {
         if action != b'm' {
             return;
@@ -295,9 +307,13 @@ impl Perform for Splitter {
             });
         }
         let params: Vec<u16> = params.iter().flatten().copied().collect();
-        if let [38, 5, mark] = params[..] {
-            self.open = Kind::marked_by(mark).map(|kind| (at, kind));
+        self.open = match params[..] {
+            [38, 5, mark] => Kind::marked_by(mark),
+            [1] => Some(Kind::Name),
+            [2] => Some(Kind::Tick),
+            _ => None,
         }
+        .map(|kind| (at, kind));
     }
 }
 
@@ -431,8 +447,8 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect();
-        let bold = anstyle::Style::new().bold();
-        let drawn = format!("{bold}× it{bold:#}\n  1 │ {line}\n");
+        let underlined = anstyle::Style::new().underline();
+        let drawn = format!("{underlined}× it{underlined:#}\n  1 │ {line}\n");
         let split = Highlighted::split(&drawn);
         assert_eq!(split.text, "× it\n  1 │ let ü = \"é\";\n");
         let tokens: Vec<(&str, Kind)> = split

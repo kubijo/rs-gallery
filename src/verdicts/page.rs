@@ -945,6 +945,24 @@ mod tests {
     }
 
     #[test]
+    fn a_failures_names_are_set_apart_as_the_terminal_sets_them() {
+        let text = "× play `adds` failed";
+        let shown = failure_shown(
+            text,
+            vec![
+                token(8, 9, TokenKind::Tick),
+                token(9, 13, TokenKind::Name),
+                token(13, 14, TokenKind::Tick),
+            ],
+        );
+        assert_eq!(
+            shown,
+            "× play <span class=\"tick\">`</span><span class=\"named\">adds</span>\
+             <span class=\"tick\">`</span> failed"
+        );
+    }
+
+    #[test]
     fn a_failures_code_is_coloured_by_what_each_token_is_and_escaped() {
         let text = "× it failed\n3 │ let x = \"<b>\"; // é";
         let at = |part: &str| text.find(part).expect("in the text");

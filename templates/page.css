@@ -108,8 +108,19 @@ pre {
 }
 
 .failure {
-    /* Close to the glyphs' own height, so miette's box drawing nearly joins from line to line. */
+    /*
+     * Close to the glyphs' own height, so miette's
+     * box drawing nearly joins from line to line.
+     */
     line-height: 1.2;
+
+    .named {
+        font-weight: bold;
+    }
+
+    .tick {
+        color: var(--aside);
+    }
 }
 
 .failure,
@@ -347,9 +358,9 @@ summary {
     font-variant-numeric: tabular-nums;
 }
 
-.trial:target {
-    outline: 2px solid var(--link);
-    border-radius: 4px;
+/* The test a link led to: its own line tinted, the rest of it left as it is. */
+.trial:target > summary {
+    background: color-mix(in srgb, var(--link) 12%, transparent);
 }
 
 .warning {
