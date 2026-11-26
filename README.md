@@ -430,11 +430,13 @@ A bare string is a label; `By` narrows by role, a label fragment or a value when
 as written — `"Enter"`, `"Shift+Tab"`, `"Cmd+A"` — by egui's key names and `Cmd`, `Ctrl`, `Alt` and `Shift`, in any
 case; plays press keys as Linux and Windows do, so `Cmd` and `Ctrl` are one key. A typo fails the press, suggesting the
 name it most likely meant. The prelude brings `Key`, `Modifiers` and `Role` for anything past those. A gesture waits, a
-frame at a time, for exactly one widget to match, and fails naming what was on screen if none does. Each gesture is a
-fixed sequence of frames — a click is a move, a press, a release and a frame to settle — so a play draws the same frames
-on any machine. `step` names part of the script and takes the blame for any panic in it, and `set_knob` holds a knob
-over whatever the recipe set. A held scene knob, the recipe's or the play's, refuses the scene's own `set`; a `set_knob`
-value that never lands fails the play. A scene can have several plays, each known by its function's name.
+frame at a time, for exactly one widget to match, and fails naming what was on screen if none does. A pointer gesture
+aims at the middle of what shows of its widget, and fails at once if none of it does, scrolled away or past the canvas's
+edge; scroll it into view first. Each gesture is a fixed sequence of frames — a click is a move, a press, a release and
+a frame to settle — so a play draws the same frames on any machine. `step` names part of the script and takes the blame
+for any panic in it, and `set_knob` holds a knob over whatever the recipe set. A held scene knob, the recipe's or the
+play's, refuses the scene's own `set`; a `set_knob` value that never lands fails the play. A scene can have several
+plays, each known by its function's name.
 
 ### What a play expects
 

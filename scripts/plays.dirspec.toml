@@ -21,6 +21,7 @@ strict = true
 
 "fails-ambiguous-label.steps/*.png" = { type = "file", count = 5 }
 "fails-never-saved.steps/*.png" = { type = "file", count = 3 }
+"fails-out-of-sight.steps/*.png" = { type = "file", count = 1 }
 "fails-wrong-action.steps/*.png" = { type = "file", count = 2 }
 "fails-wrong-count.steps/*.png" = { type = "file", count = 6 }
 "fails-wrong-order.steps/*.png" = { type = "file", count = 7 }

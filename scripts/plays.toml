@@ -76,3 +76,8 @@ play = "waits_for_a_save_that_never_comes"
 name = "fails-outside-a-step"
 scene = "todo"
 play = "panics_outside_a_step"
+
+[[shot]]
+name = "fails-out-of-sight"
+scene = "tags"
+play = "clicks_a_tag_scrolled_out_of_sight"

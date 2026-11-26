@@ -17,6 +17,7 @@ strict = true
 ".gallery-writes" = { type = "file" }
 
 "app_gallery/plays/asserts_the_wrong_order/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/clicks_a_tag_scrolled_out_of_sight/video.wgpu.mp4" = { type = "file", min_size = 1 }
 "app_gallery/plays/compares_with_a_reference_never_taken/video.wgpu.mp4" = { type = "file", min_size = 1 }
 "app_gallery/plays/counts_the_wrong_number_left/video.wgpu.mp4" = { type = "file", min_size = 1 }
 "app_gallery/plays/differs_from_its_reference/video.wgpu.mp4" = { type = "file", min_size = 1 }

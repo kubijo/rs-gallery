@@ -49,12 +49,13 @@ so a minor release may carry a breaking change.
 
 - **Plays: scripted interactions.** `#[play(scene_fn)] fn name(p: &mut Play) -> PlayResult` drives a scene the way a
   person would — `click`, `hover`, `focus`, `fill`, `type_text`, `press`, `drag`, `scroll` — finding widgets by their
-  accessible label or role. Each gesture is a fixed sequence of frames, so a play draws the same frames anywhere.
-  `press` takes a shortcut as written, `"Cmd+A"` or `"Shift+Tab"`, and a typo fails saying what it most likely meant;
-  `drag` and `scroll` take `[x, y]`; `By::button()`, `slider()`, `checkbox()`, `combo_box()` and `text_input()` name a
-  role, and the prelude brings `Key`, `Modifiers` and `Role` for the rest. `wait_for` draws frames until a condition
-  holds; `step` names part of a script and takes the blame for a panic in it; `expect_action` waits for the scene to
-  report an action, given as a string or a matcher; `set_knob` holds a knob over the recipe.
+  accessible label or role. Each gesture is a fixed sequence of frames, so a play draws the same frames anywhere. A
+  pointer gesture aims at what shows of its widget, and fails at once if it is scrolled out of sight. `press` takes a
+  shortcut as written, `"Cmd+A"` or `"Shift+Tab"`, and a typo fails saying what it most likely meant; `drag` and
+  `scroll` take `[x, y]`; `By::button()`, `slider()`, `checkbox()`, `combo_box()` and `text_input()` name a role, and
+  the prelude brings `Key`, `Modifiers` and `Role` for the rest. `wait_for` draws frames until a condition holds; `step`
+  names part of a script and takes the blame for a panic in it; `expect_action` waits for the scene to report an action,
+  given as a string or a matcher; `set_knob` holds a knob over the recipe.
 
 - **Captures run plays.** `[[shot]] play = "name"` and `--play NAME` capture the state a play leaves behind — hover,
   focus, typed text, which no knob can set. The report lists each step and its frames. A failing play keeps a screenshot

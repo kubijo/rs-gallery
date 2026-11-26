@@ -1288,6 +1288,66 @@ fn a_scroll_moves_the_content_under_the_widget() {
     .unwrap_or_else(|failure| panic!("{}", failure.plain()));
 }
 
+/// Buttons in a list shorter than they are,
+/// and how many clicks reached each.
+fn clickable_rows(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    let id = ui.make_persistent_id("clicks");
+    let mut clicks: u32 = ui.data_mut(|data| *data.get_temp_mut_or_default(id));
+    ui.label(format!("clicks {clicks}"));
+    egui::ScrollArea::vertical()
+        .max_height(60.0)
+        .show(ui, |ui| {
+            if ui
+                .add_sized([120.0, 200.0], egui::Button::new("tall"))
+                .clicked()
+            {
+                clicks += 1;
+            }
+            for row in 0..40 {
+                if ui.button(format!("row {row}")).clicked() {
+                    clicks += 1;
+                }
+            }
+        });
+    ui.data_mut(|data| data.insert_temp(id, clicks));
+}
+
+/// What the capture of `clickable_rows` running `run` came to.
+fn clicking(name: &'static str, run: PlayFn) -> Result<(), Diagnostic> {
+    let (manifest, plays) = catalog(clickable_rows, &[(name, run)]);
+    let dir = scratch(name);
+    capture(
+        &manifest,
+        &plays,
+        shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
+        None,
+    )
+}
+
+#[test]
+fn a_pointer_gesture_at_a_widget_out_of_sight_fails_saying_so() {
+    fn click_far_row(p: &mut Play<'_>) -> PlayResult {
+        p.click("row 30")
+    }
+    let failure = clicking("click_far_row", click_far_row).expect_err("row 30 is scrolled away");
+    let plain = failure.plain();
+    assert!(plain.contains("`row 30` is out of sight"), "{plain}");
+    assert!(plain.contains("scroll it into view"), "{plain}");
+}
+
+#[test]
+fn a_pointer_gesture_aims_at_the_part_of_a_widget_in_sight() {
+    fn click_tall(p: &mut Play<'_>) -> PlayResult {
+        p.click("tall")?;
+        p.step("the click reached it", |p| {
+            let clicks = reading(p, "clicks");
+            assert_eq!(clicks, 1.0, "its centre is below the list's bottom edge");
+            Ok(())
+        })
+    }
+    clicking("click_tall", click_tall).unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
 fn switch(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
     let on = ctx.toggle("on", false).get();
     ui.label(if on { "ON" } else { "off" });

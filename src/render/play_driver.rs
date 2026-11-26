@@ -101,6 +101,27 @@ pub(super) fn rendered(
     image
 }
 
+/// The part of `node`'s widget a pointer can reach, as the last pass laid it out:
+/// its rectangle cut by every clip around it, a scroll area's too, then by the canvas.
+/// egui's tree says nothing of clips, so this is read from the pass's own widget rectangles.
+fn in_sight(ctx: &egui::Context, node: egui::accesskit::NodeId) -> Option<egui::Rect> {
+    let widget = ctx.viewport(|viewport| {
+        let mut widgets = viewport
+            .prev_pass
+            .widgets
+            .layers()
+            .flat_map(|(_, rects)| rects);
+        let widget = widgets.find(|widget| widget.id.accesskit_id() == node)?;
+        Some((widget.layer_id, widget.interact_rect))
+    });
+    // Outside `viewport`, which holds the context's lock these take too.
+    let (layer, shown) = widget?;
+    let shown = ctx
+        .layer_transform_to_global(layer)
+        .map_or(shown, |transform| transform * shown);
+    Some(shown.intersect(ctx.viewport_rect()))
+}
+
 /// [`guarded`], of what reads labels, quietly, as a wait may ask for one every frame:
 /// accesskit_consumer 0.35 panics on a `labelled_by` naming a node not in the tree.
 fn read_tree<T>(body: impl FnOnce() -> T) -> Result<T, String> {
@@ -120,11 +141,13 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
 
     fn query(&self, by: &crate::By) -> Result<Vec<crate::Found>, String> {
         use kittest::NodeT as _;
+        let ctx = &self.harness.ctx;
         read_tree(|| {
             crate::play::query_tree(
                 self.harness.root().accesskit_node(),
-                self.harness.ctx.pixels_per_point(),
+                ctx.pixels_per_point(),
                 by,
+                &|node| in_sight(ctx, node),
             )
         })
     }

@@ -325,6 +325,13 @@ pub struct Found {
     pub placeholder: Option<String>,
     /// In points.
     pub rect: egui::Rect,
+    /// The part of [`rect`](Self::rect) a pointer can reach, in points:
+    /// cut by the scroll areas and clips around it, and by the canvas,
+    /// so empty when it is scrolled away or past the canvas's edge.
+    ///
+    /// `None` where egui keeps no such rectangle,
+    /// for a widget that doesn't sense the pointer.
+    pub in_sight: Option<egui::Rect>,
     target: Target,
 }
 
@@ -420,8 +427,14 @@ pub(crate) trait PlayDriver {
     fn keep(&mut self) -> Result<log::Kept, String>;
 }
 
-/// [`PlayDriver::query`] over a tree; host code only.
-pub(crate) fn query_tree(root: AccessKitNode<'_>, pixels_per_point: f32, by: &By) -> Vec<Found> {
+/// [`PlayDriver::query`] over a tree, `in_sight` saying
+/// how much of a node's widget shows; host code only.
+pub(crate) fn query_tree(
+    root: AccessKitNode<'_>,
+    pixels_per_point: f32,
+    by: &By,
+    in_sight: &dyn Fn(accesskit::NodeId) -> Option<egui::Rect>,
+) -> Vec<Found> {
     let root = TreeNode { node: root };
     root.query_all(by.kittest())
         .map(|found| {
@@ -450,6 +463,7 @@ pub(crate) fn query_tree(root: AccessKitNode<'_>, pixels_per_point: f32, by: &By
                 description: node.description(),
                 placeholder: node.placeholder().map(str::to_owned),
                 rect: points(node.bounding_box(), pixels_per_point),
+                in_sight: in_sight(node_id),
                 target: Target {
                     node: node_id,
                     tree,
@@ -1167,19 +1181,25 @@ impl Play<'_> {
     }
 }
 
-/// Where a pointer gesture aims on `at`:
-/// its centre, if it has a place on screen at all.
+/// Where a pointer gesture aims on `at`: the centre of what shows of it,
+/// else of the whole of it, if it has a place on screen at all.
 fn aim(at: &Found) -> Result<Pos2, PlayError> {
-    let center = at.rect.center();
-    if center.is_finite() {
-        Ok(center)
-    } else {
-        Err(PlayError::new(format!(
+    let named = || {
+        at.label
+            .as_deref()
+            .map_or_else(|| format!("{:?}", at.role), |label| format!("`{label}`"))
+    };
+    match at.in_sight {
+        Some(shown) if !shown.is_positive() => Err(PlayError::new(format!(
+            "{} is out of sight, scrolled away or past the canvas's edge; scroll it into view first",
+            named()
+        ))),
+        Some(shown) => Ok(shown.center()),
+        None if at.rect.center().is_finite() => Ok(at.rect.center()),
+        None => Err(PlayError::new(format!(
             "{} matched, but has no place on screen to point at",
-            at.label
-                .as_deref()
-                .map_or_else(|| format!("{:?}", at.role), |label| format!("`{label}`"))
-        )))
+            named()
+        ))),
     }
 }
 

@@ -75,8 +75,8 @@ past a handful of images, and a structural target beside the pixel one.
 - [ ] A panic in gallery's own host code under a dylib play, e.g. inside egui_kittest's `step`, aborts the process after
   printing its message. A panic is only catchable by the `std` that raised it, and catching on the host would also catch
   the scene's panics, raised by the dylib's `std`, and abort on those instead.
-- [ ] A play's pointer gesture aims at a widget's centre even when that lies outside the visible canvas, e.g. a row
-  scrolled away, so it lands on nothing. Catching it needs the canvas's visible rect through the `PlayDriver`.
+- [ ] A play's pointer gesture aims at a widget covered by a window or popup over it as at one in plain sight, and lands
+  on whatever covers it. Catching it needs a hit test against the layers above the widget's.
 - [ ] egui_kittest's `Harness::render` paints its own cursor triangle at the hover position, so the input overlay's
   pointer ring outlines a cursor already drawn. Shown only while a button is held, the ring would mark presses alone.
 - [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one

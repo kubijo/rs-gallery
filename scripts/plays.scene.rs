@@ -341,6 +341,26 @@ fn paints_with_a_callback(p: &mut Play) -> PlayResult {
     p.click("Paint")
 }
 
+/// Tags in a list shorter than they are,
+/// every one laid out, those scrolled away too.
+#[scene("Tags")]
+fn tags(_ctx: &mut SceneCtx, ui: &mut Ui) {
+    egui::ScrollArea::vertical()
+        .max_height(80.0)
+        .show(ui, |ui| {
+            for n in 1..=20 {
+                let _ = ui.button(format!("tag {n}"));
+            }
+        });
+}
+
+/// Fails: the tag is laid out but scrolled out
+/// of sight, so the click has nowhere to land.
+#[play(tags)]
+fn clicks_a_tag_scrolled_out_of_sight(p: &mut Play) -> PlayResult {
+    p.click("tag 20")
+}
+
 /// Has egui call it at the end of every frame once its button was clicked.
 #[scene("Ends frames")]
 fn ends_frames(_ctx: &mut SceneCtx, ui: &mut Ui) {
