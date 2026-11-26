@@ -85,6 +85,8 @@ struct Kept {
     verdict: Verdict,
     took_ms: u64,
     warned: bool,
+    /// It passed, a screenshot check of it within its budget though pixels differ.
+    tolerated: bool,
 }
 
 /// A test's result, as it is kept.
@@ -147,6 +149,7 @@ enum LineOutcome {
     /// The play did not get to its end.
     Unfinished,
     Passed,
+    Tolerated,
     Failed,
     Skipped,
 }
@@ -237,6 +240,7 @@ impl Results {
                 verdict,
                 took_ms: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
                 warned: false,
+                tolerated: false,
             },
             failure: None,
             warnings: Vec::new(),
@@ -281,6 +285,9 @@ impl Results {
             ..self.stored(trial, verdict, took)
         };
         finished.kept.warned = !finished.warnings.is_empty();
+        let mut outcomes = finished.log.iter().map(|line| line.outcome);
+        finished.kept.tolerated =
+            verdict == Verdict::Passed && outcomes.any(|outcome| outcome == LineOutcome::Tolerated);
         finished
     }
 
@@ -399,6 +406,7 @@ impl Keeper<'_> {
             outcome: match entry.outcome {
                 None => LineOutcome::Unfinished,
                 Some(Outcome::Passed) => LineOutcome::Passed,
+                Some(Outcome::Tolerated) => LineOutcome::Tolerated,
                 Some(Outcome::Failed) => LineOutcome::Failed,
                 Some(Outcome::Skipped) => LineOutcome::Skipped,
             },
@@ -420,7 +428,10 @@ impl Keeper<'_> {
 
     fn check(&mut self, check: &Check, line: &mut Line) {
         line.notes.extend(check.message.clone());
-        if matches!(line.outcome, LineOutcome::Failed | LineOutcome::Skipped) {
+        if matches!(
+            line.outcome,
+            LineOutcome::Failed | LineOutcome::Tolerated | LineOutcome::Skipped
+        ) {
             let found = check.actual.as_deref().unwrap_or("nothing matched");
             line.found = Some(crate::render::one_line(found));
             line.notes.extend(check.explanation.clone());

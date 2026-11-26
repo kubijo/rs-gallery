@@ -236,6 +236,31 @@ fn a_skipped_check_says_why() {
 }
 
 #[test]
+fn a_tolerated_check_is_marked_apart_and_says_how_much_differs() {
+    let check = crate::play::log::Check {
+        subject: "canvas".to_owned(),
+        matcher: "to_match_screenshot",
+        negated: false,
+        expected: "matches screenshot \"saved\"".to_owned(),
+        actual: Some("12 pixels differ, 50 allowed".to_owned()),
+        explanation: None,
+        message: None,
+        kept: None,
+    };
+    let mut tolerated = entry(0, 0..1, true, What::Check(Box::new(check)));
+    tolerated.outcome = Some(Outcome::Tolerated);
+    let list = step_list("shot", "play", std::slice::from_ref(&tolerated), false);
+    assert!(list.contains("\u{1b}[33m≈"), "{list:?}");
+    assert!(
+        style::plain(&list)
+            .contains("≈ canvas matches screenshot \"saved\"  12 pixels differ, 50 allowed"),
+        "{list}"
+    );
+    let reported = serde_json::to_value(EntryReport::of(&tolerated)).expect("JSON");
+    assert_eq!(reported["outcome"], "tolerated");
+}
+
+#[test]
 fn a_plays_log_lists_steps_gestures_and_checks_as_a_tree_with_the_failure_marked() {
     let saved = crate::play::log::Check {
         subject: "\"Saved\"".to_owned(),

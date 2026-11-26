@@ -9,6 +9,7 @@
     --passed: light-dark(#1a7a42, #5cc98b);
     --failed: light-dark(#c22f36, #f85149);
     --unfinished: light-dark(#9a6200, #f0b455);
+    --tolerated: light-dark(#6f6a00, #d4c95a);
     --skipped: light-dark(#4c5260, #8e95a3);
     --link: light-dark(#1f5fbf, #7fb2ff);
     --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -175,6 +176,12 @@ fieldset {
     --mark: "✓";
 }
 
+/* After passed, which a tolerated test also is. */
+.tolerated {
+    --verdict: var(--tolerated);
+    --mark: "≈";
+}
+
 .failed {
     --verdict: var(--failed);
     --mark: "×";
@@ -243,11 +250,14 @@ body {
     &:has(#show-unfinished:checked)
         :is(.trial:not(.unfinished), :is(.scene, section.catalog):not(:has(.trial.unfinished))),
     &:has(#show-passed:checked) :is(.trial:not(.passed), :is(.scene, section.catalog):not(:has(.trial.passed))),
+    &:has(#show-tolerated:checked)
+        :is(.trial:not(.tolerated), :is(.scene, section.catalog):not(:has(.trial.tolerated))),
     &:has(#show-earlier:checked) :is(.trial:not(.earlier), :is(.scene, section.catalog):not(:has(.trial.earlier))),
     &:has(#show-all:checked) .none,
     &:has(#show-failed:checked):has(.trial.failed) .none,
     &:has(#show-unfinished:checked):has(.trial.unfinished) .none,
     &:has(#show-passed:checked):has(.trial.passed) .none,
+    &:has(#show-tolerated:checked):has(.trial.tolerated) .none,
     &:has(#show-earlier:checked):has(.trial.earlier) .none {
         display: none;
     }
@@ -344,6 +354,10 @@ summary {
 
 .warning {
     color: var(--unfinished);
+}
+
+.chip.tolerated {
+    color: var(--verdict);
 }
 
 .body {

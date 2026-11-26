@@ -36,6 +36,11 @@ type = "file"
 count = 3
 min_size = 1
 
+# Tolerated, it passed: the reference alone, nothing left beside it.
+[paths."app_gallery/plays/tolerates_what_its_budget_allows/snapshots-wgpu/one-task.wgpu.png"]
+type = "file"
+min_size = 1
+
 [paths."app_gallery/plays/reads_other_than_its_reference/snapshots-wgpu/one-task-done.accesskit.{json,wgpu.new.json}"]
 type = "file"
 count = 2

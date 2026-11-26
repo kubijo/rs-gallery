@@ -7,6 +7,7 @@
         {% if trial.verdict != Verdict::Unfinished %}<span class="took aside">{{ trial.took }}</span>{% endif %}
         {% include "earlier.html" %}
         {% if trial.warned %}<span class="chip warning">warned</span>{% endif %}
+        {% if trial.tolerated %}<span class="chip tolerated">tolerated</span>{% endif %}
     </summary>
     <div class="body">{{ trial.body|safe }}</div>
 </details>

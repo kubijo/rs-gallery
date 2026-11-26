@@ -53,12 +53,19 @@ for verdict in passed failed; do
     ran=$(grep -oE "[0-9]+ $verdict" <<<"$tests" | grep -oE '[0-9]+' || echo none)
     kept=$(find "$out/tests/app_gallery/results-wgpu" -mindepth 2 -name '*.json' -exec jq -r .verdict {} + \
         | grep -cx "$verdict" || true)
-    reported=$({ grep -oE "<(details|span) class=\"(plain )?trial $verdict\"" "$out/tests/index.html" || true; } | wc -l)
+    reported=$({ grep -oE "<(details|span) class=\"(plain )?trial ${verdict}[ \"]" "$out/tests/index.html" || true; } | wc -l)
     if [ "$kept" != "$ran" ] || [ "$reported" != "$ran" ]; then
         echo "demo-plays: $ran tests $verdict; results of $kept, $reported in the report" >&2
         exit 1
     fi
 done
+
+# The one screenshot within its budget passed, and the report says it was tolerated.
+tolerated=$({ grep -oE '<details class="trial passed tolerated"' "$out/tests/index.html" || true; } | wc -l)
+if [ "$tolerated" != 1 ]; then
+    echo "demo-plays: expected one test tolerated in the report, found $tolerated" >&2
+    exit 1
+fi
 
 # A panic the play catches is reported at its own line, and is no end of the process.
 if grep -q 'panicked after it was drawn' <<<"$tests" \

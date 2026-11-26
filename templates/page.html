@@ -25,6 +25,10 @@
                 {% endif %}
                 <input type="radio" name="show" id="show-passed">
                 <label for="show-passed" class="passed">Passed <b>{{ passed }}</b></label>
+                {% if tolerated > 0 %}
+                    <input type="radio" name="show" id="show-tolerated">
+                    <label for="show-tolerated" class="tolerated">Tolerated <b>{{ tolerated }}</b></label>
+                {% endif %}
                 {% if earlier > 0 %}
                     <input type="radio" name="show" id="show-earlier">
                     <label for="show-earlier">Not run <b>{{ earlier }}</b></label>

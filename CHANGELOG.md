@@ -78,7 +78,8 @@ so a minor release may carry a breaking change.
   and leaves `.new.png` and `.diff.png` beside it; `UPDATE_SNAPSHOTS=1` takes the new one. `gallery.toml`'s
   `[snapshots]` sets the budget, `threshold` and `tolerance`, per renderer too, and
   `Screenshot::named("saved").tolerance(400)` per check. A capture that runs the play compares nothing and logs the
-  check as skipped.
+  check as skipped. One that passes with pixels differing within its budget is logged as tolerated, `≈`, saying how many
+  differ; the HTML report marks its test and has a filter for them.
 
 - **Catalog tests compare what a scene says.** `to_match_accesskit_snapshot("saved")`, on `p.expect(Canvas)` or on one
   widget with what is inside it, compares the accessibility tree with `saved.accesskit.json`, in the shape

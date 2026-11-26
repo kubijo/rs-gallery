@@ -86,8 +86,6 @@ past a handful of images, and a structural target beside the pixel one.
   pointer ring outlines a cursor already drawn. Shown only while a button is held, the ring would mark presses alone.
 - [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one
   run reports every check that failed. The log already keeps every check; what is missing is a play that outlives one.
-- [ ] A screenshot within its budget passes without a word, though it may be the first of a drift. A verdict of its own,
-  *tolerated*, would show in the log and the report how many pixels of the allowed ones differ, without failing.
 - [ ] A recording's pointer jumps from widget to widget, since a gesture moves it in one frame. A glide only in the
   file, as `hold` pauses only there: `--record-cursor [EASING]`, off by default, adds frames between the pointer's last
   place and the gesture's target while the scene's frame stays still, then the gesture runs as before. The play draws

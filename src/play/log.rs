@@ -41,6 +41,9 @@ pub(crate) enum What {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Outcome {
     Passed,
+    /// A screenshot check passed though some pixels differ, within its budget:
+    /// a drift that may be starting, said so it is seen.
+    Tolerated,
     Failed,
     /// A snapshot check in a capture, which compares none.
     Skipped,

@@ -278,6 +278,15 @@ fn differs_from_its_reference(p: &mut Play) -> PlayResult {
     p.expect(Canvas).to_match_screenshot("one task")
 }
 
+/// Passes, tolerated: its reference is the altered one above,
+/// and its budget allows more pixels than differ.
+#[play(todo)]
+fn tolerates_what_its_budget_allows(p: &mut Play) -> PlayResult {
+    add(p, "Write docs")?;
+    p.expect(Canvas)
+        .to_match_screenshot(Screenshot::named("one task").tolerance(5_000))
+}
+
 /// Fails: its reference in `__snapshots__/` was altered on purpose
 /// (a button renamed, a filter chosen, a label gone), so the diff shows each.
 #[play(todo)]

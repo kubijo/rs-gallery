@@ -28,6 +28,8 @@ struct Page<'a> {
     failed: usize,
     unfinished: usize,
     passed: usize,
+    /// Of those passed.
+    tolerated: usize,
     earlier: usize,
     catalogs: Vec<Catalog<'a>>,
 }
@@ -103,6 +105,7 @@ struct Trial<'a> {
     earlier: Option<Time>,
     took: String,
     warned: bool,
+    tolerated: bool,
     /// A [`Body`], as it was rendered when the test was over.
     body: &'a str,
 }
@@ -212,6 +215,7 @@ impl Display for LineOutcome {
         f.write_str(match self {
             Self::Unfinished => "unfinished",
             Self::Passed => "passed",
+            Self::Tolerated => "tolerated",
             Self::Failed => "failed",
             Self::Skipped => "skipped",
         })
@@ -357,6 +361,7 @@ pub(super) fn render(results: &[Reported]) -> String {
         failed,
         unfinished,
         passed: count(&|trial| trial.verdict == Verdict::Passed),
+        tolerated: count(&|trial| trial.tolerated),
         earlier: count(&|trial| trial.earlier.is_some()),
         catalogs,
     };
@@ -413,9 +418,10 @@ fn trial<'a>(catalog: &str, reported: &'a Reported, run: &str) -> Trial<'a> {
     Trial {
         id: format!("{catalog}.{}", anchor(&kept.trial)),
         classes: format!(
-            "trial {}{}",
+            "trial {}{}{}",
             kept.verdict,
-            if earlier { " earlier" } else { "" }
+            if earlier { " earlier" } else { "" },
+            if kept.tolerated { " tolerated" } else { "" }
         ),
         name: kept.play.as_deref().unwrap_or("drawn"),
         plain: kept.play.is_none() && kept.verdict == Verdict::Passed && !kept.warned,
@@ -423,6 +429,7 @@ fn trial<'a>(catalog: &str, reported: &'a Reported, run: &str) -> Trial<'a> {
         earlier: earlier.then(|| kept.at.into()),
         took: took(kept.took_ms),
         warned: kept.warned,
+        tolerated: kept.tolerated,
         body: &reported.body,
     }
 }
@@ -534,6 +541,7 @@ mod tests {
                 verdict,
                 took_ms: 0,
                 warned: false,
+                tolerated: false,
             },
             failure: None,
             warnings: Vec::new(),
@@ -876,6 +884,37 @@ mod tests {
         let skipped = found(LineOutcome::Skipped);
         assert!(skipped.contains("not compared"), "{skipped}");
         assert!(!skipped.contains("got not compared"), "{skipped}");
+    }
+
+    #[test]
+    fn a_tolerated_check_is_marked_says_what_differed_and_has_its_test_counted_apart() {
+        let mut line = logged(LineOutcome::Tolerated);
+        line.found = Some("12 pixels differ, 50 allowed".to_owned());
+        let mut played = stored("plays", "play::plays::Todo::adds", Verdict::Passed);
+        played.log.push(line);
+        played.kept.tolerated = true;
+        let page = render(&[
+            played,
+            stored("plays", "smoke::plays::Todo", Verdict::Passed),
+        ]);
+        assert!(
+            page.contains("<span class=\"found\">12 pixels differ, 50 allowed</span>"),
+            "{page}"
+        );
+        assert!(page.contains("<li class=\"check tolerated\""), "{page}");
+        let summary = between(&page, "<summary>", "</summary>");
+        assert!(summary.contains(">tolerated</span>"), "{summary}");
+        assert_eq!(filter(&page, "tolerated"), 1);
+        assert_eq!(
+            filter(&page, "passed"),
+            2,
+            "a tolerated test passed all the same"
+        );
+        let untouched = render(&[stored("plays", "smoke::plays::Todo", Verdict::Passed)]);
+        assert!(
+            !untouched.contains("id=\"show-tolerated\""),
+            "no filter for none"
+        );
     }
 
     #[test]

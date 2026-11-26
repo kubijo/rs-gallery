@@ -78,6 +78,8 @@ fn greets(p: &mut Play<'_>) -> PlayResult {
 /// One test of a play, references kept in its directory's `refs`.
 struct Judged {
     passed: bool,
+    /// What the log says of the check.
+    outcome: Option<Outcome>,
     /// The panel a failure prints.
     panel: String,
     /// The play's last snapshot check.
@@ -132,18 +134,19 @@ fn judge_filmed(
         &snapshots,
         films,
     );
-    let (check, frames) = log
+    let (check, frames, logged) = log
         .into_iter()
         .rev()
         .find_map(|entry| match entry.what {
             What::Check(check) if check.matcher.starts_with("to_match_") => {
-                Some((*check, entry.frames.len()))
+                Some((*check, entry.frames.len(), entry.outcome))
             }
             _ => None,
         })
         .expect("a snapshot check");
     Judged {
         passed: outcome.is_ok(),
+        outcome: logged,
         panel: outcome
             .err()
             .map(|failure| failure.plain())
@@ -369,6 +372,26 @@ fn a_changed_canvas_fails_with_its_diff_and_passes_within_the_budget() {
 }
 
 #[test]
+fn a_screenshot_within_its_budget_is_tolerated_saying_how_much_of_it_differs() {
+    let dir = scratch("screenshot-tolerated");
+    take(red, greets, &dir);
+    let lenient = Snapshots {
+        tolerance: 5_000,
+        ..Snapshots::default()
+    };
+    let within = judge(blue, greets, &dir, lenient.clone());
+    assert!(within.passed, "{}", within.panel);
+    assert_eq!(within.outcome, Some(Outcome::Tolerated));
+    assert!(
+        within.actual().ends_with("pixels differ, 5000 allowed"),
+        "{}",
+        within.actual()
+    );
+    let same = judge(red, greets, &dir, lenient);
+    assert_eq!(same.outcome, Some(Outcome::Passed), "{}", same.actual());
+}
+
+#[test]
 fn a_check_of_its_own_overrides_the_runs_budget() {
     fn lenient(p: &mut Play<'_>) -> PlayResult {
         p.expect(Canvas)
@@ -388,6 +411,11 @@ fn a_check_of_its_own_overrides_the_runs_budget() {
     let near = judge(grey_125, greets, &dir, Snapshots::default());
     assert!(near.passed, "{}", near.panel);
     assert_eq!(near.actual(), "no pixel differs past the threshold");
+    assert_eq!(
+        near.outcome,
+        Some(Outcome::Passed),
+        "a difference under the threshold takes none of the budget"
+    );
     let judged = judge(grey_125, exact, &dir, Snapshots::default());
     assert_eq!(judged.actual(), "1200 pixels differ, 0 allowed");
 }

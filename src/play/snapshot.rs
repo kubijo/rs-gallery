@@ -179,6 +179,7 @@ impl Asked {
         }
         let outcome = match look.verdict {
             Verdict::NotCompared => Outcome::Skipped,
+            Verdict::Alike { differing, .. } if differing > 0 && !taken => Outcome::Tolerated,
             ref verdict => (verdict.passes() || taken).into(),
         };
         let nothing_matched = look.verdict == Verdict::Unmatched(Unmatched::Nothing);

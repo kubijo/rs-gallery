@@ -550,6 +550,10 @@ A pixel that differs only as antialiasing does is not counted, and is yellow in 
 pixel. A failure says what the comparison came to, `312 pixels differ, 400 allowed`, and lists the reference, what was
 seen and the diff.
 
+A check that passes with pixels differing, within its budget, is *tolerated*: it passes, and says so, marked `≈` with
+how many differ, in the terminal, the JSON report and the HTML report, whose filter picks out the tests it passed. A
+drift that is starting shows before it fails.
+
 ### Comparing what a scene says
 
 An AccessKit snapshot compares the accessibility tree instead: what the scene says rather than how it is drawn. Colours,

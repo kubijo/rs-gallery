@@ -286,7 +286,7 @@ struct PlayReport<'a> {
 
 /// One thing a play did: a step, a gesture or a check, in the order they began.
 #[derive(serde::Serialize)]
-struct EntryReport<'a> {
+pub(super) struct EntryReport<'a> {
     #[serde(flatten)]
     what: WhatReport<'a>,
     /// How many steps were open around it.
@@ -344,7 +344,7 @@ impl<'a> CheckReport<'a> {
 }
 
 impl<'a> EntryReport<'a> {
-    fn of(entry: &'a Entry) -> Self {
+    pub(super) fn of(entry: &'a Entry) -> Self {
         Self {
             what: match &entry.what {
                 What::Step { label, path } => WhatReport::Step { label, path },
@@ -359,6 +359,7 @@ impl<'a> EntryReport<'a> {
                 .map(|at| format!("{}:{}:{}", at.file, at.line, at.column)),
             outcome: entry.outcome.map(|outcome| match outcome {
                 Outcome::Passed => "passed",
+                Outcome::Tolerated => "tolerated",
                 Outcome::Failed => "failed",
                 Outcome::Skipped => "skipped",
             }),
@@ -495,6 +496,7 @@ pub(super) fn step_list(shot: &str, play: &str, log: &[Entry], failed: bool) -> 
     let aside = Style::new().dimmed();
     let passed = paint(Style::new().fg_color(Some(AnsiColor::Green.into())), "✓");
     let broke = paint(Style::new().fg_color(Some(AnsiColor::Red.into())), "×");
+    let tolerated = paint(Style::new().fg_color(Some(AnsiColor::Yellow.into())), "≈");
     let running = paint(aside, "…");
     let skipped = paint(aside, "–");
     let lines: Vec<(String, &Entry)> = log
@@ -528,6 +530,7 @@ pub(super) fn step_list(shot: &str, play: &str, log: &[Entry], failed: bool) -> 
         let frames = entry.frames.len();
         let mark = match entry.outcome {
             Some(Outcome::Passed) => &passed,
+            Some(Outcome::Tolerated) => &tolerated,
             Some(Outcome::Failed) => &broke,
             Some(Outcome::Skipped) => &skipped,
             None => &running,
@@ -566,7 +569,9 @@ fn line(entry: &Entry) -> String {
                 Some(Outcome::Failed) => {
                     line.push_str(&paint(aside, &format!("  got {actual}")));
                 }
-                Some(Outcome::Skipped) => line.push_str(&paint(aside, &format!("  {actual}"))),
+                Some(Outcome::Skipped | Outcome::Tolerated) => {
+                    line.push_str(&paint(aside, &format!("  {actual}")));
+                }
                 Some(Outcome::Passed) | None => {}
             }
             line
