@@ -426,7 +426,8 @@ pub(super) fn shoot_with_globals(
                     } else {
                         "failed here"
                     };
-                    report = report.source_at(&at.file, at.line, at.column, label);
+                    let file = play_file(&at.file).map_or_else(|| at.file.clone(), String::from);
+                    report = report.source_at(file, at.line, at.column, label);
                 }
                 if let Some(dir) = &trace_dir
                     && run.log.iter().any(|entry| entry.trace.is_some())

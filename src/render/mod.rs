@@ -63,8 +63,8 @@ use self::log_view::LogView;
 pub(crate) use self::overlay::Corner;
 #[cfg(test)]
 pub(crate) use self::record::RENDERED;
-use self::snapshot::{Looks, Seen, component, play_path};
-pub(crate) use self::snapshot::{Snapshots, Update};
+use self::snapshot::{Looks, Seen, component, play_file, play_path};
+pub(crate) use self::snapshot::{Snapshots, Update, built_for};
 use self::{
     overlay::{InputLayer, InputLog, InputOverlay, Shown},
     play_driver::*,

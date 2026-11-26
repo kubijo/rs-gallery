@@ -77,9 +77,6 @@ past a handful of images, and a structural target beside the pixel one.
   the scene's panics, raised by the dylib's `std`, and abort on those instead.
 - [ ] A play's pointer gesture aims at a widget's centre even when that lies outside the visible canvas, e.g. a row
   scrolled away, so it lands on nothing. Catching it needs the canvas's visible rect through the `PlayDriver`.
-- [ ] A play failure's source snippet reads the file at the path `Location::file` gives, relative to the workspace the
-  play was built in. Run from elsewhere it can miss and the report names the line instead, or show an unrelated file
-  that sits at the same relative path.
 - [ ] egui_kittest's `Harness::render` paints its own cursor triangle at the hover position, so the input overlay's
   pointer ring outlines a cursor already drawn. Shown only while a button is held, the ring would mark presses alone.
 - [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one

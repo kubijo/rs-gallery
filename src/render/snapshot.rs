@@ -5,6 +5,7 @@ use std::{
     collections::HashSet,
     fs::File,
     io::{BufWriter, Write as _},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -397,13 +398,7 @@ fn reference_path(
     }
     let mut path = match dir {
         Some(dir) => dir.to_owned(),
-        None => {
-            let here =
-                std::env::current_dir().map_err(|e| format!("find the working directory: {e}"))?;
-            let here = Utf8PathBuf::from_path_buf(here)
-                .map_err(|dir| format!("the working directory `{}` is not UTF-8", dir.display()))?;
-            play_dir(ask.file, &here)?.join(gallery_build::SNAPSHOTS)
-        }
+        None => play_dir(ask.file, &working_dir()?)?.join(gallery_build::SNAPSHOTS),
     };
     path.push(play_path(ask.module_path, ask.play)?);
     path.push(match ask.of {
@@ -433,26 +428,64 @@ pub(super) fn component(name: &str) -> Result<&str, String> {
     Ok(name)
 }
 
-/// The directory of `file`, as `file!()` gives it: absolute for a scene file,
-/// relative to the workspace for a module, where a member's tests run from below.
-fn play_dir(file: &str, here: &Utf8Path) -> Result<Utf8PathBuf, String> {
-    // The workspace's first: a member may have a file of the same path in its own directory.
-    workspace_of(here)
+/// The directory of the crate the scenes were built for, recorded once a process.
+static BUILT_FOR: OnceLock<Utf8PathBuf> = OnceLock::new();
+
+/// Look for plays' files from `manifest_dir`, the crate the scenes
+/// are built for, rather than from wherever the run started.
+pub(crate) fn built_for(manifest_dir: &Utf8Path) {
+    // One catalog a process: a second call names the same crate.
+    let _ = BUILT_FOR.set(manifest_dir.to_owned());
+}
+
+/// Where `file`, as a play's `file!()` gives it, is.
+pub(super) fn play_file(file: &str) -> Option<Utf8PathBuf> {
+    find_play_file(
+        file,
+        BUILT_FOR.get().map(Utf8PathBuf::as_path),
+        &working_dir().ok()?,
+    )
+}
+
+/// Where `file` is: absolute for a scene file; relative, for a module,
+/// to the workspace of the crate `built_for`, or with none recorded
+/// to that of `here`, a member's tests running from below.
+fn find_play_file(
+    file: &str,
+    built_for: Option<&Utf8Path>,
+    here: &Utf8Path,
+) -> Option<Utf8PathBuf> {
+    let from = built_for.unwrap_or(here);
+    // The workspace's first: a member may have a file
+    // of the same path in its own directory.
+    workspace_of(from)
         .into_iter()
-        .chain(here.ancestors().map(Utf8Path::to_owned))
+        .chain(from.ancestors().map(Utf8Path::to_owned))
         .map(|dir| dir.join(file))
         .find(|found| found.is_file())
+}
+
+/// The directory of `file`, a play's, as [`find_play_file`] finds it from `here`.
+fn play_dir(file: &str, here: &Utf8Path) -> Result<Utf8PathBuf, String> {
+    find_play_file(file, BUILT_FOR.get().map(Utf8PathBuf::as_path), here)
         .and_then(|found| found.parent().map(Utf8Path::to_owned))
         .ok_or_else(|| {
+            let from = BUILT_FOR.get().map_or(here, Utf8PathBuf::as_path);
             format!(
-                "the play's file `{file}` is not in `{here}` or above it, to keep references beside"
+                "the play's file `{file}` is not in `{from}` or above it, to keep references beside"
             )
         })
 }
 
+fn working_dir() -> Result<Utf8PathBuf, String> {
+    let here = std::env::current_dir().map_err(|e| format!("find the working directory: {e}"))?;
+    Utf8PathBuf::from_path_buf(here)
+        .map_err(|dir| format!("the working directory `{}` is not UTF-8", dir.display()))
+}
+
 /// The root of the workspace the package around `here` is in, as cargo finds it:
-/// from the package up, the first directory whose `[workspace]` does not exclude the package,
-/// or the one a `package.workspace` names on the way.
+/// from the package up, the first directory whose `[workspace]` does not exclude
+/// the package, or the one a `package.workspace` names on the way.
 fn workspace_of(here: &Utf8Path) -> Option<Utf8PathBuf> {
     let manifest = |dir: &Utf8Path| {
         let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
@@ -677,6 +710,29 @@ mod tests {
         );
         let lost = play_dir("nowhere/lost.scene.rs", workspace).expect_err("no such file");
         assert!(lost.contains("nowhere/lost.scene.rs"), "{lost}");
+    }
+
+    #[test]
+    fn a_plays_relative_file_is_found_from_the_crate_built_for_wherever_the_run_started() {
+        let scratch = tempfile::tempdir().expect("a directory");
+        let root = Utf8Path::from_path(scratch.path()).expect("UTF-8");
+        for (dir, file) in [("built", "src/plays.rs"), ("elsewhere", "src/plays.rs")] {
+            std::fs::create_dir_all(root.join(dir).join("src")).expect("made");
+            std::fs::write(root.join(dir).join(file), dir).expect("written");
+        }
+        std::fs::write(root.join("built/Cargo.toml"), "[package]").expect("written");
+        let built = root.join("built");
+        assert_eq!(
+            find_play_file("src/plays.rs", Some(&built), &root.join("elsewhere")),
+            Some(built.join("src/plays.rs")),
+            "the crate's file, not the one at the same path where the run started"
+        );
+        assert_eq!(
+            find_play_file("src/plays.rs", None, &root.join("elsewhere")),
+            Some(root.join("elsewhere/src/plays.rs")),
+            "with no crate recorded, from where the run started"
+        );
+        assert_eq!(find_play_file("src/gone.rs", Some(&built), &built), None);
     }
 
     #[test]

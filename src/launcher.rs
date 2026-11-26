@@ -63,6 +63,7 @@ pub fn launch(
     setup: impl Fn(&egui::Context) + 'static,
 ) -> eframe::Result {
     let cli = Cli::parse();
+    crate::render::built_for(Utf8Path::new(manifest_dir));
     anstream::eprintln!("{}", version_banner());
     // Before the config is read, so a stale or broken `gallery.toml`
     // can't stop you finding out that the pinned version is the reason.
