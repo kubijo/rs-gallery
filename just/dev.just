@@ -7,12 +7,14 @@ import 'common.just'
 format *args:
     @nix run .#format -- {{ args }}
 
-# Validate the crate: formatting, repo lint, clippy, tests under coverage, and plays through a real scenes dylib.
+# Validate the crate: formatting, repo lint, clippy, tests under coverage,
+# plays through a real scenes dylib, and recordings on both backends.
 validate:
     @just in-shell validate
     @just demo::plays
+    @just demo::recordings
     @if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then on='{{ BOLD + GREEN }}' off='{{ NORMAL }}'; fi; \
-        printf '\n%s✓ validate passed%s: formatting, lint, clippy, tests and the demo plays\n' "${on:-}" "${off:-}" >&2; \
+        printf '\n%s✓ validate passed%s: formatting, lint, clippy, tests, the demo plays and recordings\n' "${on:-}" "${off:-}" >&2; \
         printf '  the failures shown above are the plays meant to fail, and each failed as meant\n' >&2
 
 # Take the current renders as the committed references in `tests/snapshots/` — look at them first.

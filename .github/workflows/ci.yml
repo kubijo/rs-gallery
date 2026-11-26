@@ -48,8 +48,12 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
+      # Both backends, each tour in every video format;
+      # femtovg draws through glow, on the software GL.
+      - run: nix develop --command with-software-gl just demo::recordings
       - run: nix develop --command cargo llvm-cov report | tee coverage.txt
-      # Surface coverage in the UI (run summary + sticky PR comment) — self-contained, no third party.
+      # Surface coverage in the UI (run summary + sticky PR comment)
+      # — self-contained, no third party.
       - env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}

@@ -96,7 +96,8 @@
           softwareVulkanIcd = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json";
           pythonTools = pythonToolsFor pkgs;
           toolPkgs = nix-tools.lib.toolPkgsFor system;
-          test = import ./nix/test.nix { inherit pkgs; };
+          softwareGl = import ./nix/software-gl.nix { inherit pkgs; };
+          test = import ./nix/test.nix { inherit pkgs softwareGl; };
 
           project = nix-tools.lib.configure {
             inherit system;
@@ -222,6 +223,7 @@
               pkgs.cargo-nextest
               pkgs.cargo-llvm-cov
               test
+              softwareGl
               pkgs.cargo-outdated
               pkgs.cargo-deny
               pkgs.cargo-generate

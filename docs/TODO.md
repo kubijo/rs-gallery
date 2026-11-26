@@ -80,8 +80,6 @@ past a handful of images, and a structural target beside the pixel one.
 - [ ] A play failure's source snippet reads the file at the path `Location::file` gives, relative to the workspace the
   play was built in. Run from elsewhere it can miss and the report names the line instead, or show an unrelated file
   that sits at the same relative path.
-- [ ] `just demo::recordings` runs neither in `just dev::validate` nor in CI, so femtovg and MP4 recordings are only
-  unit-tested there. CI needs the software EGL `gallery-test` carries made available to the demo scripts first.
 - [ ] egui_kittest's `Harness::render` paints its own cursor triangle at the hover position, so the input overlay's
   pointer ring outlines a cursor already drawn. Shown only while a button is held, the ring would mark presses alone.
 - [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one
