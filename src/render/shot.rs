@@ -673,17 +673,21 @@ pub(super) fn with_offer(report: Diagnostic, kept: Option<&Kept>) -> Diagnostic 
     }
 }
 
-/// A snapshot's diff in its colours, changed lines `tinted` or not as
-/// [`painted`](crate::diagnostic::diff::painted) has them, cut where it would fill the screen.
+/// A snapshot's diff in its colours, changed lines `tinted`
+/// or not as [`painted`](crate::diagnostic::diff::painted)
+/// has them, cut where it would fill the screen.
+///
+/// It is painted whole before the cut, so its lines
+/// pair up as they do in the report.
 pub(super) fn diff_lines(diff: &str, tinted: bool) -> String {
     const MOST: usize = 40;
-    let shown_lines: Vec<String> = diff.lines().take(MOST).map(shown).collect();
+    let shown_lines: Vec<String> = diff.lines().map(shown).collect();
     let painted = crate::diagnostic::diff::painted(
         &shown_lines.join("\n"),
         crate::diagnostic::diff::SNAPSHOTS,
         tinted,
     );
-    let mut lines = vec![painted];
+    let mut lines: Vec<String> = painted.lines().take(MOST).map(str::to_owned).collect();
     match diff.lines().count().saturating_sub(MOST) {
         0 => {}
         1 => lines.push("… and 1 more line, in the diff".to_owned()),

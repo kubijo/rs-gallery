@@ -188,6 +188,22 @@ fn a_diff_is_coloured_cut_where_it_would_fill_the_screen_and_acts_on_no_terminal
 }
 
 #[test]
+fn lines_cut_off_a_diff_still_count_in_how_its_lines_pair() {
+    // Cut at 40, one removed line meets one of three added in its place,
+    // which as a whole are changed whole, as the report shows them.
+    let diff = format!(
+        "{}-  \"on\": true\n{}",
+        " {\n".repeat(39),
+        "+  \"on\": false\n".repeat(3)
+    );
+    let shown = diff_lines(&diff, true);
+    assert!(
+        !shown.contains("48;5;88m") && !shown.contains("48;5;28m"),
+        "{shown:?}"
+    );
+}
+
+#[test]
 fn a_diffs_backticks_are_its_own() {
     let kept = Kept {
         diff: Some(" `name`\n".to_owned()),

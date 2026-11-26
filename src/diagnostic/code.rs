@@ -1,6 +1,9 @@
 //! The source a failure points at, coloured by what each of its tokens is.
 
-use std::ops::Range;
+use std::{
+    ops::Range,
+    sync::{Arc, LazyLock},
+};
 
 use anstyle_parse::{DefaultCharAccumulator, Params, Parser, Perform};
 use miette::{
@@ -97,6 +100,10 @@ impl Kind {
     }
 }
 
+/// The grammars, each compiled when first used:
+/// compiling one is most of what highlighting costs.
+static GRAMMARS: LazyLock<Arc<arborium::GrammarStore>> = LazyLock::new(Arc::default);
+
 /// A file's tokens, line by line.
 pub(super) struct Code {
     lines: Vec<Line>,
@@ -117,7 +124,7 @@ impl Code {
 
     /// The tokens of `text`, written in `language` as arborium names it.
     pub(super) fn in_language(language: &str, text: &str) -> Option<Self> {
-        let spans = arborium::Highlighter::new()
+        let spans = arborium::Highlighter::with_store(Arc::clone(&GRAMMARS))
             .highlight_spans(language, text)
             .ok()?;
         let tokens = arborium_highlight::spans_to_flat_tokens(text, spans);
@@ -264,8 +271,10 @@ impl Perform for Splitter {
         self.split.text.push(c);
     }
 
+    /// Keeps the controls `anstream`'s stripping keeps,
+    /// so the text is what `plain` reads.
     fn execute(&mut self, byte: u8) {
-        if matches!(byte, b'\n' | b'\t') {
+        if matches!(byte, b'\t' | b'\n' | b'\x0c' | b'\r') {
             self.split.text.push(char::from(byte));
         }
     }

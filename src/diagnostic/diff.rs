@@ -5,7 +5,6 @@ use std::ops::Range;
 
 use owo_colors::{AnsiColors, Style, XtermColors};
 use similar::{ChangeTag, TextDiff};
-use unicode_width::UnicodeWidthStr as _;
 
 use super::code::{Code, Kind};
 
@@ -62,11 +61,13 @@ pub(crate) fn lines<'a>(diff: &'a str, language: &str) -> Vec<Line<'a>> {
 
 /// `diff` of a text in `language` for a terminal, its tokens in their colours.
 ///
-/// A changed line is `tinted` where the terminal shows 256 colours: behind a tint
-/// as wide as the widest line, the words that differ behind a stronger one.
+/// A changed line is `tinted` where the terminal shows 256 colours:
+/// its text behind a tint, the words that differ behind a stronger one.
 /// Without, it is red or green, so it stands out from the tokens' colours.
+///
+/// The tint stops where the text does: padding to a common width would be there
+/// in the plain text too, and break up where the terminal wraps a line.
 pub(crate) fn painted(diff: &str, language: &str, tinted: bool) -> String {
-    let width = diff.lines().map(str::width).max().unwrap_or(0);
     let lines = lines(diff, language).into_iter().zip(diff.lines());
     let painted = lines.map(|(line, written)| {
         // Dark reds and greens of the 256, for the line and for the words that differ.
@@ -93,8 +94,7 @@ pub(crate) fn painted(diff: &str, language: &str, tinted: bool) -> String {
             let tint = if piece.changed { word_tint } else { line_tint };
             painted.push_str(&on(tint, style).style(piece.text).to_string());
         }
-        let rest = " ".repeat(width - written.width());
-        painted + &on(line_tint, Style::new()).style(rest).to_string()
+        painted
     });
     painted.collect::<Vec<_>>().join("\n")
 }
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_line_is_tinted_as_wide_as_the_widest_and_its_changed_words_more() {
+    fn a_changed_line_is_tinted_its_changed_words_more_and_its_text_stays_as_written() {
         let diff = " {\n-  \"on\": true\n+  \"on\": false\n";
         let tinted = painted(diff, SNAPSHOTS, true);
         let lines: Vec<&str> = tinted.lines().collect();
@@ -264,14 +264,10 @@ mod tests {
         );
         assert!(lines[1].contains("48;5;88mtrue"), "{:?}", lines[1]);
         assert!(lines[2].contains("48;5;28mfalse"), "{:?}", lines[2]);
-        assert!(
-            lines[1].ends_with("48;5;52m \u{1b}[0m"),
-            "padded to the widest: {:?}",
-            lines[1]
-        );
         assert_eq!(
             crate::style::plain(&tinted),
-            diff.trim_end().replace("true", "true ")
+            diff.trim_end(),
+            "nothing added to the text, so a pipe reads it as written"
         );
     }
 

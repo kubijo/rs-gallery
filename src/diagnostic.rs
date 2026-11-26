@@ -617,6 +617,13 @@ mod tests {
     }
 
     #[test]
+    fn beside_the_recordings_the_controls_plain_keeps_are_kept_too() {
+        let diagnostic =
+            Diagnostic::new("it failed").cause("50%\r100%, then\x0ca new page\tand a tab");
+        assert_eq!(diagnostic.beside_recordings().text, diagnostic.plain());
+    }
+
+    #[test]
     fn a_source_that_cannot_be_read_is_named_beside_the_recordings_too() {
         let diagnostic = Diagnostic::new("it failed").source_at("gone.rs", 3, 1, "here");
         let beside = diagnostic.beside_recordings();
