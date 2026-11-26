@@ -11,6 +11,7 @@ use jiff::Timestamp;
 use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use super::{File, Kind, Line, LineOutcome, Stored, Taking, Verdict, output::Reported};
+use crate::diagnostic::{Highlighted, diff};
 
 /// What every report has near its start, and no other page.
 pub(super) const TITLE_ENDS: &str = "· catalog tests</title>";
@@ -114,7 +115,13 @@ struct Body<'a> {
     warnings: &'a [String],
     video: Option<String>,
     lines: Vec<LogLine>,
-    failure: Option<&'a str>,
+    failure: Option<Vec<Piece>>,
+}
+
+/// Text of a failure or a diff, and the classes saying what it is, if anything.
+struct Piece {
+    text: String,
+    class: Option<String>,
 }
 
 struct LogLine {
@@ -161,7 +168,8 @@ struct Link {
 
 struct DiffLine {
     kind: Difference,
-    text: String,
+    sign: String,
+    pieces: Vec<Piece>,
 }
 
 enum Difference {
@@ -252,9 +260,63 @@ pub(super) fn body(stored: &Stored) -> String {
         warnings: &stored.warnings,
         lines: log.map(|logged| line(logged, video.as_deref())).collect(),
         video,
-        failure: stored.failure.as_deref(),
+        failure: stored.failure.as_ref().map(pieces),
     };
     body.render().expect("BUG: a template writes to a string")
+}
+
+/// `failure` cut at its tokens, or whole where they don't fit it, as in a result edited by hand.
+fn pieces(failure: &Highlighted) -> Vec<Piece> {
+    let text = failure.text.as_str();
+    let plain = |text: &str| Piece {
+        text: text.to_owned(),
+        class: None,
+    };
+    let mut pieces = Vec::with_capacity(failure.tokens.len() * 2 + 1);
+    let mut at = 0;
+    for token in &failure.tokens {
+        let (Some(before), Some(inside)) =
+            (text.get(at..token.start), text.get(token.start..token.end))
+        else {
+            return vec![plain(text)];
+        };
+        pieces.push(plain(before));
+        pieces.push(Piece {
+            text: inside.to_owned(),
+            class: Some(token.kind.class().to_owned()),
+        });
+        at = token.end;
+    }
+    pieces.push(plain(&text[at..]));
+    pieces
+}
+
+/// The lines of a snapshot's `diff`, each piece classed by its token and whether its words changed.
+fn diff_lines(diff: &str) -> Vec<DiffLine> {
+    let lines = diff::lines(diff, diff::SNAPSHOTS).into_iter();
+    lines
+        .map(|line| DiffLine {
+            kind: match line.change {
+                diff::Change::Removed => Difference::Removed,
+                diff::Change::Added => Difference::Added,
+                diff::Change::Kept | diff::Change::Elided => Difference::None,
+            },
+            sign: line.sign.to_owned(),
+            pieces: line
+                .pieces
+                .iter()
+                .map(|piece| {
+                    let token = piece.kind.map(|kind| kind.class());
+                    let changed = piece.changed.then_some("changed");
+                    let classes: Vec<&str> = token.into_iter().chain(changed).collect();
+                    Piece {
+                        text: piece.text.to_owned(),
+                        class: (!classes.is_empty()).then(|| classes.join(" ")),
+                    }
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// The report of `results`.
@@ -379,7 +441,6 @@ fn line(line: &Line, video: Option<&str>) -> LogLine {
             })
             .collect()
     };
-    let diff = line.diff.as_deref().unwrap_or_default().lines();
     LogLine {
         depth: line.depth,
         kind: line.kind,
@@ -395,16 +456,7 @@ fn line(line: &Line, video: Option<&str>) -> LogLine {
         seek: video.zip(line.seek).map(|(video, at)| Seek::new(video, at)),
         images: links(images),
         texts: links(texts),
-        diff: diff
-            .map(|line| DiffLine {
-                kind: match line.chars().next() {
-                    Some('-') => Difference::Removed,
-                    Some('+') => Difference::Added,
-                    _ => Difference::None,
-                },
-                text: line.to_owned(),
-            })
-            .collect(),
+        diff: diff_lines(line.diff.as_deref().unwrap_or_default()),
         taking: line.acceptance,
     }
 }
@@ -454,6 +506,8 @@ fn took(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use camino::Utf8PathBuf;
+
+    use crate::diagnostic::{Highlighted, Kind as TokenKind, Token};
 
     use super::{
         super::{Kept, VERSION},
@@ -833,6 +887,93 @@ mod tests {
         ] {
             let page = page_of(logged(outcome));
             assert_eq!(page.contains("plays.scene.rs:7"), says, "{outcome:?}");
+        }
+    }
+
+    /// What the page shows of a test that failed with `text` and its `tokens`.
+    fn failure_shown(text: &str, tokens: Vec<Token>) -> String {
+        let mut failed = stored("plays", "play::plays::Todo::adds", Verdict::Failed);
+        failed.failure = Some(Highlighted {
+            text: text.to_owned(),
+            tokens,
+        });
+        let page = render(&[failed]);
+        between(&page, "<pre class=\"failure\">", "</pre>").to_owned()
+    }
+
+    fn token(start: usize, end: usize, kind: TokenKind) -> Token {
+        Token { start, end, kind }
+    }
+
+    #[test]
+    fn a_failures_code_is_coloured_by_what_each_token_is_and_escaped() {
+        let text = "× it failed\n3 │ let x = \"<b>\"; // é";
+        let at = |part: &str| text.find(part).expect("in the text");
+        let shown = failure_shown(
+            text,
+            vec![
+                token(at("let"), at("let") + 3, TokenKind::Keyword),
+                token(at("\"<b>\""), at(";"), TokenKind::String),
+                token(at("//"), text.len(), TokenKind::Comment),
+            ],
+        );
+        assert!(
+            shown.starts_with("× it failed\n3 │ <span class=\"keyword\">let</span> x = "),
+            "{shown}"
+        );
+        let string = between(&shown, "<span class=\"string\">", "</span>");
+        assert!(
+            string.contains('b') && !string.contains(['<', '"']),
+            "{string}"
+        );
+        assert!(
+            shown.ends_with("<span class=\"comment\">// é</span>"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_snapshots_diff_is_classed_by_its_tokens_and_the_words_that_changed() {
+        let mut line = logged(LineOutcome::Failed);
+        line.diff = Some(" {\n-  \"on\": \"<no>\"\n+  \"on\": \"yes\"\n…\n".to_owned());
+        let page = page_of(line);
+        let diff = between(&page, "<pre class=\"diff\">", "</pre>");
+        let lines: Vec<&str> = diff.split("<span class=\"").skip(1).collect();
+        assert!(
+            diff.starts_with("<span class=\"alike\"><span class=\"sign\"> </span>{</span>"),
+            "{diff}"
+        );
+        assert!(
+            diff.contains("<span class=\"removed\"><span class=\"sign\">-</span>  <span class=\"string\">&#34;on&#34;</span>: <span class=\"string changed\">&#34;&#60;no&#62;&#34;</span></span>"),
+            "{lines:?}"
+        );
+        assert!(
+            diff.contains("<span class=\"string changed\">&#34;yes&#34;</span>"),
+            "{diff}"
+        );
+        assert!(
+            diff.ends_with("<span class=\"alike\"><span class=\"sign\">…</span></span>"),
+            "{diff}"
+        );
+    }
+
+    #[test]
+    fn tokens_that_do_not_fit_their_text_leave_it_plain() {
+        let text = "é let";
+        for tokens in [
+            vec![token(3, 99, TokenKind::Keyword)],
+            vec![token(1, 3, TokenKind::Keyword)],
+            vec![
+                token(3, 6, TokenKind::Keyword),
+                token(0, 2, TokenKind::Constant),
+            ],
+            vec![
+                token(3, 6, TokenKind::Keyword),
+                token(4, 6, TokenKind::Constant),
+            ],
+        ] {
+            let shown = failure_shown(text, tokens.clone());
+            assert_eq!(shown, text, "{tokens:?}");
         }
     }
 

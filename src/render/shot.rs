@@ -632,7 +632,12 @@ pub(super) fn shoot_with_globals(
 /// `report`, bound for `stream`, with what a failed snapshot check left to look at.
 pub(super) fn with_kept(mut report: Diagnostic, kept: &Kept, stream: Stream) -> Diagnostic {
     if let Some(diff) = &kept.diff {
-        report = report.cause_as_is(diff_lines(diff));
+        let stream_colours = supports_color::on_cached(match stream {
+            Stream::Stdout => supports_color::Stream::Stdout,
+            Stream::Stderr => supports_color::Stream::Stderr,
+        });
+        let tinted = stream_colours.is_some_and(|colours| colours.has_256);
+        report = report.cause_as_is(diff_lines(diff, tinted));
     }
     for attachment in &kept.attachments {
         report = report.hint(format!(
@@ -668,18 +673,17 @@ pub(super) fn with_offer(report: Diagnostic, kept: Option<&Kept>) -> Diagnostic 
     }
 }
 
-/// A diff with its lines in their colours, cut where it would fill the screen.
-pub(super) fn diff_lines(diff: &str) -> String {
+/// A snapshot's diff in its colours, changed lines `tinted` or not as
+/// [`painted`](crate::diagnostic::diff::painted) has them, cut where it would fill the screen.
+pub(super) fn diff_lines(diff: &str, tinted: bool) -> String {
     const MOST: usize = 40;
-    let coloured = |line: &str| {
-        let line = shown(line);
-        match line.chars().next() {
-            Some('-') => paint(AnsiColor::Red.on_default(), &line),
-            Some('+') => paint(AnsiColor::Green.on_default(), &line),
-            _ => line,
-        }
-    };
-    let mut lines: Vec<String> = diff.lines().take(MOST).map(coloured).collect();
+    let shown_lines: Vec<String> = diff.lines().take(MOST).map(shown).collect();
+    let painted = crate::diagnostic::diff::painted(
+        &shown_lines.join("\n"),
+        crate::diagnostic::diff::SNAPSHOTS,
+        tinted,
+    );
+    let mut lines = vec![painted];
     match diff.lines().count().saturating_sub(MOST) {
         0 => {}
         1 => lines.push("… and 1 more line, in the diff".to_owned()),

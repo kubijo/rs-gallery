@@ -57,8 +57,14 @@ openh264 = "0.9"
 muxide = { version = "0.5", default-features = false }
 glutin = { version = "0.32", default-features = false, features = ["egl"] }
 supports-hyperlinks = "3"
+supports-color = "3"
 anstyle-hyperlink = { version = "1", features = ["file"] }
 miette = { version = "7", default-features = false, features = ["fancy-no-backtrace"] }
+# Rust for sources, JSON for AccessKit snapshots: each `lang-*` feature builds a grammar's C parser.
+arborium = { version = "2.18", default-features = false, features = ["lang-rust", "lang-json"] }
+arborium-highlight = "2.18"
+owo-colors = "4"
+anstyle-parse = "1"
 textwrap = "0.16"
 comfy-table = { version = "8", features = ["custom_styling"] }
 console = "0.16"

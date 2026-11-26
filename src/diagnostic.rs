@@ -4,6 +4,9 @@
 //! them as a list rather than flattening them into a sentence.
 //! miette lays the report out, as the stream it is bound for can show it.
 
+mod code;
+pub(crate) mod diff;
+
 use std::{
     fmt,
     io::{IsTerminal as _, Write as _},
@@ -16,6 +19,10 @@ use miette::{
 };
 use textwrap::{WordSeparator, WordSplitter};
 
+pub(crate) use self::code::Highlighted;
+use self::code::{Code, Frame};
+#[cfg(test)]
+pub(crate) use self::code::{Kind, Token};
 use crate::style::{Stream, paint};
 
 /// What went wrong, why, which names were in play, and what to do about it.
@@ -132,12 +139,17 @@ impl Diagnostic {
         self.hint(format!("{gap}{hint}"))
     }
 
-    fn render(&self, handler: &dyn ReportHandler) -> String {
+    fn render(&self, handler: impl FnOnce(Tokens<'_>) -> Box<dyn ReportHandler>) -> String {
         self.render_with(handler, |_| true)
     }
 
-    /// Render it with the hints that are `shown`.
-    fn render_with(&self, handler: &dyn ReportHandler, shown: fn(&Hint) -> bool) -> String {
+    /// Render it with the hints that are `shown`,
+    /// by the `handler` made with the tokens of its source, if it reads them.
+    fn render_with(
+        &self,
+        handler: impl FnOnce(Tokens<'_>) -> Box<dyn ReportHandler>,
+        shown: fn(&Hint) -> bool,
+    ) -> String {
         struct Rendered<'a>(&'a dyn ReportHandler, &'a Report);
         impl fmt::Display for Rendered<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -173,7 +185,11 @@ impl Diagnostic {
             // The first may be set apart from one that is not shown.
             hint: (!hints.is_empty()).then(|| hints.join("\n").trim_start().to_owned()),
         };
-        Rendered(handler, &report).to_string()
+        let tokens = || {
+            let file = &self.source.as_ref()?.file;
+            Code::of(file, report.source.as_ref()?.0.inner())
+        };
+        Rendered(&*handler(&tokens), &report).to_string()
     }
 
     /// Report to stderr in a panel, opening on a blank line to stand apart from what came before.
@@ -229,7 +245,6 @@ impl Diagnostic {
         };
         let mut options = MietteHandlerOpts::new()
             .force_graphical(true)
-            .color(crate::style::coloured(stream))
             .terminal_links(supports_hyperlinks::on(stream))
             .wrap_lines(terminal)
             .break_words(false)
@@ -244,31 +259,40 @@ impl Diagnostic {
             Severity::Warning => AnsiColor::Yellow,
         };
         let edge = Style::new().dimmed().fg_color(Some(colour.into()));
-        let text = self.render(&options.build());
+        let colour = crate::style::coloured(stream);
+        let text = self.render(|tokens| terminal_handler(options, colour, tokens));
         (text.trim_end().to_owned(), edge)
     }
 
     /// The report as a pipe or a CI log sees it, unwrapped,
     /// which is what assertions elsewhere in the crate should read.
     pub(crate) fn plain(&self) -> String {
-        self.plain_with(|_| true)
+        crate::style::plain(&self.unwrapped(|_| true, false))
     }
 
-    /// As [`plain`](Self::plain), for a reader who is shown the recordings,
-    /// and may be on another machine than the paths of them.
-    pub(crate) fn beside_recordings(&self) -> String {
-        self.plain_with(|hint| !hint.of_recording)
+    /// As [`plain`](Self::plain), with the kind of each token of the source it shows,
+    /// for a reader who is shown the recordings and may be on another machine than the paths of them.
+    pub(crate) fn beside_recordings(&self) -> Highlighted {
+        Highlighted::split(&self.unwrapped(|hint| !hint.of_recording, true))
     }
 
-    fn plain_with(&self, shown: fn(&Hint) -> bool) -> String {
-        let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor())
-            .with_links(false)
-            .with_wrap_lines(false)
-            .without_syntax_highlighting();
+    /// The report unwrapped, its source `marked` by [`Frame::marked`] or plain.
+    fn unwrapped(&self, shown: fn(&Hint) -> bool, marked: bool) -> String {
+        let text = self.render_with(
+            |tokens| {
+                let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor())
+                    .with_links(false)
+                    .with_wrap_lines(false);
+                Box::new(match marked.then(tokens).flatten() {
+                    Some(code) => handler.with_syntax_highlighting(Frame::marked(code)),
+                    None => handler.without_syntax_highlighting(),
+                })
+            },
+            shown,
+        );
         // miette sets every line in by two spaces, which is margin, not content.
-        textwrap::dedent(&crate::style::plain(&self.render_with(&handler, shown)))
-            .trim_end()
-            .to_owned()
+        // It draws them before any style, so they are found with the styles still in.
+        textwrap::dedent(&text).trim_end().to_owned()
     }
 
     /// The report on one line, for a JSON field or another failure's cause.
@@ -295,6 +319,9 @@ impl Diagnostic {
             .join(" ")
     }
 }
+
+/// The tokens of the source a report shows, read from it when called.
+type Tokens<'a> = &'a dyn Fn() -> Option<Code>;
 
 /// A [`Diagnostic`] as miette reads one.
 struct Report {
@@ -370,6 +397,20 @@ impl miette::Diagnostic for Report {
             .as_ref()
             .map(|(_, span)| Box::new(std::iter::once(span.clone())) as Box<dyn Iterator<Item = _>>)
     }
+}
+
+/// A terminal's handler, in `colour` or not, colouring the source by its `tokens` if in colour.
+fn terminal_handler(
+    options: MietteHandlerOpts,
+    colour: bool,
+    tokens: Tokens<'_>,
+) -> Box<dyn ReportHandler> {
+    let options = options.color(colour);
+    let options = match colour.then(tokens).flatten() {
+        Some(code) => options.with_syntax_highlighting(Frame::coloured(code)),
+        None => options,
+    };
+    Box::new(options.build())
 }
 
 /// Every `` `name` `` in `text` styled as a name: the backticks dimmed, the name in bold.
@@ -533,6 +574,55 @@ mod tests {
             text,
             "a name stays as typed, and an unclosed backtick is left as it was"
         );
+    }
+
+    /// What miette draws for a terminal, as `for_terminal` sets it up, in colour or not.
+    fn on_a_terminal(diagnostic: &Diagnostic, colour: bool) -> String {
+        let options = MietteHandlerOpts::new().force_graphical(true);
+        diagnostic.render(|tokens| terminal_handler(options, colour, tokens))
+    }
+
+    #[test]
+    fn on_a_terminal_the_source_is_coloured_by_what_each_token_is() {
+        let at = line!();
+        let diagnostic = Diagnostic::new("it failed").source_at(file!(), at, 1, "here");
+        let coloured = on_a_terminal(&diagnostic, true);
+        assert!(coloured.contains("\u{1b}[35mlet\u{1b}[0m"), "{coloured:?}");
+        let plain = on_a_terminal(&diagnostic, false);
+        assert!(!plain.contains('\u{1b}'), "{plain:?}");
+    }
+
+    #[test]
+    fn beside_the_recordings_the_text_is_as_plain_and_its_tokens_are_kept() {
+        let at = line!();
+        let failed = |recorded: bool| {
+            let diagnostic = Diagnostic::new("play `p` failed")
+                .cause("it was `so`")
+                .source_at(file!(), at, 1, "here")
+                .hint("narrow `it`");
+            match recorded {
+                true => diagnostic.recorded("its video is in /tmp/v.mp4"),
+                false => diagnostic,
+            }
+        };
+        let beside = failed(true).beside_recordings();
+        assert_eq!(beside.text, failed(false).plain());
+        let tokens: Vec<(&str, Kind)> = beside
+            .tokens
+            .iter()
+            .map(|token| (&beside.text[token.start..token.end], token.kind))
+            .collect();
+        assert!(tokens.contains(&("let", Kind::Keyword)), "{tokens:?}");
+        assert!(tokens.contains(&("line!", Kind::Macro)), "{tokens:?}");
+    }
+
+    #[test]
+    fn a_source_that_cannot_be_read_is_named_beside_the_recordings_too() {
+        let diagnostic = Diagnostic::new("it failed").source_at("gone.rs", 3, 1, "here");
+        let beside = diagnostic.beside_recordings();
+        assert_eq!(beside.text, diagnostic.plain());
+        assert!(beside.text.contains("at gone.rs:3"), "{}", beside.text);
+        assert!(beside.tokens.is_empty());
     }
 
     #[test]

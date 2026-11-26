@@ -34,7 +34,19 @@
                 </div>
             {% endif %}
             {% if !line.diff.is_empty() %}
-                <pre class="diff">{% for line in line.diff %}<span class="{{ line.kind }}">{{ line.text }}</span>{% endfor %}</pre>
+                <pre class="diff">
+                    {%- for line in line.diff -%}
+                        <span class="{{ line.kind }}"><span class="sign">{{ line.sign }}</span>
+                            {%- for piece in line.pieces -%}
+                                {%- if let Some(class) = piece.class -%}
+                                    <span class="{{ class }}">{{ piece.text }}</span>
+                                {%- else -%}
+                                    {{ piece.text }}
+                                {%- endif -%}
+                            {%- endfor -%}
+                        </span>
+                    {%- endfor -%}
+                </pre>
             {% endif %}
             {% if !line.texts.is_empty() %}
                 <p class="links">

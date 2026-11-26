@@ -23,7 +23,7 @@ pub(crate) use self::output::is_written;
 use self::output::{Output, PATIENCE};
 use crate::{
     PlayEntry,
-    diagnostic::Diagnostic,
+    diagnostic::{Diagnostic, Highlighted},
     play::log::{Acceptance, AttachmentKind, Check, Entry, Outcome, What},
     render::{Checked, Filmed, place_at, play_dir_in},
 };
@@ -92,7 +92,7 @@ struct Kept {
 struct Stored {
     #[serde(flatten)]
     kept: Kept,
-    failure: Option<String>,
+    failure: Option<Highlighted>,
     warnings: Vec<String>,
     log: Vec<Line>,
     /// In the output, as every path here.
@@ -191,7 +191,7 @@ impl Results {
             Err(panic) => {
                 let failure = crate::render::panic_message(&panic);
                 self.output.bear(self.output.write(&Stored {
-                    failure: Some(format!("panicked: {failure}")),
+                    failure: Some(Highlighted::plain(format!("panicked: {failure}"))),
                     ..self.stored(trial, Verdict::Failed, began.elapsed())
                 }));
                 std::panic::resume_unwind(panic);

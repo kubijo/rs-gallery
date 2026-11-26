@@ -95,8 +95,10 @@ so a minor release may carry a breaking change.
   `failed_shots` lists every failure step by step.
 
 - **Errors read as reports.** miette lays them out: what failed, why, the names in play, and what to do. Colour,
-  box-drawing, clickable paths and wrapping follow what the terminal supports, and a CI log keeps whole lines.
-  Screenshot folders, play steps and the run's report all show up, linked, in a capture's summary.
+  box-drawing, clickable paths and wrapping follow what the terminal supports, and a CI log keeps whole lines. The
+  source a failure points at is highlighted, in the terminal and in the tests' HTML report, and so is an AccessKit
+  snapshot's diff, its changed lines tinted and the words that changed on them more. Screenshot folders, play steps and
+  the run's report all show up, linked, in a capture's summary.
 
 - **Fixed: the Actions panel heard nothing from a scenes dylib.** The dylib's copy of gallery kept actions to itself; it
   now reports them to the shell.

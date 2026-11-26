@@ -106,7 +106,7 @@ fn a_failed_comparison_is_reported_with_its_images_and_every_link_is_to_the_outp
         .map(|file| file["name"].as_str().expect("a name"))
         .collect();
     assert_eq!(names, ["reference", "actual", "diff"]);
-    let failure = result["failure"].as_str().expect("a failure");
+    let failure = result["failure"]["text"].as_str().expect("a failure");
     assert!(failure.contains("UPDATE_SNAPSHOTS=1"), "{failure}");
     assert!(
         told.contains("is recorded in") && !failure.contains("is recorded in"),
@@ -218,8 +218,14 @@ fn a_tree_that_changed_is_reported_with_its_lines() {
     take(says, reads, &dir);
     reported(says_other, reads, &dir, Video::Off);
     let page = std::fs::read_to_string(dir.join("out").join(PAGE)).expect("the report");
-    assert!(page.contains("<span class=\"removed\">-"), "{page}");
-    assert!(page.contains("<span class=\"added\">+"), "{page}");
+    assert!(
+        page.contains("<span class=\"removed\"><span class=\"sign\">-"),
+        "{page}"
+    );
+    assert!(
+        page.contains("<span class=\"added\"><span class=\"sign\">+"),
+        "{page}"
+    );
     assert!(page.contains("Goodbye"), "{page}");
 }
 

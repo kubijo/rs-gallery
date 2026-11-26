@@ -5,11 +5,11 @@
     --sunken: light-dark(#eceef2, #0c0d10);
     --edge: light-dark(#d8dbe2, #2c2f37);
     --text: light-dark(#1b1d22, #e4e6eb);
-    --aside: light-dark(#646a77, #8e95a3);
+    --aside: light-dark(#4c5260, #8e95a3);
     --passed: light-dark(#1a7a42, #5cc98b);
-    --failed: light-dark(#c22f36, #ff7b7b);
+    --failed: light-dark(#c22f36, #f85149);
     --unfinished: light-dark(#9a6200, #f0b455);
-    --skipped: light-dark(#646a77, #8e95a3);
+    --skipped: light-dark(#4c5260, #8e95a3);
     --link: light-dark(#1f5fbf, #7fb2ff);
     --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
@@ -104,6 +104,44 @@ pre {
     background: var(--sunken);
     border: 1px solid var(--edge);
     border-radius: 6px;
+}
+
+.failure {
+    /* Close to the glyphs' own height, so miette's box drawing nearly joins from line to line. */
+    line-height: 1.2;
+}
+
+.failure,
+.diff {
+    .keyword {
+        color: light-dark(#8a3fbf, #bc8cff);
+    }
+
+    .function {
+        color: light-dark(#1f5fbf, #58a6ff);
+    }
+
+    .macro {
+        color: light-dark(#0b7a85, #39c5cf);
+    }
+
+    .string {
+        color: light-dark(#1a7a42, #3fb950);
+    }
+
+    .comment,
+    .attribute {
+        color: var(--aside);
+    }
+
+    .type,
+    .label {
+        color: light-dark(#9a6200, #e3b341);
+    }
+
+    .constant {
+        color: light-dark(#b5452b, #f0883e);
+    }
 }
 
 fieldset {
@@ -422,16 +460,32 @@ figcaption {
 }
 
 .diff {
-    span {
+    > span {
         display: block;
     }
 
     .removed {
-        color: var(--failed);
+        background: light-dark(#ffebe9, #3c1618);
+
+        .sign {
+            color: var(--failed);
+        }
+
+        .changed {
+            background: light-dark(#ffc1bc, #6e2228);
+        }
     }
 
     .added {
-        color: var(--passed);
+        background: light-dark(#dafbe1, #12341f);
+
+        .sign {
+            color: var(--passed);
+        }
+
+        .changed {
+            background: light-dark(#aceebb, #1f5c33);
+        }
     }
 }
 

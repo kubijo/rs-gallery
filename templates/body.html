@@ -13,4 +13,14 @@
         {% endfor %}
     </ol>
 {% endif %}
-{% if let Some(failure) = failure %}<pre class="failure">{{ failure }}</pre>{% endif %}
+{% if let Some(failure) = failure %}
+    <pre class="failure">
+    {%- for piece in failure -%}
+        {%- if let Some(class) = piece.class -%}
+            <span class="{{ class }}">{{ piece.text }}</span>
+        {%- else -%}
+            {{ piece.text }}
+        {%- endif -%}
+    {%- endfor -%}
+</pre>
+{% endif %}

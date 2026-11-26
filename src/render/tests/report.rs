@@ -164,24 +164,26 @@ fn step(label: &str) -> What {
 
 #[test]
 fn a_diff_is_coloured_cut_where_it_would_fill_the_screen_and_acts_on_no_terminal() {
-    let shown = diff_lines("-old `a\n+new\n same\n");
+    let shown = diff_lines("-old `a\n+new\n same\n", false);
     assert!(shown.contains("\u{1b}[31m-old `a"), "{shown:?}");
     assert!(shown.contains("\u{1b}[32m+new"), "{shown:?}");
     assert!(shown.ends_with("\n same"), "{shown:?}");
 
     let long = "+line\n".repeat(42);
-    let shown = style::plain(&diff_lines(&long));
+    let shown = style::plain(&diff_lines(&long, true));
     assert_eq!(shown.lines().count(), 41);
     assert!(
         shown.ends_with("… and 2 more lines, in the diff"),
         "{shown}"
     );
-    let shown = style::plain(&diff_lines(&"+line\n".repeat(41)));
+    let shown = style::plain(&diff_lines(&"+line\n".repeat(41), true));
     assert!(shown.ends_with("… and 1 more line, in the diff"), "{shown}");
 
-    assert_eq!(
-        diff_lines(" \u{9b}31m \u{202e}rtl"),
-        " \\u{9b}31m \\u{202e}rtl"
+    let shown = diff_lines("+\u{9b}31m \u{202e}rtl", true);
+    assert_eq!(style::plain(&shown), "+\\u{9b}31m \\u{202e}rtl");
+    assert!(
+        !shown.contains('\u{9b}') && !shown.contains('\u{202e}'),
+        "{shown:?}"
     );
 }
 
