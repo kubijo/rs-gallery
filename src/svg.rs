@@ -46,6 +46,8 @@ struct Svg {
     width: f32,
     height: f32,
     paths: Vec<FillPath>,
+    /// The first thing it has that is not drawn: only paths filled with a colour are.
+    undrawn: Option<&'static str>,
 }
 
 struct FillPath {
@@ -84,6 +86,7 @@ impl Icon {
                 width: size.width(),
                 height: size.height(),
                 paths: paths(tree.root()),
+                undrawn: undrawn(tree.root()),
             }),
         })
     }
@@ -133,6 +136,17 @@ impl Icon {
     /// The SVG's own width and height, in its units.
     pub(crate) fn size(&self) -> egui::Vec2 {
         egui::vec2(self.svg.width, self.svg.height)
+    }
+
+    /// Whether it has a filled path to draw.
+    pub(crate) fn draws(&self) -> bool {
+        !self.svg.paths.is_empty()
+    }
+
+    /// What it has that it draws without, if anything: a stroke, a gradient, a hidden path….
+    /// What usvg dropped is not seen here; [`undrawn_markup`] tells it.
+    pub(crate) fn undrawn(&self) -> Option<&'static str> {
+        self.svg.undrawn
     }
 
     /// Allocate a `size`×`size` slot. Coloured solid fills ignore `color`.
@@ -312,7 +326,7 @@ fn paths(group: &usvg::Group) -> Vec<FillPath> {
         for node in group.children() {
             match node {
                 usvg::Node::Group(child) => walk(child, out),
-                usvg::Node::Path(path) => {
+                usvg::Node::Path(path) if path.is_visible() => {
                     if let Some(fill) = path.fill() {
                         out.push(FillPath {
                             color: match fill.paint() {
@@ -335,6 +349,129 @@ fn paths(group: &usvg::Group) -> Vec<FillPath> {
     }
     walk(group, &mut out);
     out
+}
+
+fn undrawn(group: &usvg::Group) -> Option<&'static str> {
+    group.children().iter().find_map(|node| match node {
+        usvg::Node::Group(child)
+            if child.clip_path().is_some()
+                || child.mask().is_some()
+                || !child.filters().is_empty()
+                || child.opacity() != usvg::Opacity::ONE =>
+        {
+            Some("a clip path, mask, filter or group opacity")
+        }
+        usvg::Node::Group(child) if child.blend_mode() != usvg::BlendMode::Normal => {
+            Some("a blend mode")
+        }
+        usvg::Node::Group(child) => undrawn(child),
+        usvg::Node::Path(path) if !path.is_visible() => Some("a hidden element"),
+        usvg::Node::Path(path) if path.stroke().is_some() => Some("a stroke"),
+        usvg::Node::Path(path)
+            if path
+                .fill()
+                .is_some_and(|fill| !matches!(fill.paint(), usvg::Paint::Color(_))) =>
+        {
+            Some("a gradient or pattern fill")
+        }
+        usvg::Node::Path(_) => None,
+        usvg::Node::Image(_) => Some("an image"),
+        usvg::Node::Text(_) => Some("text"),
+    })
+}
+
+const SVG: &str = "http://www.w3.org/2000/svg";
+const XLINK: &str = "http://www.w3.org/1999/xlink";
+const XML: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// Elements that draw paths, or hold or place them.
+const DRAWING: [&str; 12] = [
+    "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "defs", "use",
+    "symbol",
+];
+
+/// Elements never drawn, whatever they hold.
+const ANNOTATING: [&str; 3] = ["title", "desc", "metadata"];
+
+/// The first thing the SVG `bytes` has beyond paths filled with a colour,
+/// if any, read from its markup, as usvg drops some of it before its tree:
+/// an element that is not a shape or a group, anything hidden, a clip,
+/// mask or filter (even one that links to nothing), a conditional attribute,
+/// or a link to another file.
+///
+/// Markup that cannot be read is refused too: it cannot be checked.
+pub(crate) fn undrawn_markup(bytes: &[u8]) -> Option<String> {
+    let options = usvg::roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let Some(document) = std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| usvg::roxmltree::Document::parse_with_options(text, options).ok())
+    else {
+        return Some("markup that cannot be checked".to_owned());
+    };
+    let annotation = |node: usvg::roxmltree::Node<'_, '_>| {
+        node.is_element() && is_svg(node) && ANNOTATING.contains(&node.tag_name().name())
+    };
+    document
+        .descendants()
+        .filter(|node| node.is_element() && !node.ancestors().skip(1).any(annotation))
+        .find_map(|node| undrawn_element(node, annotation(node)))
+}
+
+/// Whether usvg reads `node` as SVG: in its namespace, or in none.
+fn is_svg(node: usvg::roxmltree::Node<'_, '_>) -> bool {
+    matches!(node.tag_name().namespace(), None | Some(SVG))
+}
+
+fn undrawn_element(node: usvg::roxmltree::Node<'_, '_>, annotation: bool) -> Option<String> {
+    let name = node.tag_name().name();
+    if !annotation && !(is_svg(node) && DRAWING.contains(&name)) {
+        return Some(match name {
+            "image" => "an image".to_owned(),
+            "foreignObject" => "a foreign object".to_owned(),
+            "text" => "text".to_owned(),
+            _ => format!("a `<{name}>` element"),
+        });
+    }
+    properties(node)
+        .find_map(|(name, value)| match name {
+            "display" if value == "none" => Some("a hidden element"),
+            "visibility" if matches!(value, "hidden" | "collapse") => Some("a hidden element"),
+            "clip-path" | "mask" | "filter" if value != "none" => {
+                Some("a clip path, mask or filter")
+            }
+            "systemLanguage" | "requiredExtensions" | "requiredFeatures" => {
+                Some("a conditional attribute")
+            }
+            "href" if !value.starts_with('#') => Some("a link to another file"),
+            // A paint svgtypes cannot read, usvg draws as the default; a link it can is in this file.
+            "fill" | "stroke"
+                if value.starts_with("url(") && svgtypes::Paint::from_str(value).is_err() =>
+            {
+                Some("a link to another file")
+            }
+            _ => None,
+        })
+        .map(str::to_owned)
+}
+
+/// `node`'s properties as usvg reads them, by local name:
+/// its attributes in the namespaces usvg reads, then its inline style's declarations.
+fn properties<'a>(node: usvg::roxmltree::Node<'a, '_>) -> impl Iterator<Item = (&'a str, &'a str)> {
+    let attributes = node
+        .attributes()
+        .filter(|attribute| matches!(attribute.namespace(), None | Some(SVG | XLINK | XML)))
+        .map(|attribute| (attribute.name(), attribute.value().trim()));
+    let style = node
+        .attributes()
+        .find(|attribute| attribute.namespace().is_none() && attribute.name() == "style")
+        .map(|attribute| attribute.value())
+        .into_iter()
+        .flat_map(simplecss::DeclarationTokenizer::from)
+        .map(|declaration| (declaration.name, declaration.value.trim()));
+    attributes.chain(style)
 }
 
 #[cfg(test)]
@@ -423,6 +560,32 @@ mod tests {
                 assert!(std::error::Error::source(&error).is_some());
             }
         }
+    }
+
+    #[test]
+    fn markup_that_cannot_be_read_is_not_taken_on_trust() {
+        for bytes in [&b"\x1f\x8b\x08\x00\xff"[..], b"<svg"] {
+            assert_eq!(
+                super::undrawn_markup(bytes).as_deref(),
+                Some("markup that cannot be checked"),
+                "{bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hidden_path_is_not_drawn() {
+        let icon = Icon::from_svg_colored(
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">
+            <path fill="#0000ff" d="M0 0h12v24H0z"/>
+            <path fill="#ff0000" visibility="hidden" d="M0 0h24v24H0z"/>
+        </svg>"##,
+        );
+        let image = icon
+            .svg
+            .rasterize([24, 24], true, false, egui::Color32::GREEN);
+        assert_eq!(image[(6, 12)].to_array(), [0, 0, 255, 255]);
+        assert_eq!(image[(18, 12)].to_array(), [0, 0, 0, 0]);
     }
 
     #[test]

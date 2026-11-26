@@ -58,6 +58,17 @@ fn filmed_on(
     dir: &Utf8Path,
     video: Video,
 ) -> (Result<(), String>, Vec<crate::play::log::Entry>) {
+    filmed_by(&films(dir, video), renderer, scene, run, dir)
+}
+
+/// [`filmed_on`], by `films`.
+fn filmed_by(
+    films: &Films,
+    renderer: Renderer,
+    scene: SceneFn,
+    run: PlayFn,
+    dir: &Utf8Path,
+) -> (Result<(), String>, Vec<crate::play::log::Entry>) {
     let (manifest, plays) = catalog(scene, &[("greets", run)]);
     let (outcome, log, _) = judged_shot(
         &manifest,
@@ -65,9 +76,57 @@ fn filmed_on(
         renderer,
         &greeting_shot(dir),
         &Snapshots::default(),
-        Some(&films(dir, video)),
+        Some(films),
     );
     (outcome.map_err(|failure| failure.plain()), log)
+}
+
+#[test]
+fn a_catalog_without_the_input_panel_films_its_tests_without_one() {
+    fn clicks(p: &mut Play<'_>) -> PlayResult {
+        p.click("Count")
+    }
+    let last_frame = |name: &str, recording: crate::render::RecordDefaults| {
+        let dir = scratch(name);
+        let films = films(&dir, Video::Always).recorded_as(recording);
+        let (outcome, _) = filmed_by(&films, Renderer::Glow, counts, clicks, &dir);
+        outcome.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        decode_mp4(&video(&dir)).pop().expect("a frame")
+    };
+    let shown = last_frame("films-panel", crate::render::RecordDefaults::default());
+    let without = crate::render::RecordDefaults {
+        input: None,
+        ..crate::render::RecordDefaults::default()
+    };
+    let hidden = last_frame("films-no-panel", without);
+    // The panel sits bottom-left, lit by the click, far from the button at the top.
+    let (width, height) = shown.dimensions();
+    let differing = (0..width / 3)
+        .flat_map(|x| (height * 2 / 3..height).map(move |y| (x, y)))
+        .filter(|&(x, y)| shown.get_pixel(x, y).0[0].abs_diff(hidden.get_pixel(x, y).0[0]) > 40)
+        .count();
+    assert!(
+        differing > 100,
+        "only the film with a panel shows one: {differing} pixels differ"
+    );
+}
+
+#[test]
+fn a_catalogs_hold_pauses_its_tests_videos() {
+    let dir = scratch("films-catalog-hold");
+    let catalog = crate::render::RecordDefaults {
+        hold: Some(2.0),
+        ..crate::render::RecordDefaults::default()
+    };
+    let films = films(&dir, Video::Always).recorded_as(catalog);
+    let (outcome, log) = filmed_by(&films, Renderer::Glow, counts, counts_to_two, &dir);
+    outcome.expect("it counts to two");
+    let drawn = log.last().expect("a check").frames.end;
+    assert_eq!(
+        mp4_frames(&video(&dir)).1,
+        1 + drawn + 2 * 30,
+        "the frame the play began on, those it drew, and 2 s at 15 a second on each click's step"
+    );
 }
 
 fn filmed(
@@ -563,11 +622,12 @@ fn a_zoomed_scenes_video_shows_the_pointer_where_it_is() {
     };
     let aimed = *AIMED.lock().expect("the aim") * 2.0;
     // The panel lights the button too, in the bottom left corner, far below.
-    let top = before.height() / 2;
+    let (width, height) = before.dimensions();
+    let panel = |x: u32, y: u32| x < width / 3 && y > height * 2 / 3;
     let strays = before.enumerate_pixels().filter(|(x, y, pixel)| {
         let moved = pixel.0[0].abs_diff(after.get_pixel(*x, *y).0[0]) > 60;
         let off = aimed.distance(egui::pos2(*x as f32, *y as f32));
-        *y < top && moved && off > 40.0
+        !panel(*x, *y) && moved && off > 40.0
     });
     let near = |x: f32, y: f32| {
         after

@@ -30,17 +30,98 @@ pub struct Config {
     pub record: Record,
 }
 
-/// `[record]`: how a recording draws the pointer.
+/// `[record]`: how every recording of the catalog is made, unless a shot or a flag says otherwise.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Record {
+    /// One format, or several recorded from the same frames; unset leaves it to gallery.
+    pub format: Option<Vec<Format>>,
+    /// Seconds a play's recording pauses at each step's end; unset leaves it to gallery.
+    pub hold: Option<f32>,
+    /// The keys and mouse panel.
+    pub input: Input,
     /// The catalog's own, else gallery's.
     pub cursor: Option<Cursor>,
+}
+
+/// What a recording is written as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Format {
+    Mp4,
+    Apng,
+}
+
+impl Format {
+    fn named(name: &str) -> Result<Self, String> {
+        match name {
+            "mp4" => Ok(Self::Mp4),
+            "apng" => Ok(Self::Apng),
+            _ => Err(format!(
+                "[record] `{name}` is no format: `mp4`, `apng`, or a list of them"
+            )),
+        }
+    }
+}
+
+/// Whether a recording shows the keys and mouse, and in which corner.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Input {
+    Off,
+    In(Corner),
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        Self::In(Corner::default())
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Corner {
+    #[default]
+    BottomLeft,
+    BottomRight,
+    TopLeft,
+    TopRight,
+}
+
+impl Corner {
+    fn named(name: &str) -> Result<Self, String> {
+        match name {
+            "bottom-left" => Ok(Self::BottomLeft),
+            "bottom-right" => Ok(Self::BottomRight),
+            "top-left" => Ok(Self::TopLeft),
+            "top-right" => Ok(Self::TopRight),
+            _ => Err(format!(
+                "[record] `{name}` is no corner: `bottom-left`, `bottom-right`, `top-left` or \
+                 `top-right`, or `false`"
+            )),
+        }
+    }
+}
+
+// Names read as strings and matched by hand, so a misspelt one is told the names there are,
+// which serde's untagged enums would not say.
+
+/// `input` as written: on or off, or the corner's name.
+#[derive(serde::Deserialize)]
+#[serde(untagged, expecting = "a corner such as `bottom-left`, or `false`")]
+enum DeclaredInput {
+    On(bool),
+    In(String),
+}
+
+/// `format` as written: one name, or a list.
+#[derive(serde::Deserialize)]
+#[serde(untagged, expecting = "`mp4`, `apng`, or a list of them")]
+enum DeclaredFormat {
+    One(String),
+    Many(Vec<String>),
 }
 
 /// A pointer drawn from SVGs, which scale to any recording.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Cursor {
-    /// Absolute, as the two below.
+    /// Absolute, as the one below; read only when a play is recorded.
     pub image: Utf8PathBuf,
     /// While a mouse button is held.
     pub pressed: Utf8PathBuf,
@@ -52,6 +133,9 @@ pub struct Cursor {
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeclaredRecord {
+    format: Option<DeclaredFormat>,
+    hold: Option<f32>,
+    input: Option<DeclaredInput>,
     cursor_default: Option<Utf8PathBuf>,
     cursor_pressed: Option<Utf8PathBuf>,
     cursor_hotspot: Option<[f32; 2]>,
@@ -59,15 +143,10 @@ struct DeclaredRecord {
 
 impl DeclaredRecord {
     fn resolve(self, dir: &Utf8Path) -> Result<Record, String> {
-        let svg = |file: Utf8PathBuf| {
-            let file = dir.join(file);
-            file.canonicalize_utf8()
-                .map_err(|e| format!("[record] cursor `{file}`: {e}"))
-        };
         let cursor = match (self.cursor_default, self.cursor_pressed) {
             (Some(image), Some(pressed)) => Some(Cursor {
-                image: svg(image)?,
-                pressed: svg(pressed)?,
+                image: dir.join(image),
+                pressed: dir.join(pressed),
                 hotspot: self.cursor_hotspot.unwrap_or_default(),
             }),
             (None, None) if self.cursor_hotspot.is_some() => {
@@ -81,7 +160,37 @@ impl DeclaredRecord {
                 );
             }
         };
-        Ok(Record { cursor })
+        if let Some(hotspot) = self
+            .cursor_hotspot
+            .filter(|hotspot| !hotspot.iter().all(|at| at.is_finite()))
+        {
+            return Err(format!(
+                "[record] cursor_hotspot is {hotspot:?}; it is a point in the cursor's units"
+            ));
+        }
+        if let Some(hold) = self.hold.filter(|hold| !hold.is_finite() || *hold < 0.0) {
+            return Err(format!("[record] hold is {hold}; it is seconds, 0 or more"));
+        }
+        let names = self.format.map(|format| match format {
+            DeclaredFormat::One(one) => vec![one],
+            DeclaredFormat::Many(many) => many,
+        });
+        if names.as_ref().is_some_and(Vec::is_empty) {
+            return Err("[record] format names none; give `mp4`, `apng`, or both".to_owned());
+        }
+        let format = names
+            .map(|names| names.iter().map(|name| Format::named(name)).collect())
+            .transpose()?;
+        Ok(Record {
+            format,
+            hold: self.hold,
+            input: match self.input {
+                None | Some(DeclaredInput::On(true)) => Input::default(),
+                Some(DeclaredInput::On(false)) => Input::Off,
+                Some(DeclaredInput::In(name)) => Input::In(Corner::named(&name)?),
+            },
+            cursor,
+        })
     }
 }
 
@@ -972,6 +1081,21 @@ mod tests {
             })
         );
 
+        let gone = read(
+            "record-gone",
+            indoc::indoc! {r#"
+                [record]
+                cursor_default = "art/gone.svg"
+                cursor_pressed = "art/pressed.svg"
+            "#},
+        )
+        .expect("a missing cursor fails the recording that draws it, not the config");
+        let dir = gone.path.parent().expect("a directory");
+        assert_eq!(
+            gone.record.cursor.map(|cursor| cursor.image),
+            Some(dir.join("art/gone.svg"))
+        );
+
         for (name, record, says) in [
             (
                 "record-half",
@@ -979,19 +1103,104 @@ mod tests {
                 "`cursor_default` and `cursor_pressed` go together",
             ),
             (
+                "record-hotspot-nan",
+                "[record]\ncursor_default = \"art/cursor.svg\"\ncursor_pressed = \"art/pressed.svg\"\ncursor_hotspot = [nan, 1]",
+                "[record] cursor_hotspot is [NaN, 1.0]",
+            ),
+            (
                 "record-hotspot-alone",
                 "[record]\ncursor_hotspot = [1, 1]",
                 "`cursor_hotspot` is of a cursor",
             ),
             (
-                "record-missing",
-                "[record]\ncursor_default = \"art/gone.svg\"\ncursor_pressed = \"art/pressed.svg\"",
-                "art/gone.svg",
-            ),
-            (
                 "record-unrenamed",
                 "[record]\ncursor = \"art/cursor.svg\"",
                 "unknown field `cursor`",
+            ),
+        ] {
+            let error = read(name, record).err().expect("an error");
+            assert!(error.contains(says), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_record_table_sets_how_every_recording_is_made() {
+        let read = |name, record: &str| {
+            read_config(name, &format!("scene_globs = [\"scene.rs\"]\n{record}"))
+        };
+        let unset = read("record-defaults", "")
+            .expect("a readable config")
+            .record;
+        assert_eq!(
+            (unset.format, unset.hold, unset.input),
+            (None, None, Input::In(Corner::BottomLeft))
+        );
+
+        let set = read(
+            "record-settings",
+            indoc::indoc! {r#"
+                [record]
+                format = ["apng", "mp4"]
+                hold = 0.25
+                input = "top-right"
+            "#},
+        )
+        .expect("a readable config")
+        .record;
+        assert_eq!(set.format, Some(vec![Format::Apng, Format::Mp4]));
+        assert_eq!(set.hold, Some(0.25));
+        assert_eq!(set.input, Input::In(Corner::TopRight));
+
+        let one = read(
+            "record-one-format",
+            "[record]\nformat = \"apng\"\ninput = false",
+        )
+        .expect("a readable config")
+        .record;
+        assert_eq!(
+            (one.format, one.input),
+            (Some(vec![Format::Apng]), Input::Off)
+        );
+        let on = read("record-input-on", "[record]\ninput = true")
+            .expect("a readable config")
+            .record;
+        assert_eq!(on.input, Input::In(Corner::BottomLeft));
+
+        for (name, record, says) in [
+            (
+                "record-hold-negative",
+                "[record]\nhold = -1",
+                "[record] hold is -1",
+            ),
+            (
+                "record-corner",
+                "[record]\ninput = \"middle\"",
+                "`middle` is no corner: `bottom-left`, `bottom-right`, `top-left` or `top-right`, or `false`",
+            ),
+            (
+                "record-format-both",
+                "[record]\nformat = \"both\"",
+                "`both` is no format: `mp4`, `apng`, or a list of them",
+            ),
+            (
+                "record-format-unknown-in-list",
+                "[record]\nformat = [\"mp4\", \"webm\"]",
+                "`webm` is no format: `mp4`, `apng`, or a list of them",
+            ),
+            (
+                "record-no-format",
+                "[record]\nformat = []",
+                "[record] format names none",
+            ),
+            (
+                "record-format-number",
+                "[record]\nformat = 4",
+                "`mp4`, `apng`, or a list of them",
+            ),
+            (
+                "record-input-number",
+                "[record]\ninput = 4",
+                "a corner such as `bottom-left`, or `false`",
             ),
         ] {
             let error = read(name, record).err().expect("an error");

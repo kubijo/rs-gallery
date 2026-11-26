@@ -76,7 +76,7 @@ pub fn launch(
         .clone()
         .unwrap_or_else(|| Utf8Path::new(manifest_dir).join("gallery.toml"));
     let config = gallery_build::Config::read(&config_path).unwrap_or_else(|e| panic!("{e}"));
-    crate::render::use_cursor(config.record.cursor.as_ref()).unwrap_or_else(|e| panic!("{e}"));
+    crate::render::use_cursor(config.record.cursor.as_ref());
 
     let dylib = build_lib(package, manifest_dir, &config.path, headless(&cli));
     // Made here because both sides are handed it from here: the watcher reports into it,
@@ -92,7 +92,8 @@ pub fn launch(
 
     // Everything above is how scenes get here at all, so a headless run branches only where the window
     // would have opened — before any watcher, which nothing would be left to shut down.
-    if let Some(capture) = shots(&cli, &config.path) {
+    let recording = render::RecordDefaults::from(&config.record);
+    if let Some(capture) = shots(&cli, &config.path, &recording) {
         return match render::render_with_globals(
             &manifest,
             globals,
@@ -147,6 +148,23 @@ fn fail(problem: &Diagnostic) -> ! {
     std::process::exit(1)
 }
 
+/// `--record`'s recording, its format and hold the flags', else the catalog's `defaults`.
+fn rendered_record(
+    record: render::Record,
+    cli: &Cli,
+    defaults: &render::RecordDefaults,
+) -> Result<render::Record, String> {
+    let has_play = cli.play.is_some();
+    let record = render::Record {
+        formats: cli.record_format.or(defaults.formats).unwrap_or_default(),
+        hold: cli.record_hold,
+        input: defaults.input,
+        ..record
+    };
+    record.check(has_play)?;
+    Ok(record.holding(defaults.hold, has_play))
+}
+
 /// Whether this run writes to stdout and exits instead of opening a window.
 fn headless(cli: &Cli) -> bool {
     cli.capture.is_some() || cli.render.is_some() || cli.list_knobs || cli.init_capture
@@ -157,15 +175,19 @@ fn headless(cli: &Cli) -> bool {
 /// A recipe describes its own. The single-scene flags describe one shot between them,
 /// so asking for several at once stays coherent — a listing or a generated recipe
 /// then says what the image beside it was set to.
-fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
+fn shots(
+    cli: &Cli,
+    config: &Utf8Path,
+    recording: &render::RecordDefaults,
+) -> Option<render::Capture> {
     if !headless(cli) {
         return None;
     }
     if let Some(recipe) = &cli.capture {
         // Relative to the config, like the scene globs: both describe the instance, not the shell.
         let recipe = config.parent().unwrap_or(Utf8Path::new(".")).join(recipe);
-        let mut capture =
-            render::read_recipe(&recipe, cli.out.as_deref()).unwrap_or_else(|reason| fail(&reason));
+        let mut capture = render::read_recipe(&recipe, cli.out.as_deref(), recording)
+            .unwrap_or_else(|reason| fail(&reason));
         for shot in &mut capture.shots {
             shot.globals.extend(cli.global.iter().cloned());
             if let Some(play) = &mut shot.play {
@@ -204,16 +226,8 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
                 steps: true,
             }),
             record: cli.record.map(|record| {
-                let record = render::Record {
-                    formats: cli.record_format.unwrap_or_default(),
-                    hold: cli.record_hold,
-                    input: cli.record_input,
-                    ..record
-                };
-                record
-                    .check(cli.play.is_some())
-                    .unwrap_or_else(|reason| fail(&reason.into()));
-                record
+                rendered_record(record, cli, recording)
+                    .unwrap_or_else(|reason| fail(&reason.into()))
             }),
         }],
         // Both gather a recipe's shots; one shot on the command line has nothing to gather.
@@ -283,26 +297,14 @@ struct Cli {
     record: Option<render::Record>,
 
     /// The recording's format: `mp4` (small, seekable) or `apng` (lossless, comparable),
-    /// or both from one run as `apng,mp4` [default: mp4]
+    /// or both from one run as `apng,mp4` [default: gallery.toml's `[record] format`, else mp4]
     #[arg(long, value_name = "FORMAT[,FORMAT]", requires = "record")]
     record_format: Option<render::VideoFormats>,
 
-    /// Seconds a play's recording pauses at each step's end,
-    /// so a step can be followed; 0 for none [default: 0.5]
+    /// Seconds a play's recording pauses at each step's end, so a step can be followed;
+    /// 0 for none [default: gallery.toml's `[record] hold`, else 0.5]
     #[arg(long, value_name = "SECONDS", requires = "record")]
     record_hold: Option<f32>,
-
-    /// Show a play's keys, mouse buttons and pointer on its recording,
-    /// the panel in CORNER: `bottom-left`, `bottom-right`, `top-left`
-    /// or `top-right` [default: bottom-left]
-    #[arg(
-        long,
-        value_name = "CORNER",
-        num_args = 0..=1,
-        default_missing_value = "bottom-left",
-        requires = "record"
-    )]
-    record_input: Option<render::Corner>,
 
     /// Canvas size to render at [default: 1280x720]
     #[arg(long, value_name = "WxH")]
@@ -587,6 +589,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_catalogs_hold_reaches_a_rendered_play_and_leaves_a_timed_recording_be() {
+        let catalog = render::RecordDefaults {
+            hold: Some(0.25),
+            ..render::RecordDefaults::default()
+        };
+        let hold = |args: &[&str]| {
+            let cli = Cli::parse_from(args);
+            let record = cli.record.expect("a recording");
+            rendered_record(record, &cli, &catalog)
+                .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+                .hold
+        };
+        let base = ["gallery", "--scene", "s", "--render", "s.png"];
+        assert_eq!(hold(&[&base[..], &["--record", "30:2"]].concat()), None);
+        let played = [&base[..], &["--play", "p", "--record", "30"]].concat();
+        assert_eq!(hold(&played), Some(0.25));
+        let own = [&played[..], &["--record-hold", "0"]].concat();
+        assert_eq!(hold(&own), Some(0.0), "the flag outranks the catalog");
+    }
+
+    #[test]
+    fn a_catalogs_format_and_panel_reach_a_rendered_recording_and_the_flag_outranks_its_format() {
+        let apng = render::VideoFormats::from(render::VideoFormat::Apng);
+        let catalog = render::RecordDefaults {
+            formats: Some(apng),
+            input: Some(render::Corner::TopRight),
+            ..render::RecordDefaults::default()
+        };
+        let rendered = |args: &[&str]| {
+            let cli = Cli::parse_from(args);
+            let record = cli.record.expect("a recording");
+            rendered_record(record, &cli, &catalog).unwrap_or_else(|e| panic!("{args:?}: {e}"))
+        };
+        let base = [
+            "gallery", "--scene", "s", "--render", "s.png", "--play", "p", "--record", "30",
+        ];
+        let record = rendered(&base);
+        assert_eq!(record.formats, apng);
+        assert_eq!(record.input, Some(render::Corner::TopRight));
+        let flagged = [&base[..], &["--record-format", "mp4"]].concat();
+        assert_eq!(
+            rendered(&flagged).formats,
+            render::VideoFormat::Mp4.into(),
+            "the flag outranks the catalog"
+        );
+    }
+
+    #[test]
     fn the_dylib_is_where_cargo_says_it_put_it() {
         let artifact = |files: &[&str]| {
             serde_json::json!({ "reason": "compiler-artifact", "filenames": files }).to_string()
@@ -688,7 +738,8 @@ mod tests {
         };
         let args: Vec<String> = serde_json::from_str(&args).expect("fixture arguments");
         let cli = Cli::parse_from(args);
-        let capture = shots(&cli, Utf8Path::new("gallery.toml")).expect("headless fixture");
+        let capture = shots(&cli, Utf8Path::new("gallery.toml"), &Default::default())
+            .expect("headless fixture");
         let manifest = crate::Linked.manifest();
         render::render_with_globals(
             &manifest,
@@ -932,7 +983,12 @@ Language = "English"
     }
 
     fn one_shot(args: &[&str]) -> render::Shot {
-        let capture = shots(&cli(args), Utf8Path::new("gallery.toml")).expect("a headless run");
+        let capture = shots(
+            &cli(args),
+            Utf8Path::new("gallery.toml"),
+            &Default::default(),
+        )
+        .expect("a headless run");
         assert!(capture.sheet.is_none(), "one shot has nothing to gather");
         assert_eq!(capture.shots.len(), 1, "one scene is one shot");
         capture.shots.into_iter().next().expect("the one shot")
@@ -953,7 +1009,12 @@ Language = "English"
             assert_eq!(headless(&cli(args)), headless_run, "{args:?}");
         }
         assert!(
-            shots(&cli(&["gallery"]), Utf8Path::new("gallery.toml")).is_none(),
+            shots(
+                &cli(&["gallery"]),
+                Utf8Path::new("gallery.toml"),
+                &Default::default()
+            )
+            .is_none(),
             "a windowed run asks for no shots"
         );
     }

@@ -43,6 +43,7 @@ use crate::{
 pub(crate) use crate::video::{VideoFormat, VideoFormats};
 
 mod cursor;
+mod defaults;
 mod film;
 mod log_view;
 mod overlay;
@@ -58,15 +59,16 @@ mod snapshot;
 mod tests;
 
 pub(crate) use self::cursor::use_cursor;
+pub(crate) use self::defaults::RecordDefaults;
 use self::film::Film;
 pub(crate) use self::film::{Filmed, Films, create_output, place_at, play_dir_in};
 pub(crate) use self::log_view::LogMode;
 use self::log_view::LogView;
 pub(crate) use self::overlay::Corner;
-#[cfg(test)]
-pub(crate) use self::record::RENDERED;
 use self::snapshot::{Looks, Seen, component, play_file, play_path};
 pub(crate) use self::snapshot::{Snapshots, Update, built_for};
+#[cfg(test)]
+pub(crate) use self::{overlay::OVERLAYS, record::RENDERED};
 use self::{
     overlay::{InputLayer, InputLog, InputOverlay, Shown},
     play_driver::*,
@@ -125,8 +127,8 @@ pub(crate) struct Record {
     /// Seconds a play's recording shows each step's last frame for, beyond its own;
     /// [`DEFAULT_HOLD`] when unset.
     pub(crate) hold: Option<f32>,
-    /// Show the play's keys, mouse buttons and pointer on the recording,
-    /// with the panel in this corner.
+    /// Where the keys and mouse panel goes on a play's recording;
+    /// `None` shows the pointer alone.
     pub(crate) input: Option<Corner>,
 }
 
@@ -140,6 +142,15 @@ const MAX_FPS: u16 = 240;
 pub(crate) const DEFAULT_HOLD: f32 = 0.5;
 
 impl Record {
+    /// Its own `hold`, else the catalog's on a play's recording:
+    /// one without a play has no steps to pause at, so a catalog's hold leaves it be.
+    pub(crate) fn holding(self, catalog: Option<f32>, has_play: bool) -> Self {
+        Self {
+            hold: self.hold.or(catalog.filter(|_| has_play)),
+            ..self
+        }
+    }
+
     /// Refuse a recording that cannot be made as asked.
     ///
     /// # Errors
@@ -166,12 +177,6 @@ impl Record {
                 ));
             }
             _ => {}
-        }
-        if self.input.is_some() && !has_play {
-            return Err(
-                "a recording without a play has no input to show, so it takes no `input`"
-                    .to_owned(),
-            );
         }
         match (self.seconds, has_play) {
             (Some(_), true) => {

@@ -132,7 +132,7 @@ fn a_generated_recipe_reads_back_as_the_state_it_was_generated_from() {
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let path = dir.join("capture.toml");
     std::fs::write(&path, &generated).expect("write recipe");
-    let shots = read_recipe(&path, None)
+    let shots = read_recipe(&path, None, &RecordDefaults::default())
         .expect("the generated recipe parses")
         .shots;
 
@@ -199,7 +199,7 @@ fn recipe_globals_inherit_from_the_root_and_a_shot_wins() {
     )
     .expect("write recipe");
 
-    let shot = read_recipe(&path, None)
+    let shot = read_recipe(&path, None, &RecordDefaults::default())
         .expect("global recipe parses")
         .shots
         .into_iter()
@@ -277,13 +277,56 @@ fn a_listing_quotes_the_label_and_names_the_accessor_that_declared_it() {
 /// resolves against the file, so the directory is part
 /// of what's under test.
 fn recipe(name: &str, text: &str, out: Option<&str>) -> Result<Capture, Diagnostic> {
+    recipe_with(name, text, out, &RecordDefaults::default())
+}
+
+/// [`recipe`], read in a catalog whose `[record]` sets `defaults`.
+fn recipe_with(
+    name: &str,
+    text: &str,
+    out: Option<&str>,
+    defaults: &RecordDefaults,
+) -> Result<Capture, Diagnostic> {
     let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
         .expect("a UTF-8 temp dir")
         .join(format!("gallery-recipe-{name}"));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let path = dir.join("capture.toml");
     std::fs::write(&path, text).expect("write recipe");
-    read_recipe(&path, out.map(Utf8Path::new))
+    read_recipe(&path, out.map(Utf8Path::new), defaults)
+}
+
+#[test]
+fn a_catalogs_hold_pauses_a_plays_recording_and_leaves_one_without_a_play_be() {
+    let catalog = RecordDefaults {
+        hold: Some(0.25),
+        ..RecordDefaults::default()
+    };
+    let read = |name: &str, shot: &str| {
+        let text = indoc::formatdoc! {r#"
+            out = "r"
+            size = "10x10"
+
+            [[shot]]
+            name = "a"
+            scene = "s"
+            {shot}
+        "#};
+        recipe_with(name, &text, None, &catalog)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.summary()))
+            .shots[0]
+            .record
+            .expect("a recording")
+    };
+    let timed = read("catalog-hold-timed", "record = { fps = 30, seconds = 1 }");
+    assert_eq!(timed.hold, None, "no steps to pause at");
+    let played = read("catalog-hold-played", "play = \"p\"\nrecord = { fps = 30 }");
+    assert_eq!(played.hold, Some(0.25));
+    let own = read(
+        "catalog-hold-own",
+        "play = \"p\"\nrecord = { fps = 30, hold = 0 }",
+    );
+    assert_eq!(own.hold, Some(0.0), "the shot's own outranks the catalog's");
 }
 
 /// The recipe a scaffold ships reads back, since `deny_unknown_fields` turns a key that drifts
@@ -293,7 +336,8 @@ fn recipe(name: &str, text: &str, out: Option<&str>) -> Result<Capture, Diagnost
 #[test]
 fn the_scaffolded_recipe_still_parses() {
     let shipped = Utf8Path::new("template/capture.toml");
-    let capture = read_recipe(shipped, None).expect("the scaffold's own recipe parses");
+    let capture = read_recipe(shipped, None, &RecordDefaults::default())
+        .expect("the scaffold's own recipe parses");
     assert!(
         !capture.shots.is_empty(),
         "and describes the shots it documents"
@@ -518,11 +562,11 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
             "takes no `hold`",
         ),
         (
-            "input-without-a-play",
+            "input-in-a-shot",
             indoc! {r"
                 record = { fps = 30, seconds = 1, input = true }
             "},
-            "takes no `input`",
+            "unknown field `input`",
         ),
         (
             "a-negative-hold",
@@ -580,7 +624,7 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
             keep: Trace::Always,
             formats: VideoFormat::Mp4.into(),
             hold: None,
-            input: None,
+            input: Some(Corner::BottomLeft),
         })
     );
     let both = indoc! {r#"
@@ -608,8 +652,8 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
 }
 
 #[test]
-fn a_plays_input_is_shown_in_the_corner_asked_for_or_bottom_left() {
-    let input = |value: &str| {
+fn a_shots_recording_takes_what_it_leaves_unset_from_the_catalog() {
+    let shot = |name: &str, record: &str| {
         let shot = indoc::formatdoc! {r#"
             out = "r"
             size = "10x10"
@@ -618,18 +662,40 @@ fn a_plays_input_is_shown_in_the_corner_asked_for_or_bottom_left() {
             name = "a"
             scene = "s"
             play = "p"
-            record = {{ fps = 30, input = {value} }}
+            record = {{ fps = 30{record} }}
         "#};
-        recipe(&format!("input-{}", value.trim_matches('"')), &shot, None)
-            .unwrap_or_else(|e| panic!("`input = {value}`: {}", e.summary()))
+        let catalog = RecordDefaults {
+            formats: Some(VideoFormat::Apng.into()),
+            hold: Some(0.25),
+            input: Some(Corner::TopRight),
+        };
+        recipe_with(name, &shot, None, &catalog)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.summary()))
             .shots[0]
             .record
             .expect("a recording")
-            .input
     };
-    assert_eq!(input("true"), Some(Corner::BottomLeft));
-    assert_eq!(input("false"), None);
-    assert_eq!(input(r#""top-right""#), Some(Corner::TopRight));
+    let unset = shot("record-unset", "");
+    assert_eq!(unset.formats, VideoFormat::Apng.into());
+    assert_eq!(unset.hold, Some(0.25));
+    assert_eq!(
+        unset.input,
+        Some(Corner::TopRight),
+        "the panel is the catalog's alone"
+    );
+    let own = shot("record-own", r#", format = "mp4", hold = 0"#);
+    assert_eq!(
+        own.formats,
+        VideoFormat::Mp4.into(),
+        "the shot's own outranks the catalog's"
+    );
+    assert_eq!(own.hold, Some(0.0));
+    let built_in = RecordDefaults::default();
+    assert_eq!(
+        (built_in.formats, built_in.hold, built_in.input),
+        (None, None, Some(Corner::BottomLeft)),
+        "with no `[record]`, gallery's own: the panel bottom-left, the rest to the built-ins"
+    );
 }
 
 #[test]

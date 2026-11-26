@@ -1764,8 +1764,9 @@ fn a_shot_has_no_cursor_where_the_pointer_hovers() {
 
 #[test]
 fn a_recording_draws_gallerys_cursor_on_the_pointer_and_its_pressed_one_on_a_press() {
+    static HELLO: std::sync::Mutex<egui::Pos2> = std::sync::Mutex::new(egui::Pos2::ZERO);
     fn hello(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
-        ui.label("Hello");
+        *HELLO.lock().expect("the place") = ui.label("Hello").rect.center();
     }
     let lit = |pixel: &image::Rgba<u8>| pixel.0[0] > 230 && pixel.0[2] < 120;
     for (run, name, pressed) in [
@@ -1784,19 +1785,22 @@ fn a_recording_draws_gallerys_cursor_on_the_pointer_and_its_pressed_one_on_a_pre
             .collect();
         let xs = added.iter().map(|(x, _, _)| *x);
         let ys = added.iter().map(|(_, y, _)| *y);
-        let width = xs
+        let corner = xs
             .clone()
-            .max()
-            .zip(xs.min())
-            .map(|(max, min)| max - min + 1);
-        let height = ys
-            .clone()
-            .max()
-            .zip(ys.min())
-            .map(|(max, min)| max - min + 1);
+            .min()
+            .zip(ys.clone().min())
+            .expect("a cursor drawn");
+        let reach = xs.max().zip(ys.max()).expect("a cursor drawn");
+        // Its hotspot is 1 in from its top-left corner, and the pointer is on the label's middle.
+        let aimed = *HELLO.lock().expect("the place") - egui::Vec2::splat(1.0);
+        let off = egui::pos2(corner.0 as f32, corner.1 as f32).distance(aimed);
         assert!(
-            width.zip(height).is_some_and(|(w, h)| w <= 24 && h <= 24),
-            "{name}: the cursor, and only it, is added to the frame: {width:?}×{height:?}"
+            off <= 2.0,
+            "{name}: the cursor is on the pointer: {off} from it"
+        );
+        assert!(
+            reach.0 - corner.0 < 24 && reach.1 - corner.1 < 24,
+            "{name}: the cursor, and only it, is added to the frame: {corner:?} to {reach:?}"
         );
         let lights = added.iter().any(|(_, _, pixel)| lit(pixel));
         assert_eq!(lights, pressed, "{name}: lit only while a button is held");

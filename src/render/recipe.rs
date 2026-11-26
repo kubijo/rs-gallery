@@ -139,31 +139,10 @@ struct RecipeRecord {
     /// How long a shot without a play records;
     /// a play shot records the play.
     seconds: Option<f32>,
-    /// One format, or a list recorded together from the same frames.
-    #[serde(default)]
-    format: VideoFormats,
-    /// Seconds a play's recording pauses at each step's end.
+    /// One format, or a list recorded together from the same frames; `gallery.toml`'s unless set.
+    format: Option<VideoFormats>,
+    /// Seconds a play's recording pauses at each step's end; `gallery.toml`'s unless set.
     hold: Option<f32>,
-    /// The play's input on the recording: `true`,
-    /// or the corner its panel sits in.
-    input: Option<RecipeInput>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum RecipeInput {
-    On(bool),
-    In(Corner),
-}
-
-impl RecipeInput {
-    fn corner(&self) -> Option<Corner> {
-        match self {
-            Self::On(true) => Some(Corner::default()),
-            Self::On(false) => None,
-            Self::In(corner) => Some(*corner),
-        }
-    }
 }
 
 /// Read a capture recipe into the shots it describes,
@@ -173,7 +152,11 @@ impl RecipeInput {
 /// If the file can't be read or parsed, declares no shots,
 /// gives two shots the same name, leaves a shot with no size,
 /// or has nowhere to write.
-pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Capture, Diagnostic> {
+pub(crate) fn read_recipe(
+    path: &Utf8Path,
+    out: Option<&Utf8Path>,
+    defaults: &RecordDefaults,
+) -> Result<Capture, Diagnostic> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read `{path}`: {e}"))?;
     let recipe: Recipe = toml::from_str(&text).map_err(|e| format!("parse `{path}`: {e}"))?;
     if recipe.shots.is_empty() {
@@ -235,11 +218,14 @@ pub(crate) fn read_recipe(path: &Utf8Path, out: Option<&Utf8Path>) -> Result<Cap
                         fps: record.fps,
                         seconds: record.seconds,
                         keep: shot.video.unwrap_or(Trace::Always),
-                        formats: record.format,
+                        formats: record.format.or(defaults.formats).unwrap_or_default(),
                         hold: record.hold,
-                        input: record.input.as_ref().and_then(RecipeInput::corner),
+                        input: defaults.input,
                     };
-                    record.check(shot.play.is_some()).map(|()| record)
+                    let has_play = shot.play.is_some();
+                    record
+                        .check(has_play)
+                        .map(|()| record.holding(defaults.hold, has_play))
                 })
                 .transpose()
                 .map_err(|e| format!("shot `{}`: {e}", shot.name))?;

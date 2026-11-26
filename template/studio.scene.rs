@@ -2,8 +2,8 @@
 //! that touches it with every kind of input: a click,
 //! a shortcut, typing, a drag, a scroll and a hover.
 //!
-//! Recorded with `input = true`, the keys and the mouse
-//! show over it as a screencast would.
+//! Recorded, the keys and the mouse show over it
+//! as a screencast would.
 
 use gallery::{matchers::gt, prelude::*};
 

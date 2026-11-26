@@ -363,7 +363,8 @@ fn a_tall_capture_keeps_its_full_png_and_uploads_a_smaller_sheet_panel() {
         "#},
     )
     .unwrap();
-    let capture = read_recipe(&recipe, None).expect("a tall capture recipe");
+    let capture =
+        read_recipe(&recipe, None, &RecordDefaults::default()).expect("a tall capture recipe");
     render(
         &manifest,
         Renderer::Glow,

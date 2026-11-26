@@ -30,6 +30,9 @@ pub(crate) struct Films {
     /// as what comes and goes in `output` could be seen by git, and by hot reload.
     recordings: Utf8PathBuf,
     video: Video,
+    /// How the catalog records: a video's hold,
+    /// and the corner its input panel is in.
+    recording: RecordDefaults,
     /// The catalog's crate.
     krate: String,
     files: OnceLock<Result<Files, String>>,
@@ -76,9 +79,15 @@ impl Films {
             output,
             recordings,
             video,
+            recording: RecordDefaults::default(),
             krate,
             files: OnceLock::new(),
         }
+    }
+
+    /// These films, made as `recording`, a catalog's `[record]`, says.
+    pub(crate) fn recorded_as(self, recording: RecordDefaults) -> Self {
+        Self { recording, ..self }
     }
 
     fn place(&self, play: &PlayEntry, renderer: &str) -> Result<Utf8PathBuf, String> {
@@ -129,7 +138,7 @@ impl Films {
         let at = self.place(play, renderer)?;
         let path = self.files()?.next("apng");
         let recorded = temporary(&path)?;
-        watch(harness, &path, FPS)?;
+        watch(harness, &path, FPS, self.recording.hold)?;
         Ok(Some(Film {
             films: self,
             recording: None,
@@ -183,7 +192,7 @@ impl Film<'_> {
                 Some(layer) => layer,
                 None => {
                     let size = egui::vec2(frame.width() as f32, frame.height() as f32) / scale;
-                    let opened = InputLayer::open(session, size, scale, Some(Corner::default()));
+                    let opened = InputLayer::open(session, size, scale, films.recording.input);
                     layer.insert(opened.map_err(|e| e.summary())?)
                 }
             };

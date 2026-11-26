@@ -1,29 +1,27 @@
-# Where gallery looks for scenes. Globs are relative to this file. The default finds the bundled
-# `example.scene.rs`; once your components live in their own crate, point this at them instead — scene
-# files are co-located with the components they exercise, e.g. `["../my-components/src/**/*.scene.rs"]`.
+# Paths are relative to this file.
+
+# Scene files, e.g. `["../my-components/src/**/*.scene.rs"]`.
 scene_globs = ["{{scene_globs}}"]
-# Extra hot-reload files or directories, relative to this file.
-# hot_watch_paths = ["../shared/assets"]
+# hot_watch_paths = ["../shared/assets"] # more to hot-reload on
 title = "{{title}}"
 
-# How far a play's screenshot may stray from its reference: `threshold` is how far apart two pixels' colours may be and
-# still count as alike (0 to 1), `tolerance` how many pixels may differ. A table per renderer sets its own over these.
+# How far a play's screenshot may stray from its reference.
 # [snapshots]
-# threshold = 0.1
-# tolerance = 0
-# [snapshots.wgpu]
+# threshold = 0.1 # colour distance, 0 to 1
+# tolerance = 0 # pixels allowed to differ
+# [snapshots.wgpu] # per renderer
 # tolerance = 200
 
-# Which plays' videos the tests keep, "off", "failing" or "always",
-# and where they go, with the tests' HTML report: relative to this file,
-# or `gallery/` in cargo's target directory unless set.
+# The tests' videos and HTML report.
 # [tests]
-# video = "failing"
+# video = "failing" # or "off", "always"
 # output = "target/tests"
 
-# The pointer recordings draw, gallery's own unless set: an SVG of it, one of it while a button is held,
-# both relative to this file, and the point of them on the pointer, in their own units.
+# Every recording's defaults.
 # [record]
-# cursor_default = "assets/cursor.svg"
-# cursor_pressed = "assets/cursor-pressed.svg"
+# format = "mp4" # or "apng", or ["apng", "mp4"]
+# hold = 0.5 # seconds paused at each step
+# input = "bottom-left" # keys and mouse panel corner, or false
+# cursor_default = "brand/cursor.svg" # colour-filled SVG paths only
+# cursor_pressed = "brand/cursor-pressed.svg"
 # cursor_hotspot = [1, 1]

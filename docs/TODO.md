@@ -63,27 +63,37 @@ past a handful of images, and a structural target beside the pixel one.
 
 ## Later
 
+- [ ] Every setting should be writable in the config, a flag only a shortcut over it, as `[record]` is. `--size`,
+  `--scale`, `--no-trim` and `--frames` have recipe keys but no `gallery.toml` default; `--log` and `--steps` have
+  neither.
+
 - [ ] The first build of a `--hot` run reports only to the terminal — `build_lib` blocks before the window exists, so
   the compile you wait longest for has nowhere to show. Little stands in the way: the loader tolerates a missing dylib
   and the header draws with no scenes, so the window could open first and the watcher's first build fill it. Against it:
   you are looking at the terminal when you launch, and the blocking build stays anyway for headless runs and for
   `--scene`, which resolves against the manifest before the window opens. Revisit for a gallery launched from an
   editor's task runner, where no terminal is visible.
+
 - [ ] Auto-re-sync an instance's scaffolded files (`justfile` / `build.rs` / `main.rs`) from upstream as the template
   evolves. Hard to do safely — it must not clobber consumer edits — so `just update`'s "you're behind, here's what
   changed" is the lightweight stand-in for now.
+
 - [ ] A panic in gallery's own host code under a dylib play, e.g. inside egui_kittest's `step`, aborts the process after
   printing its message. A panic is only catchable by the `std` that raised it, and catching on the host would also catch
   the scene's panics, raised by the dylib's `std`, and abort on those instead.
+
 - [ ] A play's pointer gesture aims at a widget covered by a window or popup over it as at one in plain sight, and lands
   on whatever covers it. Catching it needs a hit test against the layers above the widget's.
+
 - [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one
   run reports every check that failed. The log already keeps every check; what is missing is a play that outlives one.
+
 - [ ] A recording's pointer jumps from widget to widget, since a gesture moves it in one frame. A glide only in the
   file, as `hold` pauses only there: `--record-cursor [EASING]`, off by default, adds frames between the pointer's last
   place and the gesture's target while the scene's frame stays still, then the gesture runs as before. The play draws
   the same frames either way, so tests, traces and frame budgets are untouched; widgets passed on the way are not
   hovered.
+
   - Easing names map onto a few of `emath::easing`'s: `linear`, `cubic-in-out` (the default), `cubic-out`, `back-out`.
   - Travel time follows the distance, clamped to about 0.15–0.6 s, counted in frames so the file stays byte-identical.
   - The overlay draws the pointer, so the glide moves that cursor alone.

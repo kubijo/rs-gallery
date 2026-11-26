@@ -12,8 +12,7 @@ use super::*;
 use crate::video::resized;
 
 /// The corner the keys and mouse panel sits in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum Corner {
     #[default]
     BottomLeft,
@@ -22,18 +21,13 @@ pub(crate) enum Corner {
     TopRight,
 }
 
-impl std::str::FromStr for Corner {
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, String> {
-        match raw {
-            "bottom-left" => Ok(Self::BottomLeft),
-            "bottom-right" => Ok(Self::BottomRight),
-            "top-left" => Ok(Self::TopLeft),
-            "top-right" => Ok(Self::TopRight),
-            _ => Err(format!(
-                "`{raw}` is not a corner: `bottom-left`, `bottom-right`, `top-left` or `top-right`"
-            )),
+impl From<gallery_build::Corner> for Corner {
+    fn from(corner: gallery_build::Corner) -> Self {
+        match corner {
+            gallery_build::Corner::BottomLeft => Self::BottomLeft,
+            gallery_build::Corner::BottomRight => Self::BottomRight,
+            gallery_build::Corner::TopLeft => Self::TopLeft,
+            gallery_build::Corner::TopRight => Self::TopRight,
         }
     }
 }
@@ -206,6 +200,7 @@ pub(super) struct OverlayApp {
     shown: Shown,
     /// Where the keys and mouse panel goes; `None` shows the pointer alone.
     corner: Option<Corner>,
+    cursor: &'static super::cursor::Cursor,
 }
 
 const INK: egui::Color32 = egui::Color32::WHITE;
@@ -234,7 +229,7 @@ impl eframe::App for OverlayApp {
                 egui::Id::new("gallery-pointer"),
             ));
             let pressed = self.shown.buttons.contains(&true);
-            super::cursor::cursor().paint(&painter, at, pressed);
+            self.cursor.paint(&painter, at, pressed);
         }
     }
 }
@@ -334,7 +329,7 @@ impl InputOverlay {
     /// the pointer, and the keys and mouse panel in `corner` if there is one.
     ///
     /// # Errors
-    /// When the renderer cannot open a harness.
+    /// When the cursor cannot be read, or the renderer cannot open a harness.
     pub(super) fn open(
         session: &Session,
         size: egui::Vec2,
@@ -369,6 +364,12 @@ impl InputOverlay {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Overlays this thread has opened.
+    pub(crate) static OVERLAYS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// What draws the input over a frame: a harness, and its last image,
 /// drawn again only when what it shows changes.
 pub(super) struct InputLayer {
@@ -381,16 +382,20 @@ impl InputLayer {
     /// drawn on the shot's own renderer.
     ///
     /// # Errors
-    /// When the renderer cannot open a harness.
+    /// When the cursor cannot be read, or the renderer cannot open a harness.
     pub(super) fn open(
         session: &Session,
         size: egui::Vec2,
         scale: f32,
         corner: Option<Corner>,
     ) -> Result<Self, Diagnostic> {
+        #[cfg(test)]
+        OVERLAYS.set(OVERLAYS.get() + 1);
+        let cursor = super::cursor::cursor()?;
         let harness = open_apart(size, scale, session, |_| OverlayApp {
             shown: Shown::default(),
             corner,
+            cursor,
         })?;
         Ok(Self {
             harness,

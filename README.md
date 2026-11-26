@@ -616,8 +616,17 @@ scene = "form"
 play = "saves_after_a_moment"
 record = { fps = 30 } # a play shot records the whole play, so it takes no `seconds`
 video = "failing" # optional; "always" unless set
-# `hold = 0.5` is the default: seconds the recording pauses at each step's end, 0 for none
-# `input = true` shows the play's keys and mouse, bottom-left; or `input = "top-right"`, etc.
+# `hold = 0.5`: seconds the recording pauses at each step's end, 0 for none; `gallery.toml`'s unless set
+```
+
+What a shot leaves unset, `gallery.toml`'s `[record]` sets for every recording of the catalog, and all but `format` for
+its tests' videos, which are MP4; for `--render --record`, a flag overrides it for one run:
+
+```toml
+[record]
+format = "mp4" # or "apng", or both: ["apng", "mp4"]; `--record-format`
+hold = 0.5 # `--record-hold`
+input = "bottom-left" # the keys and mouse panel: a corner, or false for none
 ```
 
 ```bash
@@ -630,21 +639,25 @@ machine renders. egui's own animations and the text cursor's blink, off for stil
 A play clicks in a couple of frames, too fast to follow, so its recording pauses on each step's last frame for `hold`
 seconds (`--record-hold`). The pause is only in the file: the play draws the same frames whether it records or not.
 
-A play's recording draws the pointer where it is, lit while a button is held. With `input` (`--record-input [CORNER]`),
-it also shows the input as a tutorial's screencast would: the keys pressed in the last moment and a mouse with its
-pressed button lit, in a panel in one corner. Both are laid over the recorded frames only; the shot's PNG, step
-screenshots and screenshot checks have no pointer, as a real screenshot has none.
+A play's recording draws the pointer where it is, lit while a button is held and for 0.3 s after a press so a click can
+be seen. It shows the input as a tutorial's screencast would: the keys pressed in the last moment and a mouse with its
+pressed button lit, in a panel in the corner `input` names. Both are laid over the recorded frames only; the shot's PNG,
+step screenshots and screenshot checks have no pointer, as a real screenshot has none.
 [`studio.scene.rs`](template/studio.scene.rs) is a scene to watch it on: a play that clicks, types, presses shortcuts,
 drags and scrolls across a scene filling its stage.
 
 The pointer is gallery's own unless `gallery.toml` names one, for a showcase in a product's own look. It takes an SVG,
-so it is sharp at any scale, and a second one for while a button is held; the hotspot is the point of both on the
-pointer, in their own units:
+so it is sharp at any scale, and a second one for while a button is held. Each is drawn at its `width` and `height` in
+points, so a 24×24 SVG makes a 24-point pointer; the hotspot is the point of both on the pointer, in those units, from
+the top-left. Only shapes filled with a colour are drawn, so an SVG with anything else is refused, naming it: an element
+that is not a shape, a group, `<use>` of one in the file, a title, description or metadata; a stroke, a gradient, a
+clip, mask, filter, blend mode or group opacity; anything hidden; a conditional attribute. A cursor that is refused or
+can't be read fails every play's recording and test video, naming the file; nothing else needs it:
 
 ```toml
 [record]
-cursor_default = "assets/cursor.svg"
-cursor_pressed = "assets/cursor-pressed.svg"
+cursor_default = "brand/cursor.svg"
+cursor_pressed = "brand/cursor-pressed.svg"
 cursor_hotspot = [1, 1]
 ```
 
@@ -721,11 +734,11 @@ output = "target/tests"
 
 A video is an MP4 at `<catalog's crate>/<module>/<play>/video.<renderer>.mp4` in there, the crate's dashes as
 underscores; a play of another crate has an `extern-<crate>` before its module. It shows every frame the play drew at 15
-a second, a pause on each step's last, the pointer, and the keys and mouse as a recording's `input` does, bottom-left.
-Where a check grows the canvas, the video grows with it, up to the 3840×2160 an MP4 can be. `failing` and `always`
-record every play alike, and differ in what they keep. Each test replaces its own video alone, so one whose play is gone
-stays until it's deleted. A directory gallery makes for them is ignored by git and by hot reload. Until a video is known
-to be kept it is in `gallery-recordings/` in cargo's target directory.
+a second, a pause on each step's last, the pointer, and the keys and mouse where `[record]`'s `input` puts them. Where a
+check grows the canvas, the video grows with it, up to the 3840×2160 an MP4 can be. `failing` and `always` record every
+play alike, and differ in what they keep. Each test replaces its own video alone, so one whose play is gone stays until
+it's deleted. A directory gallery makes for them is ignored by git and by hot reload. Until a video is known to be kept
+it is in `gallery-recordings/` in cargo's target directory.
 
 The test keeps its own time and no animations, and trouble with a video fails nothing. Filming does render frames a test
 would not, which a scene can tell in two ways: its paint callbacks run, so a panic in one ends the process and every

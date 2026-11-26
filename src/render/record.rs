@@ -308,16 +308,13 @@ fn pixels(harness: &egui_kittest::Harness<'static, Canvas>) -> egui::Vec2 {
     (harness.ctx.content_rect().size() * harness.ctx.pixels_per_point()).round()
 }
 
-/// Start sending every frame drawn, on a canvas at `scale`,
-/// to a recording beside `out` in each of its formats.
+/// Start sending every frame drawn to a recording beside `out` in each of its formats.
 /// What can't be recorded is told once it is [finished](finish).
 ///
 /// # Errors
 /// When there is no writing to a file where it goes.
 pub(super) fn start(
     harness: &mut egui_kittest::Harness<'static, Canvas>,
-    session: &Session,
-    scale: f32,
     out: &Utf8Path,
     record: Record,
 ) -> Result<(), String> {
@@ -328,13 +325,30 @@ pub(super) fn start(
         reason = "a canvas the session has drawn"
     )]
     let pixels = (size.x as u32, size.y as u32);
-    let mut recording = begun(pixels, out, record)?;
-    // Always: the pointer is drawn by the overlay, the panel only where `input` puts it.
-    if !recording.sinks.is_empty() {
-        let opened = InputOverlay::open(session, size / scale, scale, record.fps, record.input);
+    harness.state_mut().recording = Some(begun(pixels, out, record)?);
+    Ok(())
+}
+
+/// [`start`] for a play's recording, on a canvas at `scale`, with its input laid over it:
+/// the pointer, and the panel where `input` puts it.
+///
+/// # Errors
+/// As [`start`].
+pub(super) fn start_play(
+    harness: &mut egui_kittest::Harness<'static, Canvas>,
+    session: &Session,
+    scale: f32,
+    out: &Utf8Path,
+    record: Record,
+) -> Result<(), String> {
+    start(harness, out, record)?;
+    let size = pixels(harness) / scale;
+    if let Some(recording) = &mut harness.state_mut().recording
+        && !recording.sinks.is_empty()
+    {
+        let opened = InputOverlay::open(session, size, scale, record.fps, record.input);
         recording.show_input(opened);
     }
-    harness.state_mut().recording = Some(recording);
     Ok(())
 }
 
@@ -377,7 +391,8 @@ fn begun(size: (u32, u32), out: &Utf8Path, record: Record) -> Result<Recording, 
     Ok(recording)
 }
 
-/// Record into `out` at `fps`, only watching: an APNG that grows with the canvas.
+/// Record into `out` at `fps`, pausing `hold` seconds at each step's end,
+/// only watching: an APNG that grows with the canvas.
 /// It begins with the frame there is, as a play can fail before it draws one.
 ///
 /// # Errors
@@ -386,13 +401,14 @@ pub(super) fn watch(
     harness: &mut egui_kittest::Harness<'static, Canvas>,
     out: &Utf8Path,
     fps: u16,
+    hold: Option<f32>,
 ) -> Result<(), String> {
     let record = Record {
         fps,
         seconds: None,
         keep: Trace::Always,
         formats: VideoFormat::Apng.into(),
-        hold: None,
+        hold,
         input: None,
     };
     harness.ctx.add_plugin(Textures::default());

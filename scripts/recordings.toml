@@ -8,7 +8,7 @@ name = "studio-tour"
 scene = "studio"
 size = "960x540"
 play = "tours_every_kind_of_input"
-record = { fps = 30, input = true, format = ["apng", "mp4"] }
+record = { fps = 30, format = ["apng", "mp4"] }
 
 # Every matcher there is, passing in turn on a form recorded as it is.
 [[shot]]

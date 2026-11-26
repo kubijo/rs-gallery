@@ -105,6 +105,8 @@ so a minor release may carry a breaking change.
 - **Fixed: the Actions panel heard nothing from a scenes dylib.** The dylib's copy of gallery kept actions to itself; it
   now reports them to the shell.
 
+- **Fixed: an `Icon` drew its hidden paths.** A path with `visibility="hidden"` is no longer painted.
+
 - **Recipes grouped into `just dev`, `just demo` and `just release`.** `validate`, `format`, `snapshots`, `audit`,
   `docs`, `outdated`, `profile` and the `upgrade` recipes are `just dev::…` (`just dev::validate`); the demos are
   `just demo::wgpu`, `femtovg`, `plays` and `shell-scenes`; `just tag` and `just release-check` are `just release::tag`
@@ -112,14 +114,15 @@ so a minor release may carry a breaking change.
 
 - **Recordings.** A shot's `record = { fps, seconds }`, or `--record FPS:SECONDS`, writes what it draws beside its PNG;
   on a play shot, `record = { fps }` records the whole play, and `video = "failing"` keeps it only when the play fails,
-  while pausing `hold` seconds (0.5 unless set) on each step's end so it can be followed, and with `input = true`
-  (`--record-input`) shows the play's keys and mouse buttons over it; the pointer is drawn lit while a button is held,
-  gallery's own unless `gallery.toml`'s `[record]` names SVGs of one, and shots and screenshots have none; the
-  template's new `studio` scene carries a play touching it with every kind of input to show that on. Frame *n* is drawn
-  at exactly *n* / fps. The default is a seekable H.264 MP4; `format = "apng"` (`--record-format apng`) writes an APNG,
-  lossless and byte-identical between runs, and `format = ["apng", "mp4"]` (`--record-format apng,mp4`) both from one
-  run. The report's `videos` and the summary name each file, and the report adds what a frame cost to draw, capture and
-  encode.
+  while pausing `hold` seconds (0.5 unless set) on each step's end so it can be followed, and shows the play's keys and
+  mouse buttons over it; the pointer is drawn lit while a button is held and for 0.3 s after a press, and shots and
+  screenshots have none. `gallery.toml`'s `[record]` sets `format`, `hold`, the panel's corner (`input`, or `false`) and
+  SVGs of the pointer for every recording, the tests' MP4 videos too but for `format`, a shot's own `format` and `hold`
+  and the flags overriding it; the template's new `studio` scene carries a play touching it with every kind of input to
+  show that on. Frame *n* is drawn at exactly *n* / fps. The default is a seekable H.264 MP4; `format = "apng"`
+  (`--record-format apng`) writes an APNG, lossless and byte-identical between runs, and `format = ["apng", "mp4"]`
+  (`--record-format apng,mp4`) both from one run. The report's `videos` and the summary name each file, and the report
+  adds what a frame cost to draw, capture and encode.
 
 - **Dependencies.** usvg 0.50, notify 9 and process-wrap 11.
 

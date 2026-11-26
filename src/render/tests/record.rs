@@ -120,6 +120,18 @@ fn each_recorded_frame_is_the_scene_at_exactly_its_time() {
 
 #[cfg(not(target_vendor = "apple"))]
 #[test]
+fn a_recording_without_a_play_opens_no_overlay() {
+    let opened = OVERLAYS.get();
+    recorded("no-overlay", &manifest(clock_bar), 10, 0.2);
+    assert_eq!(
+        OVERLAYS.get(),
+        opened,
+        "no play gives it input, so it has no pointer to draw"
+    );
+}
+
+#[cfg(not(target_vendor = "apple"))]
+#[test]
 fn a_recording_of_a_still_scene_is_one_frame_held() {
     let (out, report) = recorded("still", &manifest(still), 10, 0.5);
     let (declared, shown) = decode(&video_path(&out, VideoFormat::Apng));
@@ -402,7 +414,7 @@ fn a_video_whose_encoder_failed_renders_no_more() {
         .join("video.apng");
     std::os::unix::fs::symlink("/dev/full", &link).expect("linked");
     let mut harness = staged_harness(flickers, "flickers");
-    watch(&mut harness, &link, 10).expect("it begins");
+    watch(&mut harness, &link, 10, None).expect("it begins");
     let rendered = RENDERED.get();
     for _ in 0..100 {
         step(&mut harness).expect("drawn");

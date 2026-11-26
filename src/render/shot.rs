@@ -316,7 +316,7 @@ pub(super) fn shoot_with_globals(
             }
             harness.state_mut().actions = Some(Vec::new());
             if let Some((record, out)) = recording {
-                start(&mut harness, session, shot.scale, out, record)
+                start_play(&mut harness, session, shot.scale, out, record)
                     .map_err(|why| unrecorded(out).cause(why))?;
             }
             let mut film = watch
@@ -539,8 +539,7 @@ pub(super) fn shoot_with_globals(
     if shot.play.is_none()
         && let Some((record, out)) = recording
     {
-        start(&mut harness, session, shot.scale, out, record)
-            .map_err(|why| unrecorded(out).cause(why))?;
+        start(&mut harness, out, record).map_err(|why| unrecorded(out).cause(why))?;
         if let Err(report) = record_frames(&mut harness, shot, record.frames()) {
             return Err(discard(&mut harness, report));
         }
