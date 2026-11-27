@@ -1,0 +1,48 @@
+# What the catalog's tests of `just demo::plays` leave in .tmp/plays/tests/: the report, results, which the script counts,
+# a video of each play that fails and no other's, and what each snapshot check has to show.
+version = 1
+strict = true
+
+[paths]
+"index.html" = { type = "file", min_size = 1 }
+"app_gallery/results-wgpu/order.json" = { type = "file", min_size = 1 }
+"app_gallery/results-wgpu/smoke/**/*.{json,fragment}" = { type = "file", min_size = 1 }
+"app_gallery/results-wgpu/play/**/*.{json,fragment}" = { type = "file", min_size = 1 }
+
+# What keeps the directory out of git and off the hot-reload watcher, and the processes that write to it apart.
+".gitignore" = { type = "file", min_size = 1 }
+"CACHEDIR.TAG" = { type = "file", min_size = 1 }
+".gallery-rebuilds" = { type = "file" }
+".gallery-rebuilt" = { type = "file", min_size = 1 }
+".gallery-writes" = { type = "file" }
+
+"app_gallery/plays/asserts_the_wrong_order/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/clicks_a_tag_scrolled_out_of_sight/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/compares_with_a_reference_never_taken/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/counts_the_wrong_number_left/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/differs_from_its_reference/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/expects_the_wrong_action/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/panics_at_a_frames_end/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/panics_outside_a_step/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/reads_other_than_its_reference/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/removes_by_an_ambiguous_label/video.wgpu.mp4" = { type = "file", min_size = 1 }
+"app_gallery/plays/waits_for_a_save_that_never_comes/video.wgpu.mp4" = { type = "file", min_size = 1 }
+
+[paths."app_gallery/plays/compares_with_a_reference_never_taken/snapshots-wgpu/one-task.wgpu.new.png"]
+type = "file"
+min_size = 1
+
+[paths."app_gallery/plays/differs_from_its_reference/snapshots-wgpu/one-task.wgpu.{png,new.png,diff.png}"]
+type = "file"
+count = 3
+min_size = 1
+
+# Tolerated, it passed: the reference alone, nothing left beside it.
+[paths."app_gallery/plays/tolerates_what_its_budget_allows/snapshots-wgpu/one-task.wgpu.png"]
+type = "file"
+min_size = 1
+
+[paths."app_gallery/plays/reads_other_than_its_reference/snapshots-wgpu/one-task-done.accesskit.{json,wgpu.new.json}"]
+type = "file"
+count = 2
+min_size = 1

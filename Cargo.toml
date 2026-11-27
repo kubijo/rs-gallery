@@ -15,31 +15,32 @@ categories = ["gui", "development-tools"]
 camino = { version = "1", features = ["serde1"] }
 cargo_metadata = "0.23"
 egui = { version = "0.36", features = ["serde"] }
-# Native accessibility belongs to the shell, even if egui_kittest stops enabling it for captures.
-eframe = {
-   version = "0.36",
-   default-features = false,
-   features = ["accesskit", "wgpu", "glow", "default_fonts", "wayland", "x11"]
-}
+eframe = { version = "0.36", default-features = false, features = [
+   "accesskit",
+   "wgpu",
+   "glow",
+   "default_fonts",
+   "wayland",
+   "x11",
+] }
 winit = { version = "0.30", default-features = false }
 inventory = "0.3"
 gallery-macros = { path = "gallery-macros" }
-# The launcher and a scenes `build.rs` must resolve `gallery.toml`'s globs to the same strings,
-# so the reading lives in the crate the build script already pulls in.
 gallery-build = { path = "gallery-build" }
-# Gallery opens the scenes dylib itself; a reloader that closes the one it replaces cannot be used.
 libloading = "0.9"
-# Atomic temporary names keep concurrent gallery processes off each other's mapped dylibs.
 tempfile = "3"
-notify = "8"
+notify = "9"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: a tree's numbers must read back as they were written.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 toml = "1"
-usvg = { version = "0.49", default-features = false }
+usvg = { version = "0.50", default-features = false }
+simplecss = "0.2"
+svgtypes = "0.16"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 sublime_fuzzy = "0.7"
-process-wrap = { version = "10", features = ["std"] }
+process-wrap = { version = "11", features = ["std"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
 convert_case = "0.12"
 egui_extras = { version = "0.36.0", default-features = false }
@@ -50,19 +51,52 @@ regex = "1"
 anstream = "1"
 anstyle = "1"
 egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }
+kittest = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.18"
+crc32fast = "1"
+openh264 = "0.9"
+muxide = { version = "0.5", default-features = false }
 glutin = { version = "0.32", default-features = false, features = ["egl"] }
 supports-hyperlinks = "3"
-percent-encoding = "2"
+supports-color = "3"
+anstyle-hyperlink = { version = "1", features = ["file"] }
+miette = { version = "7", default-features = false, features = ["fancy-no-backtrace"] }
+# Rust for sources, JSON for AccessKit snapshots: each `lang-*` feature builds a grammar's C parser.
+arborium = { version = "2.18", default-features = false, features = ["lang-rust", "lang-json"] }
+arborium-highlight = "2.18"
+owo-colors = "4"
+anstyle-parse = "1"
+textwrap = "0.16"
+comfy-table = { version = "8", features = ["custom_styling"] }
+console = "0.16"
+crossterm = { version = "0.29", default-features = false }
+unicode-width = "0.2"
+terminal_size = "0.4"
 binpack2d = "1"
 indoc = "2"
 pollster = "1"
+libtest-mimic = "0.8"
+googletest = "0.14"
+strsim = "0.11"
+# Its default turns on every `image` codec; it is handed decoded images only.
+dify = { version = "0.8", default-features = false }
+similar = "3"
+# Its default's `config` feature needs basic-toml, unmaintained (RUSTSEC-2026-0374).
+askama = { version = "0.16", default-features = false, features = ["derive", "std"] }
+jiff = { version = "1", default-features = false, features = ["std", "serde"] }
+percent-encoding = "2"
+sanitize-filename = "0.6"
+walkdir = "2"
+gif = { version = "0.14", default-features = false, features = ["std"] }
+quantette = { version = "0.6", default-features = false, features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "stdio"] }
 
 [features]
-# Forwarded egui_extras loader gates, so an instance enables one without declaring egui_extras.
 extras-svg = ["egui_extras/svg"]
 extras-image = ["egui_extras/image"]
-# The shell's own chrome as scenes (`just shell-scenes`). Off by default: a consumer's sidebar is theirs.
 shell-scenes = []
 
 [[example]]
@@ -70,9 +104,8 @@ name = "shell-scenes"
 required-features = ["shell-scenes"]
 
 [dev-dependencies]
-# `snapshot` here, not above: its differ would otherwise land in every consumer's binary for something
-# only these tests do. Move it up behind an optional feature once consumers can verify (TODO, Tier 1).
 egui_kittest = { version = "0.36", features = ["snapshot"] }
+mp4 = "0.14"
 
 # Test-only, never linked: puts glow 0.16 in Cargo.lock so the
 # `femtovg_demo_pins_a_glow_version_distinct_from_eframe` test can assert it stays distinct from eframe's

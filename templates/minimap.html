@@ -1,0 +1,30 @@
+<nav aria-label="Scenes and plays">
+    {% for catalog in catalogs %}
+        <section class="catalog">
+            <a class="catalog" href="#{{ catalog.id }}">
+                {{ catalog.krate }}
+                <span class="aside">{{ catalog.renderer }}</span>
+            </a>
+            {% for scene in catalog.scenes %}
+                <div class="scene">
+                    <a class="{{ scene.verdict }}"
+                       href="#{{ scene.id }}"
+                       title="{{ scene.key }}">
+                        <span class="mark" aria-hidden="true"></span>
+                        <span class="unseen">{{ scene.verdict }}:</span>
+                        {{ scene.name }}
+                    </a>
+                    {% for trial in scene.trials %}
+                        <a class="{{ trial.classes }}"
+                           href="#{{ trial.id }}"
+                           {% if trial.plain %}hidden{% endif %}>
+                            <span class="mark" aria-hidden="true"></span>
+                            <span class="unseen">{{ trial.verdict }}:</span>
+                            {{ trial.name }}
+                        </a>
+                    {% endfor %}
+                </div>
+            {% endfor %}
+        </section>
+    {% endfor %}
+</nav>

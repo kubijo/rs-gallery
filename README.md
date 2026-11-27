@@ -110,11 +110,24 @@ with the staging left to the caller, for a cell that needs the context back — 
 host added to `SceneCtx` itself.
 
 On the context, `ctx.slider(...)`, `ctx.toggle(...)`, `ctx.text(...)`, `ctx.color(...)`, `ctx.select(...)` declare
-**controls** (knobs). Calling one registers the control in the right-hand panel *and* returns its current value, so
-tweaking it re-renders the scene — [`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. A momentary action
-uses `ctx.button("Reset", || reset())`; its callback runs once per click and carries no state into capture recipes. The
-`ctx.set_slider(...)` family writes a value back by label, so content that does its own hit-testing — a slider drawn
-inside the preview, a rendered button — drives the panel too.
+**controls** (knobs). Calling one registers the control in the right-hand panel *and* returns a `Knob` handle to it:
+`get()` reads the current value, so tweaking it re-renders the scene, and `set(value)` writes it back, snapped as the
+control itself would. [`knobs.scene.rs`](template/knobs.scene.rs) exercises every kind. A momentary action uses
+`ctx.button("Reset", || reset())`; its callback runs once per click and carries no state into capture recipes.
+
+A handle is a cheap `Clone` that needs no `ctx` to write, so a fully controlled component reacts to interactions by
+writing its change event back. The scene plays the parent that owns the state, and the panel follows:
+
+```rust
+let power = ctx.toggle("power", false);
+stage!(ctx, ui, Stage::Fit, |ui| {
+    Switch::new(power.get())
+        .on_change({ let power = power.clone(); move |on| { power.set(on); } })
+        .show(ui);
+});
+```
+
+A write lands in the knob store when the scene returns. A handle kept past its frame refuses writes.
 
 Define catalog-wide controls with `CatalogGlobals`. Gallery renders the controls and passes their typed value to scenes;
 the consumer decides how the value affects the preview. The generated demo has the runnable version in
@@ -281,7 +294,7 @@ Unconsumed Tab/Shift+Tab cycle filtered scenes; unconsumed Escape clears the fil
 widgets or indents code instead. Cmd/Ctrl+F, Cmd/Ctrl+B and Cmd/Ctrl+Shift+L/R remain gallery shortcuts.
 
 [`keyboard.scene.rs`](template/keyboard.scene.rs) demonstrates capture, focus release and text editing, with the last
-key shown in the panel and an Actions log. Run `just demo-wgpu --hot --scene keyboard`, then edit
+key shown in the panel and an Actions log. Run `just demo::wgpu --hot --scene keyboard`, then edit
 `.tmp/demo-wgpu/keyboard.scene.rs`, not the template. Rerunning the recipe regenerates the demo.
 
 ## Rendering scenes to images
@@ -299,7 +312,8 @@ The image is the canvas alone — no sidebar, controls or header — so it stays
 
 A size is where the scene lays itself out, not a crop of the result. A scene that comes out bigger than the size asked
 for — a wide table, a tall list — is captured whole, at the size it turned out to need, rather than cut off at the edge
-the way the window would scroll it.
+the way the window would scroll it. The popups and windows over it count as drawn too, so a menu left open is in the
+picture.
 
 A size is in points, the unit a window lays out in; `scale` says how many device pixels go to one of them, as a
 display's scale factor does. `--scale 2` is what a HiDPI screen shows: the same layout at four times the pixels. It
@@ -337,6 +351,17 @@ frames = 40 # an animated scene draws a different frame each time; pick one
 knobs = { dots = 96, accent = "#6C9CD8" }
 ```
 
+`size`, `scale`, `trim` and `frames` go shot, recipe, then `gallery.toml`'s `[render]` for every shot of the catalog;
+`--render` takes the flags, then `[render]`. A window never exits on `[render] frames`, only on `--frames`.
+
+```toml
+[render]
+size = "1280x720"
+scale = 1
+trim = true # crop to what the scene drew; `--no-trim`
+frames = 4 # drawn before a shot is taken, 2 or more
+```
+
 The CLI accepts repeatable `--knob LABEL=VALUE` for `--render` and `--global LABEL=VALUE` for both `--render` and
 `--capture`; capture knobs belong to the recipe because each shot can differ:
 
@@ -353,8 +378,13 @@ recipe edits. Quote the whole assignment when its label contains spaces. `--init
 overridden values too. With `--init-capture`, listings and image summaries go to stderr so stdout stays TOML.
 
 A knob or global-control key is its label, or a regex over the labels — the exact label wins, so punctuation like
-`width (chars)` needs no escaping. Choices take an option label, colours a hex string. `just knobs <scene>` prints
-global controls first when the catalog declares them, followed by scene knobs, ready to paste:
+`width (chars)` needs no escaping, and a knob holding a value wins over a group or button of its label. Choices take an
+option label, colours a hex string. A value its knob can't take yet — a number past the range, an option not offered, a
+group or button standing in for a hidden knob of its label — waits, in case another knob brings it, and fails the shot
+if it never lands. A key that lands on one knob and later on another — a key whose own knob is hidden at first, or
+hidden later by a play, reads as a regex — fails too. Anchor it as `^…$` and escape its punctuation, even for an exact
+label; a key can't follow a label that changes, so give each label its own key. `just knobs <scene>` prints global
+controls first when the catalog declares them, followed by scene knobs, ready to paste:
 
 ```text
 buttons "body style" = "sedan"  (sedan | suv | hatch)
@@ -389,6 +419,370 @@ content. That needs an EGL driver present; without one the run stops and says so
 picture the window would never show. Under `Renderer::Wgpu` the capture carries the render state a window does, so a
 scene painting through a wgpu callback is captured rather than left out of the PNG.
 
+## Driving a scene with plays
+
+Knobs set a scene's inputs; they cannot hover a button, focus a field or type into it. A play does that, the way a
+person would, finding widgets by their accessible label or role rather than by where they happen to be drawn:
+
+```rust
+#[play(form)]
+fn saves_after_a_moment(p: &mut Play) -> PlayResult {
+    p.fill("Name", "Ada")?;
+    p.expect("Name").to_have_value("Ada")?;
+    p.click("Count")?;
+    p.expect_action("counted 1")?;
+    p.click(By::button().label("Save"))?;
+    p.step("the save lands", |p| p.expect("Saved Ada").to_exist())
+}
+```
+
+A bare string is a label; `By` narrows by role, a label fragment or a value when that alone is ambiguous, and
+`By::button()`, `slider()`, `checkbox()`, `combo_box()` and `text_input()` start from a role. `press` takes a shortcut
+as written — `"Enter"`, `"Shift+Tab"`, `"Cmd+A"` — by egui's key names and `Cmd`, `Ctrl`, `Alt` and `Shift`, in any
+case; plays press keys as Linux and Windows do, so `Cmd` and `Ctrl` are one key. A typo fails the press, suggesting the
+name it most likely meant. The prelude brings `Key`, `Modifiers` and `Role` for anything past those. A gesture waits, a
+frame at a time, for exactly one widget to match, and fails naming what was on screen if none does. A pointer gesture
+aims at the middle of what shows of its widget, and fails at once if none of it does, scrolled away or past the canvas's
+edge; scroll it into view first. Each gesture is a fixed sequence of frames — a click is a move, a press, a release and
+a frame to settle — so a play draws the same frames on any machine. Drags ease in and out. `set_pace` sets how many
+frames drags, scrolls and typing take, and whether gestures aim off-centre: quick and dead centre by default,
+`Pace::showcase()` for a recording someone watches (at 60 fps, a drag in ¾ s, 20 characters a second, each gesture near
+its widget's middle at a point its label fixes). `step` names part of the script and takes the blame for any panic in
+it, and `set_knob` holds a knob over whatever the recipe set. A held scene knob, the recipe's or the play's, refuses the
+scene's own `set`; a `set_knob` value that never lands fails the play. A scene can have several plays, each known by its
+function's name.
+
+### What a play expects
+
+`p.expect(by)` checks the widget `by` matches, drawing frames until the check holds — within the play's wait budget, or
+`.within(frames)` — so no check needs a wait around it:
+
+| Matcher                                      | Holds when                                |
+| -------------------------------------------- | ----------------------------------------- |
+| `to_exist`, `to_be_absent`                   | one widget matches; none does             |
+| `to_have_count(n)`                           | as many match                             |
+| `to_have_value`, `to_have_label`             | its value or accessible name matches      |
+| `to_have_description`, `to_have_placeholder` | its description or empty-field text does  |
+| `to_have_numeric_value`                      | a slider's or drag value's number matches |
+| `to_be_focused`                              | it has keyboard focus                     |
+| `to_be_disabled`, `to_be_enabled`            | as named                                  |
+| `to_be_checked`, `to_be_partially_checked`   | a checkbox is on, or mixed                |
+| `to_be_selected`, `to_be_expanded`           | as named                                  |
+| `to_be_visible`, `to_be_hidden`              | it has a place on screen, or none         |
+
+[`checks.scene.rs`](template/checks.scene.rs) is the reference: a form whose play passes every matcher in turn, recorded
+by `just demo::recordings`. egui's own widgets report a placeholder, focus, disabled, checked and a value; none reports
+a description, expanded or hidden, and `add_visible(false, …)` keeps a widget in the tree as shown. A widget that has
+them says so itself, as that scene's do: `ui.ctx().accesskit_node_builder(response.id, |node| node.set_expanded(open))`.
+
+`.not()` expects the opposite, and `.because("…")` puts the check in the play's own words. A plain value means equality;
+anything else is one of googletest's matchers, re-exported as `gallery::matchers`:
+`to_have_value(contains_substring("Ad"))`, `to_have_numeric_value(gt(0.0))`, `to_have_count(all![gt(1), lt(5)])`.
+`p.expect_value(|p| …, matcher)` polls any value the play can compute, and `p.expect_action(…)` waits for the scene to
+report an action through `gallery::action`. A failure says what was expected, what was found, and points at the line; a
+plain `assert!` still fails its step, without the two.
+
+### Capturing a play
+
+A shot captures the state a play leaves behind:
+
+```bash
+just play form saves_after_a_moment /tmp/saved.png
+```
+
+```toml
+[[shot]]
+name = "saved"
+scene = "form"
+play = "saves_after_a_moment"
+trace = "always" # optional; "failing" unless set
+```
+
+While a capture runs, each play's log — its steps, gestures and checks, with the frames each drew — shows on stderr. On
+a terminal the running play's tree is redrawn in place, and a play that passed folds to one line; through a pipe, in CI,
+on a dumb terminal or under an agent's harness each play is printed once it is over, the same lines without redrawing.
+`--steps` keeps a passing play's whole tree, as a single `--play` always does; `--log live|linear|off`, or
+`GALLERY_LOG`, overrides the choice for a harness that pretends to be a terminal. `gallery.toml`'s `[plays]` sets both
+for every run, below the flags and `GALLERY_LOG`: `steps = true`, `log = "linear"`. `GALLERY_LOG_PACE=300` holds each
+live redraw for 300 ms, slow enough to follow a run or record it.
+
+A play that fails does not stop the run: the other shots still run, the summary marks each shot passed or failed, and
+each failure follows in a panel that names the step and shows the play's own failing line. A failed play keeps a
+screenshot after every step in a directory beside the shot, `renders/saved.steps/01-fill-name.png` and on, which
+`trace = "always"` keeps for a passing play too. The run exits non-zero. The report's `play` gives its `steps` and its
+whole `log`, each check with what it expected and found; `failed_shots` adds the `check` that failed.
+
+A capture makes pictures and recordings, at whatever size, scale and knobs its shots ask for. What a play expects still
+has to hold, as that is also how a play waits; its [snapshots](#comparing-screenshots) are not compared, and its log
+says so.
+
+Screenshots show the pointer where the play left it, as `egui_kittest` draws it. It stays in the final shot too: the
+hover it marks is the state a hover play exists to capture.
+
+[`form.scene.rs`](template/form.scene.rs) and [`keyboard.scene.rs`](template/keyboard.scene.rs) carry plays to start
+from.
+
+### Comparing screenshots
+
+In the [catalog's tests](#testing-a-catalog), `p.expect(Canvas)` checks the canvas against a reference image — the
+scene's content and any popup or window over it. A canvas too small for them grows to hold them, and the play goes on
+with it grown:
+
+```rust
+p.expect(Canvas).to_match_screenshot("saved")?;
+p.expect(Canvas).to_match_screenshot(Screenshot::named("menu-open").tolerance(400))?;
+```
+
+References sit beside the play's file, by module, play and the check's name, one per renderer, since wgpu and glow never
+draw a pixel alike: `__snapshots__/form/saves_after_a_moment/saved.wgpu.png`. The check's name is lower-cased and
+dashed, `"Menu open"` as `menu-open`; the module and the play are as written. Of two scene files with one name the
+second in the build is numbered, as `form_1`, so adding or renaming one can move the other's references. The tests run
+every play at 1280×720 and scale 1 with the scene's own knobs, so a reference means one thing.
+
+A canvas that already matches passes without drawing a frame. Otherwise frames are drawn until the scene stops asking
+for them, as a shot's `settle` does, and that frame is judged. A canvas not settled when the wait budget runs out is
+judged as it is, says so, and is never taken as a reference: a scene that animates for ever can only pass against one it
+already has.
+
+A check with no reference yet fails, as does one that differs past its budget, and leaves what it saw as
+`saved.wgpu.new.png`, with a `.diff.png` marking each pixel that differs in red over the reference in grey. Look at it,
+then take it with `UPDATE_SNAPSHOTS=1 just test`; `UPDATE_SNAPSHOTS=force` retakes every reference that differs at all,
+within budget or not. The variable takes the values `egui_kittest` gives it. A catalog ignores the leftovers with
+`**/__snapshots__/**/*.new.*` and `**/__snapshots__/**/*.diff.*` in its `.gitignore`. As these come and go, cargo does
+not watch a scenes' directory with snapshots beneath it, only the scene files: one added there is found with the next
+edit to another.
+
+The budget is set once in `gallery.toml`, and per renderer over it; a check's own `Screenshot` outranks both:
+
+```toml
+[snapshots]
+threshold = 0.1 # how far apart two pixels' colours may be and still count as alike, 0 to 1; the default
+tolerance = 0 # how many pixels may differ; the default
+
+[snapshots.wgpu]
+tolerance = 200 # GPUs differ from each other and from CI's software Vulkan
+```
+
+A pixel that differs only as antialiasing does is not counted, and is yellow in the diff; `threshold = 0` counts every
+pixel. A failure says what the comparison came to, `312 pixels differ, 400 allowed`, and lists the reference, what was
+seen and the diff.
+
+A check that passes with pixels differing, within its budget, is *tolerated*: it passes, and says so, marked `≈` with
+how many differ, in the terminal, the JSON report and the HTML report, whose filter picks out the tests it passed. A
+drift that is starting shows before it fails.
+
+### Comparing what a scene says
+
+An AccessKit snapshot compares the accessibility tree instead: what the scene says rather than how it is drawn. Colours,
+fonts and drivers leave it alone, and a change reads as lines in a review. It is of the canvas, or of one widget and
+what is inside it:
+
+```rust
+p.expect(Canvas).to_match_accesskit_snapshot("saved")?;
+p.expect("Settings").to_match_accesskit_snapshot("settings")?; // a window, by its title
+```
+
+The reference is JSON in the shape `egui_inspection_tools` gives a tree for `egui_mcp`, without its ids and with the
+states it leaves out, named as AccessKit names them:
+
+```json
+[
+  {
+    "role": "TextInput",
+    "label": "Name",
+    "value": "Ada",
+    "focused": true
+  },
+  {
+    "role": "Window",
+    "label": "Settings",
+    "children": [
+      {
+        "role": "CheckBox",
+        "label": "Newsletter",
+        "toggled": "True"
+      }
+    ]
+  }
+]
+```
+
+A widget may also have `numeric_value` with its `min_` and `max_`, `selected`, `expanded`, `disabled`, `read_only`,
+`required`, `placeholder` and `description`. What groups others and says nothing itself, what is hidden, and a window's
+resize handles are left out.
+
+It waits, fails and is taken as a screenshot is, into `saved.accesskit.json`, one for both renderers; a formatter may
+lay it out as it likes. A failure shows the lines that changed, and `.diff.txt` keeps them. `.not()` has no meaning for
+it and fails.
+
+## Recording
+
+A shot can record what it draws beside its PNG, as `saved.mp4`, `saved.apng` or `saved.gif`:
+
+```toml
+[[shot]]
+name = "orbit"
+scene = "orbit"
+record = { fps = 60, seconds = 2 } # optional; `format = "apng"`, or both: `format = ["apng", "mp4"]`
+
+[[shot]]
+name = "saved"
+scene = "form"
+play = "saves_after_a_moment"
+record = { fps = 30 } # a play shot records the whole play, so it takes no `seconds`
+video = "failing" # optional; "always" unless set
+# `hold = 0.5`: seconds the recording pauses at each step's end, 0 for none; `gallery.toml`'s unless set
+# `glide = "cubic-out"`: glide the pointer to each gesture; `true` for `gallery.toml`'s easing, `false` for none
+```
+
+What a shot leaves unset, `gallery.toml`'s `[record]` sets for every recording of the catalog, and all but `format` for
+its tests' videos, which are MP4; for `--render --record`, a flag overrides it for one run:
+
+```toml
+[record]
+format = "mp4" # or "apng", "gif", or several: ["apng", "gif"]; `--record-format`
+hold = 0.5 # `--record-hold`
+input = "bottom-left" # the keys and mouse panel: a corner, or false for none
+glide = false # or true (cubic-in-out), "linear", "cubic-in-out", "cubic-out", "off"; `--record-glide [EASING|off]`
+glide_speed = 1200 # points a second
+glide_time = [0.15, 0.6] # fewest and most seconds a glide takes, up to 5
+glide_dwell = 0.2 # seconds resting after a glide before acting, up to 5
+```
+
+```bash
+gallery --scene orbit --render orbit.png --record 60:2
+```
+
+Time is set, not measured: frame *n* is drawn at exactly *n* / fps, so a recording comes out the same however fast the
+machine renders. egui's own animations and the text cursor's blink, off for stills, play in a recording.
+
+A play clicks in a couple of frames, too fast to follow, so its recording pauses on each step's last frame for `hold`
+seconds (`--record-hold`). The pause is only in the file: the play draws the same frames whether it records or not.
+
+A gesture moves the pointer in one frame, so it jumps between widgets. With `glide` on, the recording first glides it
+there along a slight arc, over the scene as it stands, taking time by distance (`glide_speed`, within `glide_time`),
+then rests `glide_dwell` seconds before it presses, types or scrolls. Drags and the first pointer don't glide. Only the
+file has it; the play draws the same frames.
+
+A play's recording draws the pointer where it is, lit while a button is held and for 0.3 s after a press so a click can
+be seen. It shows the input as a tutorial's screencast would: the keys pressed in the last moment and a mouse with its
+pressed button lit, in a panel in the corner `input` names. Both are laid over the recorded frames only; the shot's PNG,
+step screenshots and screenshot checks have no pointer, as a real screenshot has none.
+[`studio.scene.rs`](template/studio.scene.rs) is a scene to watch it on: a play that clicks, types, presses shortcuts,
+drags and scrolls across a scene filling its stage. [`tasks.scene.rs`](template/tasks.scene.rs), a task board toured at
+`Pace::showcase()`, is the showcase; `just showcase` records it, gliding, as an MP4 and a GIF.
+
+The pointer is gallery's own unless `gallery.toml` names one, for a showcase in a product's own look. It takes an SVG,
+so it is sharp at any scale, and a second one for while a button is held. Each is drawn at its `width` and `height` in
+points, so a 24×24 SVG makes a 24-point pointer; the hotspot is the point of both on the pointer, in those units, from
+the top-left. Only shapes filled with a colour are drawn, so an SVG with anything else is refused, naming it: an element
+that is not a shape, a group, `<use>` of one in the file, a title, description or metadata; a stroke, a gradient, a
+clip, mask, filter, blend mode or group opacity; anything hidden; a conditional attribute. A cursor that is refused or
+can't be read fails every play's recording and test video, naming the file; nothing else needs it:
+
+```toml
+[record]
+cursor_default = "brand/cursor.svg"
+cursor_pressed = "brand/cursor-pressed.svg"
+cursor_hotspot = [1, 1]
+```
+
+- **MP4** (H.264), the default: small, and seekable and pausable in any player, with a keyframe every second. Up to
+  3840×2160 pixels, either way up. Encoded by OpenH264, which builds from bundled C++, so a first build needs a C++
+  compiler.
+- **APNG**: lossless and byte-identical between runs, so a recording can itself be compared, but few players can pause
+  or seek it. A frame that repeats lengthens the one before it, and only the rectangle that changed is written.
+- **GIF**: shows anywhere an image does (chat, issues, READMEs), byte-identical between runs. Its limits:
+  - *256 colours per recording.* Up to 256 come out exact; past that, one palette serves every frame, undithered, so
+    close shades merge and gradients band.
+  - *No transparency*, as in an MP4.
+  - *At most 50 fps*: delays are whole hundredths, and browsers slow anything under 2. Up to 50 fps a frame lasts its
+    time to the hundredth (10, 20, 25 and 50 fps are even, 30 mixes 3 and 4); faster, frames snap to 1/50 s slots and
+    one landing on a taken slot is dropped, unless it is the last.
+  - *Larger and slower than an MP4*: it records into a temporary APNG and reads it twice at the end.
+
+Several formats (`--record-format apng,mp4`) are written from one run of the shot, every file from the same frames.
+
+A recording that does not come out whole is removed and fails its shot, even one whose play passed, which then has no
+image either; the run goes on, as after a play that fails. Without a play, it ends the run. A canvas that changes size
+as it is recorded fails every format, since a recording's frames are all of one size. Where only one format fails, the
+report points at the other, and a play shot's `lost_videos` say why. A recording that cannot be written where it goes
+ends the run, and a file there that cannot be written over stays as it is.
+
+The report's `videos` has an entry per format: its path, frames drawn, held, glided and written, and the average cost of
+a frame to draw, render and read back, and encode.
+
+## Testing a catalog
+
+`tests/scenes.rs`, declared with `harness = false`, turns every scene and play into a test:
+
+```rust
+gallery::test_main!(gallery::Renderer::Wgpu);
+```
+
+```bash
+just test        # or `cargo test --test scenes`
+just test play:: # only the plays; `--list` lists them all
+```
+
+`smoke::<scene>` draws a scene at its defaults until it settles and fails on an error or a panic;
+`play::<scene>::<name>` runs a play and fails as the play does. The scenes come from the same dylib the window loads, so
+a test crosses the boundary the window does. A panic is caught where the scene raised it, so it fails only that scene's
+test and names the scene's own line; in the window, the canvas shows it in place of the scene. nextest runs the same
+binary.
+
+A panic in a paint callback of the scene's (`egui_wgpu::Callback`, `egui_glow::CallbackFn`) is only its own to catch: it
+is raised while the frame is rendered, not drawn, and the dylib's `std` and the host's can't catch each other's panics.
+It ends the process, a capture's or the window's too, after its message and a line naming the scene.
+
+Every run of a test leaves an HTML report of them all, `index.html` in the tests' output, with each play's log,
+snapshots and video; the test binary ends with its path, unless it is quiet or nextest's. A minimap jumps to a scene or
+a play, the buttons show only what failed, a log line's time seeks the play's video, if that is kept, to it, and an
+image opens to be zoomed into and flickered between the reference and what was seen. It links only to files in the
+output and reads without JavaScript, so CI can upload it as it is:
+
+```yaml
+- uses: actions/upload-artifact@v7
+  if: ${{ !cancelled() }}
+  with:
+    name: catalog-tests
+    path: target/gallery
+```
+
+A test that was not run keeps its last result, marked with when it ran, until gallery's version changes; one that ends
+its process is shown unfinished; one that is gone is dropped, but for its play's files. Several crates' tests, or both
+renderers', share a report when they share an output: a crate that is gone is left out, the results of a renderer no
+longer tested stay until its `results-<renderer>` in there is deleted, and a crate's test binaries on one renderer write
+over each other's. So do two projects whose crates have one name, as with a target directory they share: give each an
+`output` of its own. A report that can't be written, or has less than all results, is warned of and fails nothing; on a
+file system without locks, processes at it together may leave one that is behind.
+
+A play that fails leaves a video of itself, which its report points at. `gallery.toml` says which are kept, and where:
+
+```toml
+[tests]
+video = "failing" # the default; or "off", "always"
+# Of the report and the videos, relative to this file; `gallery/` in cargo's target directory unless set.
+output = "target/tests"
+```
+
+A video is an MP4 at `<catalog's crate>/<module>/<play>/video.<renderer>.mp4` in there, the crate's dashes as
+underscores; a play of another crate has an `extern-<crate>` before its module. It shows every frame the play drew at 15
+a second, a pause on each step's last, the pointer, and the keys and mouse where `[record]`'s `input` puts them. Where a
+check grows the canvas, the video grows with it, up to the 3840×2160 an MP4 can be. `failing` and `always` record every
+play alike, and differ in what they keep. Each test replaces its own video alone, so one whose play is gone stays until
+it's deleted. A directory gallery makes for them is ignored by git and by hot reload. Until a video is known to be kept
+it is in `gallery-recordings/` in cargo's target directory.
+
+The test keeps its own time and no animations, and trouble with a video fails nothing. Filming does render frames a test
+would not, which a scene can tell in two ways: its paint callbacks run, so a panic in one ends the process and every
+other test in it, and frames take longer, so what a scene does on a thread or by the wall clock gets further within the
+same frames.
+
+A frame painted as the last was is held rather than rendered, unless it has a paint callback or a texture of the scene's
+own. Each one rendered costs a dev build some 40 ms, or 10 ms with the crates that read frames back and encode them
+optimised, as the template's `Cargo.toml` has them; in a workspace, its `[profile.dev.package]` goes in the root's.
+
 ## How it works
 
 `#[scene]` self-registers through [`inventory`]; `build.rs` reads `gallery.toml` and compiles in the scene files its
@@ -396,37 +790,35 @@ globs match; `launch!` reads the same file, builds them into the crate's dylib a
 down once and both go to them, so a bare `cargo build` — a CI type-check, an editor — finds the scenes a run finds. The
 dylib is what `--hot` swaps without restarting — still one crate.
 
-Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` proc-macro), `gallery-build` (the
-`build.rs` helper).
+Three crates: `gallery` (shell and framework), `gallery-macros` (the `#[scene]` and `#[play]` proc-macros),
+`gallery-build` (the `build.rs` helper).
 
-## Dependency compatibility and accessibility advisories
+## Dependency compatibility
 
 Gallery and scenes use compatible egui 0.36 dependencies. Native accessibility uses `eframe/accesskit`, and runtime
-capture uses `egui_kittest`. `gallery-build` has no accessibility stack.
-
-The unresolved RUSTSEC-2026-0370, RUSTSEC-2026-0371 and RUSTSEC-2026-0372 have documented exceptions in `deny.toml`,
-pending an upstream AccessKit/AT-SPI migration to zbus 6. Accessibility and checks for other findings remain enabled.
+capture uses `egui_kittest`. `gallery-build` has no accessibility stack. `just dev::audit` excepts only the unmaintained
+crates egui 0.36's accessibility pins, in [`deny.toml`](deny.toml).
 
 ## Cutting a release
 
 Write the notes under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) as the work lands, then, from a clean `main`:
 
 ```bash
-just tag minor # or major, or patch
+just release::tag minor # or major, or patch
 ```
 
 It bumps `[workspace.package] version` — the one place a version is written, inherited by all three crates — dates the
 `## [Unreleased]` heading to it, refreshes the lockfile, and prints what it is about to do before asking. On yes it
-re-reads its own edits (`just release-check v<version>`), runs `just validate`, then commits and tags `v<version>`.
-Pushing is yours: `git push --follow-tags`.
+re-reads its own edits (`just release::check v<version>`), runs `just dev::validate`, then commits and tags
+`v<version>`. Pushing is yours: `git push --follow-tags`.
 
-CI runs the same `release-check` on a tag push, along with the rest of the gate, so what is released is what passed.
+CI runs the same `release::check` on a tag push, along with the rest of the gate, so what is released is what passed.
 
 ## Status & roadmap
 
 Discovery, the tree, hot-reload, knobs — reading and writing them from the scene — source view, SVG icons and headless
 capture all work, on either renderer. Open: a wgpu offscreen texture path (glow has `ctx.offscreen`; wgpu draws inline
-through `ctx.render_state`) and publishing to crates.io.
+through `ctx.render_state`).
 
 ## License
 

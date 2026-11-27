@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `just demo-<variant>` runs the consumer init command against THIS checkout: scaffold template/ straight
+# `just demo::<variant>` runs the consumer init command against THIS checkout: scaffold template/ straight
 # into a git-ignored .tmp/demo-<variant>/ with --no-workspace (so it never touches this repo's own workspace),
 # repoint the gallery deps at the working tree, and run it. Any trailing arguments go to the gallery
 # binary (e.g. --hot). Re-run (or delete the dir) to reset; the build cache lives in .tmp/target/demo-<variant>
@@ -37,9 +37,14 @@ fi
 # template's own [workspace] then keeps the instance standalone.
 rm -rf "$demo"
 mkdir -p "$repo/.tmp"
-cargo generate --path "$repo/template" --destination "$repo/.tmp" --name "demo-$variant" --no-workspace \
-    --vcs none --silent --define gallery_git=LOCAL --define scene_globs='*.scene.rs' \
-    --define title="gallery demo ($variant)"
+# Held back unless it fails: `--silent` still leaves its progress lines,
+# with paths shortened to initials (`~/d/k/r/.tmp/demo-wgpu`).
+if ! generated=$(cargo generate --path "$repo/template" --destination "$repo/.tmp" \
+    --name "demo-$variant" --no-workspace --vcs none --silent --define gallery_git=LOCAL \
+    --define scene_globs='*.scene.rs' --define title="gallery demo ($variant)" 2>&1); then
+    printf '%s\n' "$generated" >&2
+    exit 1
+fi
 
 # Repoint the git-dep placeholders at this working tree so the demo exercises local changes.
 sed -i \
@@ -58,12 +63,20 @@ if [ "$variant" = femtovg ]; then
     sed -i -e '/^\[dependencies\]/a femtovg = "0.20.4"' -e '/^\[dependencies\]/a glow = "0.16"' \
         "$demo/Cargo.toml"
     cp "$repo/scripts/offscreen.scene.rs" "$demo/offscreen.scene.rs"
-
-    # Surface the mismatch before launching: every glow version the dependency graph resolved.
-    echo "demo: glow versions in this binary, bridged only by the GL loader:" >&2
-    cargo tree --manifest-path "$demo/Cargo.toml" 2>/dev/null \
-        | grep -oE '\bglow v[0-9]+\.[0-9]+\.[0-9]+' | sort -u | sed 's/^/  /' >&2
 fi
+
+# Scene files the template doesn't ship, for a run that needs them (`just demo::plays`),
+# with the snapshot references beside them. One per line, so a path may hold spaces.
+while IFS= read -r scene; do
+    if [ -n "$scene" ]; then
+        cp "$scene" "$demo/"
+        snapshots="$(dirname "$scene")/__snapshots__"
+        if [ -d "$snapshots" ]; then
+            cp -R "$snapshots" "$demo/"
+            find "$demo/__snapshots__" -type f \( -name '*.new.*' -o -name '*.diff.*' \) -delete
+        fi
+    fi
+done <<<"${GALLERY_DEMO_SCENES:-}"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/.tmp/target}/demo-$variant"
 

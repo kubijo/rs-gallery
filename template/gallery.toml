@@ -1,7 +1,43 @@
-# Where gallery looks for scenes. Globs are relative to this file. The default finds the bundled
-# `example.scene.rs`; once your components live in their own crate, point this at them instead — scene
-# files are co-located with the components they exercise, e.g. `["../my-components/src/**/*.scene.rs"]`.
+# Paths are relative to this file.
+
+# Scene files, e.g. `["../my-components/src/**/*.scene.rs"]`.
 scene_globs = ["{{scene_globs}}"]
-# Extra hot-reload files or directories, relative to this file.
-# hot_watch_paths = ["../shared/assets"]
+# hot_watch_paths = ["../shared/assets"] # more to hot-reload on
 title = "{{title}}"
+
+# How shots are drawn, unless a recipe or a flag says otherwise.
+# [render]
+# size = "1280x720"
+# scale = 1 # device pixels to the point
+# trim = true # crop to what the scene drew
+# frames = 4 # drawn before a headless shot is taken, 2 or more
+
+# How plays report as they run.
+# [plays]
+# steps = false # each play's whole log, not one line for a pass
+# log = "live" # or "linear", "off"; GALLERY_LOG outranks it
+
+# How far a play's screenshot may stray from its reference.
+# [snapshots]
+# threshold = 0.1 # colour distance, 0 to 1
+# tolerance = 0 # pixels allowed to differ
+# [snapshots.wgpu] # per renderer
+# tolerance = 200
+
+# The tests' videos and HTML report.
+# [tests]
+# video = "failing" # or "off", "always"
+# output = "target/tests"
+
+# Every recording's defaults.
+# [record]
+# format = "mp4" # or "apng", "gif", or ["apng", "mp4"]
+# hold = 0.5 # seconds paused at each step
+# input = "bottom-left" # keys and mouse panel corner, or false
+# glide = false # or "off", true, "linear", "cubic-in-out", "cubic-out"
+# glide_speed = 1200 # points a second
+# glide_time = [0.15, 0.6] # fewest and most seconds, up to 5
+# glide_dwell = 0.2 # seconds resting before the next action
+# cursor_default = "brand/cursor.svg" # colour-filled SVG paths only
+# cursor_pressed = "brand/cursor-pressed.svg"
+# cursor_hotspot = [1, 1]

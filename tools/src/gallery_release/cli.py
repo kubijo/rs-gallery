@@ -36,10 +36,10 @@ from .repo import (
 )
 
 HELP = (
-    "Cut a release, or check that a tag names one. `just tag major|minor|patch` moves the one "
-    "version the workspace declares, dates the changelog's Unreleased section, and — once you "
-    "have seen what that comes to and said yes — commits and tags it. `just release-check` asks "
-    "the same question of a tag that already exists, which is what CI runs on a tag push.\n\n"
+    "Cut a release, or check that a tag names one. `just release::tag major|minor|patch` moves "
+    "the one version the workspace declares, dates the changelog's Unreleased section, and — once "
+    "you have seen what that comes to and said yes — commits and tags it. `just release::check` "
+    "asks the same question of a tag that already exists, which is what CI runs on a tag push.\n\n"
     "Pushing is left to a human: git push --follow-tags"
 )
 
@@ -136,7 +136,7 @@ def _cut(level: Level) -> None:
 def run_release_checks(here: Path) -> None:
     for recipe in ("validate", "audit", "outdated"):
         out.rule(f"[bold]{recipe}")
-        run("just", recipe, cwd=here)
+        run("just", f"dev::{recipe}", cwd=here)
 
 
 def _plan(current: str, version: str, date: str) -> Table:

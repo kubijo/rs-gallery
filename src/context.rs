@@ -2,19 +2,20 @@
 //!
 //! [`SceneCtx`] is what a scene receives each frame beside the [`Ui`](egui::Ui) it draws into.
 //! Its knob accessors are **declarative by use**:
-//! calling `ctx.slider(...)` both registers the control and returns its current value — the first frame
-//! creates it at its default, later frames return the value set in the controls panel. Values persist in
-//! the host per scene, so they survive hot-reloads. A [`button`](SceneCtx::button) is the momentary
-//! exception: it runs a callback once instead of carrying a value. Under the glow renderer the context
-//! also exposes offscreen GL rendering (see [`SceneCtx::offscreen`]).
+//! calling `ctx.slider(...)` both registers the control and returns a [`Knob`] to it.
+//! The first frame creates it at its default; later frames hold what the panel or a `set` left there.
+//! Values persist in the host per scene, so they survive hot-reloads.
+//! A [`button`](SceneCtx::button) is the exception: it runs a callback once instead of holding a value.
+//! Under the glow renderer the context also exposes offscreen GL rendering (see [`SceneCtx::offscreen`]).
 
-use std::{any::TypeId, sync::Arc};
+use std::{any::TypeId, rc::Rc, sync::Arc};
 
 use eframe::{egui_wgpu, glow};
 
 use crate::GlobalKey;
 use crate::globals::{GlobalState, GlobalWrite, Writable};
-use crate::knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
+use crate::handle::{Knob, KnobValue, Pending};
+use crate::knobs::{ChoiceStyle, KnobState, Pad2D, Pad2DSpec, Span};
 use crate::offscreen::{GlDeps, ImageInput, Offscreen, StageTexture};
 use crate::pass::{ScenePass, WgpuDeps};
 
@@ -37,12 +38,19 @@ impl SceneRevision {
 /// ```ignore
 /// #[scene("greeting")]
 /// fn greeting(ctx: &mut SceneCtx, ui: &mut egui::Ui) {
-///     let name = ctx.text("name", "world");
+///     let name = ctx.text("name", "world").get();
 ///     ui.heading(format!("Hello, {name}"));
 /// }
 /// ```
 pub struct SceneCtx<'a> {
-    knobs: &'a mut Vec<Knob>,
+    knobs: &'a mut Vec<KnobState>,
+    handles: Vec<Rc<dyn Pending>>,
+    /// Knobs a capture's overrides hold this frame; their handles refuse writes.
+    pinned: Vec<Pin>,
+    /// Whether an accessor changed a knob's range or options this frame.
+    reshaped: bool,
+    /// The scene's panic, caught in the copy of gallery it was raised in.
+    panicked: Option<ScenePanic>,
     globals: Option<&'a [u8]>,
     global_writable: &'a [Writable],
     global_writes: Vec<GlobalWrite>,
@@ -56,6 +64,77 @@ pub struct SceneCtx<'a> {
     stage_styles: Option<StageStyles>,
 }
 
+/// A scene's panic, caught where it was raised and handed back to the host.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct ScenePanic {
+    pub(crate) message: String,
+    /// The scene's own line that panicked.
+    pub(crate) at: Option<crate::play::SourceAt>,
+}
+
+impl std::fmt::Display for ScenePanic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.at {
+            Some(at) => write!(f, "{} (at {}:{})", self.message, at.file, at.line),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
+/// Run a scene, keeping its panic on `ctx` rather than unwinding it into the host.
+///
+/// `#[scene]` registers a wrapper calling this, so it runs in the scenes dylib's copy of gallery:
+/// a panic is only catchable by the `std` that raised it.
+#[doc(hidden)]
+pub fn __run_scene(
+    ctx: &mut SceneCtx<'_>,
+    ui: &mut egui::Ui,
+    scene: &'static str,
+    render: fn(&mut SceneCtx<'_>, &mut egui::Ui),
+) {
+    crate::play::draws(scene);
+    if let Err(error) = crate::play::caught(|| render(ctx, ui)) {
+        ctx.panicked = Some(ScenePanic {
+            message: error.reason().to_owned(),
+            at: error.at().cloned(),
+        });
+    }
+}
+
+/// A knob an override holds, by label, kind and rank among knobs of both,
+/// so a knob coming or going before it doesn't move the pin.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct Pin {
+    label: String,
+    kind: std::mem::Discriminant<KnobState>,
+    rank: usize,
+}
+
+impl Pin {
+    pub(crate) fn of(knobs: &[KnobState], at: usize) -> Self {
+        let label = knobs[at].label();
+        let kind = std::mem::discriminant(&knobs[at]);
+        Self {
+            label: label.to_owned(),
+            kind,
+            rank: knobs[..at]
+                .iter()
+                .filter(|k| k.label() == label && std::mem::discriminant(*k) == kind)
+                .count(),
+        }
+    }
+}
+
+/// A scene that panics never reaches `finish`;
+/// its handles still close, so a stashed one can't claim a later write landed.
+impl Drop for SceneCtx<'_> {
+    fn drop(&mut self) {
+        for handle in &self.handles {
+            handle.close();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct StageStyles {
     chrome: Arc<egui::Style>,
@@ -66,12 +145,6 @@ impl StageStyles {
     pub(crate) fn new(chrome: Arc<egui::Style>, content: Arc<egui::Style>) -> Self {
         Self { chrome, content }
     }
-}
-
-/// A choice knob found by label: which option it sits on, and what it may sit on.
-struct Choice<'a> {
-    chosen: &'a mut usize,
-    options: &'a [String],
 }
 
 /// How much room a [`stage`](SceneCtx::stage) takes.
@@ -258,7 +331,7 @@ const PASS_NEEDS_WGPU: &str = "render_pass() needs the wgpu renderer";
 impl<'a> SceneCtx<'a> {
     #[cfg(test)]
     pub(crate) fn new(
-        knobs: &'a mut Vec<Knob>,
+        knobs: &'a mut Vec<KnobState>,
         gl: Option<GlDeps<'a>>,
         wgpu: Option<WgpuDeps<'a>>,
     ) -> Self {
@@ -267,7 +340,7 @@ impl<'a> SceneCtx<'a> {
 
     #[cfg(test)]
     pub(crate) fn with_revision(
-        knobs: &'a mut Vec<Knob>,
+        knobs: &'a mut Vec<KnobState>,
         gl: Option<GlDeps<'a>>,
         wgpu: Option<WgpuDeps<'a>>,
         revision: SceneRevision,
@@ -276,7 +349,7 @@ impl<'a> SceneCtx<'a> {
     }
 
     pub(crate) fn with_globals(
-        knobs: &'a mut Vec<Knob>,
+        knobs: &'a mut Vec<KnobState>,
         gl: Option<GlDeps<'a>>,
         wgpu: Option<WgpuDeps<'a>>,
         revision: SceneRevision,
@@ -285,6 +358,10 @@ impl<'a> SceneCtx<'a> {
     ) -> Self {
         Self {
             knobs,
+            handles: Vec::new(),
+            pinned: Vec::new(),
+            reshaped: false,
+            panicked: None,
             globals: globals.map(|globals| globals.parts().1),
             global_writable: globals.map_or(&[], GlobalState::writable),
             global_writes: Vec::new(),
@@ -905,10 +982,8 @@ impl<'a> SceneCtx<'a> {
         )
     }
 
-    /// How many knobs the scene declared this frame — the shell truncates the store to this, dropping
-    /// controls the scene stopped declaring (e.g. one hidden behind a now-off toggle).
-    pub(crate) fn declared(&self) -> usize {
-        self.cursor
+    pub(crate) fn take_panic(&mut self) -> Option<ScenePanic> {
+        self.panicked.take()
     }
 
     pub(crate) fn take_global_writes(&mut self) -> Vec<GlobalWrite> {
@@ -918,9 +993,9 @@ impl<'a> SceneCtx<'a> {
     /// The knob at the current cursor, created (or replaced, if its kind/label changed) from `fresh`.
     fn slot(
         &mut self,
-        fresh: impl FnOnce() -> Knob,
-        keep: impl FnOnce(&Knob) -> bool,
-    ) -> &mut Knob {
+        fresh: impl FnOnce() -> KnobState,
+        keep: impl FnOnce(&KnobState) -> bool,
+    ) -> &mut KnobState {
         let i = self.cursor;
         self.cursor += 1;
         if i >= self.knobs.len() {
@@ -940,13 +1015,13 @@ impl<'a> SceneCtx<'a> {
     /// Returns `true` when the callback ran this frame.
     pub fn button(&mut self, label: &str, on_click: impl FnOnce()) -> bool {
         let clicked = match self.slot(
-            || Knob::Button {
+            || KnobState::Button {
                 label: label.to_owned(),
                 clicked: false,
             },
-            |k| matches!(k, Knob::Button { label: l, .. } if l == label),
+            |k| matches!(k, KnobState::Button { label: l, .. } if l == label),
         ) {
-            Knob::Button { clicked, .. } => std::mem::take(clicked),
+            KnobState::Button { clicked, .. } => std::mem::take(clicked),
             _ => false,
         };
         if clicked {
@@ -955,77 +1030,91 @@ impl<'a> SceneCtx<'a> {
         clicked
     }
 
-    pub fn text(&mut self, label: &str, default: &str) -> String {
-        match self.slot(
-            || Knob::Text {
+    pub fn text(&mut self, label: &str, default: &str) -> Knob<String> {
+        self.slot(
+            || KnobState::Text {
                 label: label.to_owned(),
                 value: default.to_owned(),
             },
-            |k| matches!(k, Knob::Text { label: l, .. } if l == label),
-        ) {
-            Knob::Text { value, .. } => value.clone(),
-            _ => default.to_owned(),
-        }
+            |k| matches!(k, KnobState::Text { label: l, .. } if l == label),
+        );
+        self.handle()
     }
 
     /// A numeric slider over `min..=max`.
     /// `step` is the snap increment and sets the readout's decimals
     /// (`0.1` → one, `0.01` → two); pass `0.0` for a smooth slider.
-    pub fn slider(&mut self, label: &str, default: f32, min: f32, max: f32, step: f32) -> f32 {
-        match self.slot(
-            || Knob::Slider {
+    pub fn slider(
+        &mut self,
+        label: &str,
+        default: f32,
+        min: f32,
+        max: f32,
+        step: f32,
+    ) -> Knob<f32> {
+        let knob = self.slot(
+            || KnobState::Slider {
                 label: label.to_owned(),
                 value: default,
                 min,
                 max,
                 step,
             },
-            |k| matches!(k, Knob::Slider { label: l, .. } if l == label),
-        ) {
-            Knob::Slider { value, .. } => *value,
-            _ => default,
+            |k| matches!(k, KnobState::Slider { label: l, .. } if l == label),
+        );
+        if let KnobState::Slider {
+            value,
+            min: was_min,
+            max: was_max,
+            step: was_step,
+            ..
+        } = knob
+            && !(Span::new(*was_min, *was_max).same_bits(Span::new(min, max))
+                && was_step.to_bits() == step.to_bits())
+        {
+            (*was_min, *was_max, *was_step) = (min, max, step);
+            *value =
+                crate::handle::slider_value(*value, Span::new(min, max), step).unwrap_or(*value);
+            self.reshaped = true;
         }
+        self.handle()
     }
 
-    pub fn toggle(&mut self, label: &str, default: bool) -> bool {
-        match self.slot(
-            || Knob::Toggle {
+    pub fn toggle(&mut self, label: &str, default: bool) -> Knob<bool> {
+        self.slot(
+            || KnobState::Toggle {
                 label: label.to_owned(),
                 value: default,
             },
-            |k| matches!(k, Knob::Toggle { label: l, .. } if l == label),
-        ) {
-            Knob::Toggle { value, .. } => *value,
-            _ => default,
-        }
+            |k| matches!(k, KnobState::Toggle { label: l, .. } if l == label),
+        );
+        self.handle()
     }
 
-    pub fn color(&mut self, label: &str, default: egui::Color32) -> egui::Color32 {
-        match self.slot(
-            || Knob::Color {
+    pub fn color(&mut self, label: &str, default: egui::Color32) -> Knob<egui::Color32> {
+        self.slot(
+            || KnobState::Color {
                 label: label.to_owned(),
                 value: default,
             },
-            |k| matches!(k, Knob::Color { label: l, .. } if l == label),
-        ) {
-            Knob::Color { value, .. } => *value,
-            _ => default,
-        }
+            |k| matches!(k, KnobState::Color { label: l, .. } if l == label),
+        );
+        self.handle()
     }
 
-    /// A dropdown of `options`; returns the selected index.
-    pub fn select(&mut self, label: &str, options: &[&str], default: usize) -> usize {
+    /// A dropdown of `options`, holding the selected index.
+    pub fn select(&mut self, label: &str, options: &[&str], default: usize) -> Knob<usize> {
         self.choice(label, options, default, ChoiceStyle::Dropdown)
     }
 
     /// Like [`select`](Self::select), rendered as a vertical stack of radio buttons.
-    pub fn radio(&mut self, label: &str, options: &[&str], default: usize) -> usize {
+    pub fn radio(&mut self, label: &str, options: &[&str], default: usize) -> Knob<usize> {
         self.choice(label, options, default, ChoiceStyle::Radio)
     }
 
     /// Like [`select`](Self::select), rendered as an inline segmented row of buttons;
     /// long option sets wrap onto further rows.
-    pub fn buttons(&mut self, label: &str, options: &[&str], default: usize) -> usize {
+    pub fn buttons(&mut self, label: &str, options: &[&str], default: usize) -> Knob<usize> {
         self.choice(label, options, default, ChoiceStyle::Buttons)
     }
 
@@ -1035,48 +1124,49 @@ impl<'a> SceneCtx<'a> {
         options: &[&str],
         default: usize,
         style: ChoiceStyle,
-    ) -> usize {
+    ) -> Knob<usize> {
         let options: Vec<String> = options.iter().map(|opt| (*opt).to_owned()).collect();
         let last = options.len().saturating_sub(1);
         let knob = self.slot(
             {
                 let options = options.clone();
-                move || Knob::Select {
+                move || KnobState::Select {
                     label: label.to_owned(),
                     value: default.min(last),
                     options,
                     style,
                 }
             },
-            |k| matches!(k, Knob::Select { label: l, style: s, .. } if l == label && *s == style),
+            |k| matches!(k, KnobState::Select { label: l, style: s, .. } if l == label && *s == style),
         );
-        match knob {
-            Knob::Select {
-                value,
-                options: current,
-                ..
-            } => {
-                *current = options; // options can change between frames; keep them fresh
-                (*value).min(last)
-            }
-            _ => default,
+        if let KnobState::Select {
+            value,
+            options: current,
+            ..
+        } = knob
+            && *current != options
+        {
+            *current = options;
+            *value = (*value).min(last);
+            self.reshaped = true;
         }
+        self.handle()
     }
 
     /// A labelled separator grouping the following knobs.
     pub fn group(&mut self, label: &str) {
         self.slot(
-            || Knob::Group {
+            || KnobState::Group {
                 label: label.to_owned(),
             },
-            |k| matches!(k, Knob::Group { label: l } if l == label),
+            |k| matches!(k, KnobState::Group { label: l } if l == label),
         );
     }
 
     /// A 2-axis pad, wherever it currently sits.
-    pub fn pad2d(&mut self, label: &str, spec: Pad2DSpec) -> Pad2D {
-        match self.slot(
-            || Knob::Pad2D {
+    pub fn pad2d(&mut self, label: &str, spec: Pad2DSpec) -> Knob<Pad2D> {
+        let knob = self.slot(
+            || KnobState::Pad2D {
                 label: label.to_owned(),
                 x: spec.default_x,
                 y: spec.default_y,
@@ -1086,171 +1176,66 @@ impl<'a> SceneCtx<'a> {
                 max_y: spec.max_y,
                 invert_y: spec.invert_y,
             },
-            |k| matches!(k, Knob::Pad2D { label: l, .. } if l == label),
-        ) {
-            Knob::Pad2D { x, y, .. } => Pad2D { x: *x, y: *y },
-            _ => Pad2D {
-                x: spec.default_x,
-                y: spec.default_y,
-            },
-        }
-    }
-
-    /// Write a slider's stored value, clamped to its range and snapped to its `step`.
-    ///
-    /// The `set_*` family is the write half of the accessors:
-    /// content that does its own hit-testing reads the knob, observes the event, then writes it back.
-    /// Keep that order — a write takes the first knob of its kind labelled exactly `label`,
-    /// which before the declaring accessor may still be last frame's.
-    /// A miss changes nothing and returns `false`; landing is not surviving,
-    /// since a knob the scene stops declaring is truncated away, write and all.
-    pub fn set_slider(&mut self, label: &str, value: f32) -> bool {
-        if !value.is_finite() {
-            return false;
-        }
-        let found = self.knobs.iter_mut().find_map(|knob| match knob {
-            Knob::Slider {
-                label: l,
-                value,
-                min,
-                max,
-                step,
-            } if l == label => Some((value, *min, *max, *step)),
-            _ => None,
-        });
-        let Some((stored, min, max, step)) = found else {
-            return false;
-        };
-        // `f32::clamp` panics on a NaN bound, which a scene is free to declare.
-        if min.is_nan() || max.is_nan() {
-            return false;
-        }
-        // Clamp then snap from the range's start, as egui's `Slider::set_value` does — so a write
-        // and a drag agree. Clamped again after, because a step that doesn't divide the range
-        // rounds its last stop past the end, and a knob holding what its own slider would reject
-        // is worse than the hair of disagreement.
-        let (lo, hi) = (min.min(max), min.max(max));
-        let mut value = value.clamp(lo, hi);
-        if step > 0.0 && min.is_finite() {
-            value = (min + ((value - min) / step).round() * step).clamp(lo, hi);
-        }
-        *stored = value;
-        true
-    }
-
-    pub fn set_toggle(&mut self, label: &str, value: bool) -> bool {
-        match self.knobs.iter_mut().find_map(|knob| match knob {
-            Knob::Toggle { label: l, value } if l == label => Some(value),
-            _ => None,
-        }) {
-            Some(stored) => {
-                *stored = value;
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub fn set_text(&mut self, label: &str, value: impl Into<String>) -> bool {
-        match self.knobs.iter_mut().find_map(|knob| match knob {
-            Knob::Text { label: l, value } if l == label => Some(value),
-            _ => None,
-        }) {
-            Some(stored) => {
-                *stored = value.into();
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub fn set_color(&mut self, label: &str, value: egui::Color32) -> bool {
-        match self.knobs.iter_mut().find_map(|knob| match knob {
-            Knob::Color { label: l, value } if l == label => Some(value),
-            _ => None,
-        }) {
-            Some(stored) => {
-                *stored = value;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Write a choice knob's selection by option label, exactly matched.
-    /// An unknown option is an identity miss and drops the write;
-    /// an index merely out of range clamps ([`set_select_index`](Self::set_select_index)).
-    pub fn set_select(&mut self, label: &str, option: &str) -> bool {
-        let Some(choice) = self.select_mut(label) else {
-            return false;
-        };
-        match choice.options.iter().position(|opt| opt == option) {
-            Some(at) => {
-                *choice.chosen = at;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Write a choice knob's selection by index, clamped to the last option.
-    pub fn set_select_index(&mut self, label: &str, index: usize) -> bool {
-        let Some(choice) = self.select_mut(label) else {
-            return false;
-        };
-        if choice.options.is_empty() {
-            return false;
-        }
-        *choice.chosen = index.min(choice.options.len() - 1);
-        true
-    }
-
-    fn select_mut(&mut self, label: &str) -> Option<Choice<'_>> {
-        self.knobs.iter_mut().find_map(|knob| match knob {
-            Knob::Select {
-                label: l,
-                value,
-                options,
-                ..
-            } if l == label => Some(Choice {
-                chosen: value,
-                options: options.as_slice(),
-            }),
-            _ => None,
-        })
-    }
-
-    /// Write a 2-axis pad's stored position, each axis clamped to its own range.
-    pub fn set_pad2d(&mut self, label: &str, x: f32, y: f32) -> bool {
-        if !x.is_finite() || !y.is_finite() {
-            return false;
-        }
-        let found = self.knobs.iter_mut().find_map(|knob| match knob {
-            Knob::Pad2D {
-                label: l,
+            |k| matches!(k, KnobState::Pad2D { label: l, .. } if l == label),
+        );
+        let (span_x, span_y) = (
+            Span::new(spec.min_x, spec.max_x),
+            Span::new(spec.min_y, spec.max_y),
+        );
+        let reshaped = match knob {
+            KnobState::Pad2D {
                 x,
                 y,
                 min_x,
                 max_x,
                 min_y,
                 max_y,
+                invert_y,
                 ..
-            } if l == label => Some((x, y, *min_x, *max_x, *min_y, *max_y)),
+            } if !Span::new(*min_x, *max_x).same_bits(span_x)
+                || !Span::new(*min_y, *max_y).same_bits(span_y)
+                || *invert_y != spec.invert_y =>
+            {
+                [*min_x, *max_x, *min_y, *max_y] = [spec.min_x, spec.max_x, spec.min_y, spec.max_y];
+                *invert_y = spec.invert_y;
+                Some(Pad2D { x: *x, y: *y })
+            }
             _ => None,
-        });
-        let Some((sx, sy, min_x, max_x, min_y, max_y)) = found else {
-            return false;
         };
-        // `f32::clamp` panics on a NaN bound, which a scene is free to declare.
-        if [min_x, max_x, min_y, max_y]
-            .iter()
-            .any(|bound| bound.is_nan())
-        {
-            return false;
+        if let Some(at) = reshaped {
+            // A NaN bound leaves it as is.
+            at.write(knob);
+            self.reshaped = true;
         }
-        *sx = x.clamp(min_x.min(max_x), min_x.max(max_x));
-        *sy = y.clamp(min_y.min(max_y), min_y.max(max_y));
-        true
+        self.handle()
+    }
+
+    /// Hold `knobs` against this frame's handle writes.
+    pub(crate) fn pin(&mut self, knobs: &[Pin]) {
+        self.pinned = knobs.to_vec();
+    }
+
+    /// A handle on the knob the accessor just declared.
+    fn handle<T: KnobValue>(&mut self) -> Knob<T> {
+        let slot = self.cursor - 1;
+        let (handle, pending) = Knob::new(slot, self.knobs[slot].clone());
+        if !self.pinned.is_empty() && self.pinned.contains(&Pin::of(self.knobs, slot)) {
+            pending.close();
+        } else {
+            self.handles.push(pending);
+        }
+        handle
+    }
+
+    /// Land this frame's handle writes and close the handles.
+    /// Returns the declared knob count, which the store truncates to, and whether a knob changed.
+    pub(crate) fn finish(&mut self) -> (usize, bool) {
+        let mut written = std::mem::take(&mut self.reshaped);
+        for handle in self.handles.drain(..) {
+            written |= handle.apply(self.knobs);
+            handle.close();
+        }
+        (self.cursor, written)
     }
 
     /// Write a catalog global through the [`GlobalKey`] its control was declared with.
@@ -1368,15 +1353,19 @@ mod tests {
     fn slider_declares_at_its_default_then_returns_the_stored_value() {
         let mut knobs = Vec::new();
         assert_eq!(
-            SceneCtx::new(&mut knobs, None, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
+            SceneCtx::new(&mut knobs, None, None)
+                .slider("amt", 0.5, 0.0, 1.0, 0.1)
+                .get(),
             0.5
         );
         assert_eq!(knobs.len(), 1);
-        if let Knob::Slider { value, .. } = &mut knobs[0] {
+        if let KnobState::Slider { value, .. } = &mut knobs[0] {
             *value = 0.8;
         }
         assert_eq!(
-            SceneCtx::new(&mut knobs, None, None).slider("amt", 0.5, 0.0, 1.0, 0.1),
+            SceneCtx::new(&mut knobs, None, None)
+                .slider("amt", 0.5, 0.0, 1.0, 0.1)
+                .get(),
             0.8
         );
         assert_eq!(knobs.len(), 1);
@@ -1384,7 +1373,7 @@ mod tests {
 
     #[test]
     fn button_invokes_its_callback_once_for_each_panel_click() {
-        let mut knobs = vec![Knob::Button {
+        let mut knobs = vec![KnobState::Button {
             label: "Reset".to_owned(),
             clicked: true,
         }];
@@ -1400,43 +1389,239 @@ mod tests {
     fn a_knob_is_recreated_when_its_label_changes() {
         let mut knobs = Vec::new();
         SceneCtx::new(&mut knobs, None, None).slider("a", 0.5, 0.0, 1.0, 0.1);
-        if let Knob::Slider { value, .. } = &mut knobs[0] {
+        if let KnobState::Slider { value, .. } = &mut knobs[0] {
             *value = 0.9;
         }
         assert_eq!(
-            SceneCtx::new(&mut knobs, None, None).slider("b", 0.2, 0.0, 1.0, 0.1),
+            SceneCtx::new(&mut knobs, None, None)
+                .slider("b", 0.2, 0.0, 1.0, 0.1)
+                .get(),
             0.2
         );
     }
 
     #[test]
-    fn declared_counts_the_knobs_used_this_frame() {
+    fn finish_counts_the_knobs_used_this_frame() {
         let mut knobs = Vec::new();
         let mut ctx = SceneCtx::new(&mut knobs, None, None);
         ctx.slider("a", 0.0, 0.0, 1.0, 0.1);
         ctx.toggle("b", false);
-        assert_eq!(ctx.declared(), 2);
+        assert_eq!(ctx.finish(), (2, false), "two declared, nothing written");
     }
 
     #[test]
     fn select_clamps_an_out_of_range_default_to_the_last_option() {
         let mut knobs = Vec::new();
         assert_eq!(
-            SceneCtx::new(&mut knobs, None, None).select("s", &["x", "y"], 9),
+            SceneCtx::new(&mut knobs, None, None)
+                .select("s", &["x", "y"], 9)
+                .get(),
             1
         );
+    }
+
+    #[test]
+    fn a_selection_past_options_that_shrank_clamps_to_the_new_last_one() {
+        let mut knobs = Vec::new();
+        SceneCtx::new(&mut knobs, None, None).select("s", &["x", "y", "z"], 2);
+        assert_eq!(
+            SceneCtx::new(&mut knobs, None, None)
+                .select("s", &["x"], 0)
+                .get(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_range_that_grows_takes_a_write_into_its_new_part() {
+        let mut knobs = Vec::new();
+        let pad = |max| Pad2DSpec {
+            default_x: 0.0,
+            default_y: 0.0,
+            min_x: 0.0,
+            max_x: max,
+            min_y: 0.0,
+            max_y: max,
+            invert_y: false,
+        };
+        frame(&mut knobs, |ctx| {
+            ctx.slider("index", 0.0, 0.0, 3.0, 1.0);
+            ctx.pad2d("aim", pad(1.0));
+        });
+        frame(&mut knobs, |ctx| {
+            assert!(ctx.slider("index", 0.0, 0.0, 10.0, 1.0).set(7.0));
+            assert!(ctx.pad2d("aim", pad(4.0)).set(Pad2D { x: 3.0, y: 2.0 }));
+        });
+        frame(&mut knobs, |ctx| {
+            assert_eq!(ctx.slider("index", 0.0, 0.0, 10.0, 1.0).get(), 7.0);
+            assert_eq!(ctx.pad2d("aim", pad(4.0)).get(), Pad2D { x: 3.0, y: 2.0 });
+        });
+        frame(&mut knobs, |ctx| {
+            assert_eq!(
+                ctx.slider("index", 0.0, 0.0, 2.0, 1.0).get(),
+                2.0,
+                "a range that shrinks past the value clamps it"
+            );
+            assert_eq!(ctx.pad2d("aim", pad(1.0)).get(), Pad2D { x: 1.0, y: 1.0 });
+        });
+        assert!(
+            !frame(&mut knobs, |ctx| {
+                ctx.slider("index", 0.0, 0.0, 2.0, 1.0);
+                ctx.pad2d("aim", pad(1.0));
+            }),
+            "an unchanged range asks for no frame"
+        );
+        frame(&mut knobs, |ctx| {
+            ctx.slider("nan", 0.0, 0.0, f32::NAN, 1.0);
+        });
+        assert!(
+            !frame(&mut knobs, |ctx| {
+                ctx.slider("nan", 0.0, 0.0, f32::NAN, 1.0);
+            }),
+            "nor does an unchanged NaN bound, which equals nothing, itself included"
+        );
+    }
+
+    #[test]
+    fn a_pinned_knob_refuses_writes_and_reads_its_held_value() {
+        let mut knobs = Vec::new();
+        frame(&mut knobs, |ctx| {
+            ctx.slider("held", 5.0, 0.0, 9.0, 1.0);
+            ctx.slider("free", 5.0, 0.0, 9.0, 1.0);
+        });
+        let pin = Pin::of(&knobs, 0);
+        let written = frame(&mut knobs, |ctx| {
+            ctx.pin(&[pin]);
+            let held = ctx.slider("held", 5.0, 0.0, 9.0, 1.0);
+            assert!(!held.set(3.0));
+            assert_eq!(held.get(), 5.0);
+            assert!(ctx.slider("free", 5.0, 0.0, 9.0, 1.0).set(3.0));
+        });
+        assert!(written, "the free knob's write landed");
+        assert!(matches!(knobs[0], KnobState::Slider { value, .. } if value == 5.0));
+        assert!(matches!(knobs[1], KnobState::Slider { value, .. } if value == 3.0));
+    }
+
+    #[test]
+    fn a_pin_follows_its_knob_rather_than_its_slot() {
+        let mut knobs = Vec::new();
+        frame(&mut knobs, |ctx| {
+            ctx.toggle("show", true);
+            ctx.slider("b", 5.0, 0.0, 9.0, 1.0);
+        });
+        let b = Pin::of(&knobs, 1);
+        frame(&mut knobs, |ctx| {
+            ctx.pin(std::slice::from_ref(&b));
+            assert!(
+                !ctx.slider("b", 5.0, 0.0, 9.0, 1.0).set(3.0),
+                "`b` moved up a slot, still held"
+            );
+        });
+        frame(&mut knobs, |ctx| {
+            ctx.pin(std::slice::from_ref(&b));
+            assert!(
+                ctx.toggle("b", false).set(true),
+                "another kind under the same label is another knob"
+            );
+        });
+        let mut fresh = Vec::new();
+        frame(&mut fresh, |ctx| {
+            ctx.pin(std::slice::from_ref(&b));
+            assert!(
+                ctx.toggle("new", false).set(true),
+                "a knob new to the store is free"
+            );
+        });
+    }
+
+    #[test]
+    fn a_group_of_the_same_label_appearing_before_a_held_knob_leaves_it_held() {
+        let mut knobs = Vec::new();
+        frame(&mut knobs, |ctx| {
+            ctx.slider("x", 5.0, 0.0, 9.0, 1.0);
+        });
+        let pin = Pin::of(&knobs, 0);
+        frame(&mut knobs, |ctx| {
+            ctx.pin(std::slice::from_ref(&pin));
+            ctx.group("x");
+            assert!(!ctx.slider("x", 5.0, 0.0, 9.0, 1.0).set(3.0));
+        });
+    }
+
+    #[test]
+    fn same_label_knobs_are_held_one_by_one() {
+        let mut knobs = Vec::new();
+        frame(&mut knobs, |ctx| {
+            ctx.slider("size", 1.0, 0.0, 9.0, 1.0);
+            ctx.slider("size", 1.0, 0.0, 9.0, 1.0);
+        });
+        // The first is the one a recipe key reaches.
+        let first = Pin::of(&knobs, 0);
+        frame(&mut knobs, |ctx| {
+            ctx.pin(&[first]);
+            assert!(!ctx.slider("size", 1.0, 0.0, 9.0, 1.0).set(2.0));
+            assert!(
+                ctx.slider("size", 1.0, 0.0, 9.0, 1.0).set(2.0),
+                "a label alone would hold both"
+            );
+        });
+    }
+
+    #[test]
+    fn a_changed_range_or_option_list_alone_asks_for_a_frame() {
+        let mut knobs = Vec::new();
+        frame(&mut knobs, |ctx| {
+            ctx.slider("n", 1.0, 0.0, 3.0, 1.0);
+            ctx.select("s", &["a", "b"], 0);
+        });
+        assert!(frame(&mut knobs, |ctx| {
+            ctx.slider("n", 1.0, 0.0, 9.0, 1.0);
+            ctx.select("s", &["a", "b"], 0);
+        }));
+        assert!(frame(&mut knobs, |ctx| {
+            ctx.slider("n", 1.0, 0.0, 9.0, 1.0);
+            ctx.select("s", &["a", "b", "c"], 0);
+        }));
+        assert!(!frame(&mut knobs, |ctx| {
+            ctx.slider("n", 1.0, 0.0, 9.0, 1.0);
+            ctx.select("s", &["a", "b", "c"], 0);
+        }));
+        let pad = |invert_y| Pad2DSpec {
+            invert_y,
+            ..Pad2DSpec::default()
+        };
+        frame(&mut knobs, |ctx| {
+            ctx.pad2d("aim", pad(false));
+        });
+        assert!(frame(&mut knobs, |ctx| {
+            ctx.pad2d("aim", pad(true));
+        }));
+        assert!(!frame(&mut knobs, |ctx| {
+            ctx.pad2d("aim", pad(true));
+        }));
+    }
+
+    #[test]
+    fn an_infinite_step_refuses_writes_rather_than_storing_nan() {
+        let mut knobs = Vec::new();
+        frame(&mut knobs, |ctx| {
+            assert!(!ctx.slider("n", 0.5, 0.0, 1.0, f32::INFINITY).set(0.25));
+        });
+        assert!(matches!(knobs[0], KnobState::Slider { value, .. } if value == 0.5));
     }
 
     #[test]
     fn buttons_declares_a_select_knob_in_the_buttons_style() {
         let mut knobs = Vec::new();
         assert_eq!(
-            SceneCtx::new(&mut knobs, None, None).buttons("mode", &["a", "b", "c"], 1),
+            SceneCtx::new(&mut knobs, None, None)
+                .buttons("mode", &["a", "b", "c"], 1)
+                .get(),
             1
         );
         assert!(matches!(
             &knobs[0],
-            Knob::Select {
+            KnobState::Select {
                 style: ChoiceStyle::Buttons,
                 value: 1,
                 ..
@@ -1448,201 +1633,239 @@ mod tests {
     fn changing_a_choice_style_at_the_same_label_recreates_the_knob() {
         let mut knobs = Vec::new();
         SceneCtx::new(&mut knobs, None, None).radio("m", &["a", "b"], 0);
-        if let Knob::Select { value, .. } = &mut knobs[0] {
+        if let KnobState::Select { value, .. } = &mut knobs[0] {
             *value = 1;
         }
         assert_eq!(
-            SceneCtx::new(&mut knobs, None, None).buttons("m", &["a", "b"], 0),
+            SceneCtx::new(&mut knobs, None, None)
+                .buttons("m", &["a", "b"], 0)
+                .get(),
             0,
             "switching style at the same label drops the stored value"
         );
     }
 
+    /// One frame of a scene, ended as the shell ends it: writes landed, then the store truncated.
+    fn frame(knobs: &mut Vec<KnobState>, scene: impl FnOnce(&mut SceneCtx<'_>)) -> bool {
+        let mut ctx = SceneCtx::new(knobs, None, None);
+        scene(&mut ctx);
+        let (declared, written) = ctx.finish();
+        drop(ctx);
+        knobs.truncate(declared);
+        written
+    }
+
     #[test]
-    fn every_knob_kind_takes_a_scene_write_and_reads_it_back() {
+    fn every_knob_kind_takes_a_handle_write_and_reads_it_back_next_frame() {
         let mut knobs = Vec::new();
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
-            ctx.toggle("on", false);
-            ctx.text("name", "before");
-            ctx.color("tint", egui::Color32::BLACK);
-            ctx.select("gear", &["p", "d", "r"], 0);
-            ctx.pad2d("aim", Pad2DSpec::default());
-        }
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            assert!(ctx.set_slider("amt", 0.75));
-            assert!(ctx.set_toggle("on", true));
-            assert!(ctx.set_text("name", "after"));
-            assert!(ctx.set_color("tint", egui::Color32::from_rgb(0x11, 0x22, 0x33)));
-            assert!(ctx.set_select("gear", "d"));
-            assert!(ctx.set_pad2d("aim", 0.25, -0.5));
-        }
+        let written = frame(&mut knobs, |ctx| {
+            assert!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0).set(0.75));
+            assert!(ctx.toggle("on", false).set(true));
+            assert!(ctx.text("name", "before").set("after".to_owned()));
+            assert!(
+                ctx.color("tint", egui::Color32::BLACK)
+                    .set(egui::Color32::from_rgb(0x11, 0x22, 0x33))
+            );
+            assert!(ctx.select("gear", &["p", "d", "r"], 0).select("d"));
+            assert!(
+                ctx.pad2d("aim", Pad2DSpec::default())
+                    .set(Pad2D { x: 0.25, y: -0.5 })
+            );
+        });
+        assert!(
+            written,
+            "the frame reports the writes, so the shell repaints"
+        );
+
         let mut ctx = SceneCtx::new(&mut knobs, None, None);
-        assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.75);
-        assert!(ctx.toggle("on", false));
-        assert_eq!(ctx.text("name", "before"), "after");
+        assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0).get(), 0.75);
+        assert!(ctx.toggle("on", false).get());
+        assert_eq!(ctx.text("name", "before").get(), "after");
         assert_eq!(
-            ctx.color("tint", egui::Color32::BLACK),
+            ctx.color("tint", egui::Color32::BLACK).get(),
             egui::Color32::from_rgb(0x11, 0x22, 0x33)
         );
-        assert_eq!(ctx.select("gear", &["p", "d", "r"], 0), 1);
+        assert_eq!(ctx.select("gear", &["p", "d", "r"], 0).get(), 1);
         assert_eq!(
-            ctx.pad2d("aim", Pad2DSpec::default()),
+            ctx.pad2d("aim", Pad2DSpec::default()).get(),
             Pad2D { x: 0.25, y: -0.5 }
         );
     }
 
     #[test]
-    fn a_written_value_clamps_to_the_knob_and_snaps_to_its_step() {
+    fn a_write_clamps_and_snaps_the_moment_it_is_made() {
         let mut knobs = Vec::new();
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            ctx.slider("amt", 0.5, 0.0, 1.0, 0.25);
-            // A step the range is not a multiple of, so its last stop overshoots the end.
-            ctx.slider("odd", 0.0, 0.0, 1.0, 0.6);
-            ctx.select("gear", &["p", "d", "r"], 0);
-            ctx.pad2d("aim", Pad2DSpec::default());
-        }
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            assert!(ctx.set_slider("amt", 7.0), "an overshoot still lands");
+        frame(&mut knobs, |ctx| {
+            let amt = ctx.slider("amt", 0.5, 0.0, 1.0, 0.25);
+            assert!(amt.set(7.0), "an overshoot still lands");
+            assert_eq!(amt.get(), 1.0, "clamped to the range");
+            assert!(amt.set(0.6));
             assert_eq!(
-                ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
-                1.0,
-                "clamped to the range"
+                amt.get(),
+                0.5,
+                "0.6 snaps to the 0.25 grid, as the panel widget would"
             );
-            assert!(ctx.set_slider("amt", 0.6));
-            assert!(ctx.set_slider("odd", 1.0));
-            assert!(ctx.set_select_index("gear", 9));
-            assert!(ctx.set_pad2d("aim", 5.0, -5.0));
-        }
+
+            // A step the range is not a multiple of, so its last stop overshoots the end.
+            let odd = ctx.slider("odd", 0.0, 0.0, 1.0, 0.6);
+            assert!(odd.set(1.0));
+            assert_eq!(
+                odd.get(),
+                1.2,
+                "snapped past the end, as the panel's own slider stores it"
+            );
+
+            let gear = ctx.select("gear", &["p", "d", "r"], 0);
+            assert!(gear.set(9));
+            assert_eq!(
+                gear.get(),
+                2,
+                "an index past the end clamps to the last option"
+            );
+
+            let aim = ctx.pad2d("aim", Pad2DSpec::default());
+            assert!(aim.set(Pad2D { x: 5.0, y: -5.0 }));
+            assert_eq!(
+                aim.get(),
+                Pad2D { x: 1.0, y: -1.0 },
+                "each axis clamps to its own range"
+            );
+        });
         let mut ctx = SceneCtx::new(&mut knobs, None, None);
         assert_eq!(
-            ctx.slider("amt", 0.5, 0.0, 1.0, 0.25),
+            ctx.slider("amt", 0.5, 0.0, 1.0, 0.25).get(),
             0.5,
-            "0.6 snaps to the 0.25 grid, as the panel widget would"
-        );
-        assert_eq!(
-            ctx.slider("odd", 0.0, 0.0, 1.0, 0.6),
-            1.0,
-            "snapping never rounds past the end it was just clamped to"
-        );
-        assert_eq!(
-            ctx.select("gear", &["p", "d", "r"], 0),
-            2,
-            "an index past the end clamps to the last option"
-        );
-        assert_eq!(
-            ctx.pad2d("aim", Pad2DSpec::default()),
-            Pad2D { x: 1.0, y: -1.0 },
-            "each axis clamps to its own range"
+            "the store holds what the handle read"
         );
     }
 
     #[test]
     fn a_select_write_takes_an_option_label_but_not_a_stranger() {
         let mut knobs = Vec::new();
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            ctx.select("gear", &["p", "d", "r"], 0);
-            ctx.select("empty", &[], 0);
-        }
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            assert!(ctx.set_select("gear", "r"));
+        frame(&mut knobs, |ctx| {
+            let gear = ctx.select("gear", &["p", "d", "r"], 0);
+            assert!(gear.select("r"));
             assert!(
-                !ctx.set_select("gear", "x"),
+                !gear.select("x"),
                 "an option the knob doesn't carry is dropped"
             );
             assert!(
-                !ctx.set_select_index("empty", 3),
+                !ctx.select("empty", &[], 0).set(3),
                 "no options means nothing to clamp to"
             );
-        }
+        });
         assert_eq!(
-            SceneCtx::new(&mut knobs, None, None).select("gear", &["p", "d", "r"], 0),
+            SceneCtx::new(&mut knobs, None, None)
+                .select("gear", &["p", "d", "r"], 0)
+                .get(),
             2,
-            "the dropped writes left the landed one alone"
+            "the dropped write left the landed one alone"
         );
-    }
-
-    #[test]
-    fn a_write_to_a_missing_knob_is_dropped_without_a_phantom() {
-        let mut knobs = Vec::new();
-        assert!(
-            !SceneCtx::new(&mut knobs, None, None).set_slider("amt", 1.0),
-            "nothing is declared yet on the first frame"
-        );
-        assert!(knobs.is_empty(), "a miss creates no control");
-
-        SceneCtx::new(&mut knobs, None, None).toggle("amt", false);
-        assert!(
-            !SceneCtx::new(&mut knobs, None, None).set_slider("amt", 1.0),
-            "the label exists, but on another kind"
-        );
-        assert_eq!(knobs.len(), 1);
     }
 
     #[test]
     fn a_non_finite_write_is_dropped_rather_than_stored() {
         let mut knobs = Vec::new();
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
-            ctx.pad2d("aim", Pad2DSpec::default());
-        }
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            assert!(!ctx.set_slider("amt", f32::NAN));
-            assert!(!ctx.set_slider("amt", f32::INFINITY));
-            assert!(!ctx.set_pad2d("aim", f32::NAN, 0.0));
-        }
+        let written = frame(&mut knobs, |ctx| {
+            let amt = ctx.slider("amt", 0.5, 0.0, 1.0, 0.0);
+            assert!(!amt.set(f32::NAN));
+            assert!(!amt.set(f32::INFINITY));
+            assert!(!ctx.pad2d("aim", Pad2DSpec::default()).set(Pad2D {
+                x: f32::NAN,
+                y: 0.0
+            }));
+        });
+        assert!(!written, "nothing landed, so nothing asks for a frame");
         let mut ctx = SceneCtx::new(&mut knobs, None, None);
-        assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.5);
+        assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0).get(), 0.5);
         assert_eq!(
-            ctx.pad2d("aim", Pad2DSpec::default()),
+            ctx.pad2d("aim", Pad2DSpec::default()).get(),
             Pad2D { x: 0.0, y: 0.0 }
         );
     }
 
     #[test]
-    fn a_write_lands_before_an_accessor_later_the_same_frame() {
+    fn rewriting_the_stored_value_asks_for_no_frame() {
         let mut knobs = Vec::new();
-        SceneCtx::new(&mut knobs, None, None).slider("amt", 0.5, 0.0, 1.0, 0.0);
-        // It holds last frame's slot, so a write before this frame's declaration finds it.
+        frame(&mut knobs, |ctx| {
+            ctx.toggle("power", true);
+        });
+        assert!(
+            !frame(&mut knobs, |ctx| {
+                let power = ctx.toggle("power", true);
+                power.set(power.get());
+            }),
+            "a scene syncing a knob every frame would otherwise never let a capture settle"
+        );
+    }
+
+    #[test]
+    fn a_write_from_a_moved_callback_reaches_every_clone_and_the_store() {
+        let mut knobs = Vec::new();
+        frame(&mut knobs, |ctx| {
+            let power = ctx.toggle("power", false);
+            let on_change: Box<dyn Fn(bool)> = Box::new({
+                let power = power.clone();
+                move |on| {
+                    power.set(on);
+                }
+            });
+            on_change(true);
+            assert!(power.get(), "the clone kept here sees the callback's write");
+        });
+        assert!(
+            SceneCtx::new(&mut knobs, None, None)
+                .toggle("power", false)
+                .get()
+        );
+    }
+
+    #[test]
+    fn a_handle_outliving_its_frame_refuses_writes() {
+        let mut knobs = Vec::new();
+        let mut kept = None;
+        frame(&mut knobs, |ctx| kept = Some(ctx.toggle("power", false)));
+        let kept = kept.expect("the frame declared the toggle");
+        assert!(!kept.set(true), "the frame is over");
+        assert!(
+            !SceneCtx::new(&mut knobs, None, None)
+                .toggle("power", false)
+                .get()
+        );
+    }
+
+    #[test]
+    fn a_frame_that_never_finishes_still_closes_its_handles() {
+        let mut knobs = Vec::new();
         let mut ctx = SceneCtx::new(&mut knobs, None, None);
-        assert!(ctx.set_slider("amt", 0.9));
-        assert_eq!(ctx.slider("amt", 0.5, 0.0, 1.0, 0.0), 0.9);
+        let power = ctx.toggle("power", false);
+        drop(ctx);
+        assert!(
+            !power.set(true),
+            "a scene that panicked never reached finish"
+        );
     }
 
     #[test]
     fn a_written_value_survives_exactly_as_long_as_its_knob_stays_declared() {
         let mut knobs = Vec::new();
-        {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
+        frame(&mut knobs, |ctx| {
+            assert!(ctx.slider("a", 0.1, 0.0, 1.0, 0.0).set(0.7));
+            assert!(ctx.toggle("b", false).set(true));
+        });
+        // The scene stops declaring `b`.
+        frame(&mut knobs, |ctx| {
             ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
-            ctx.toggle("b", false);
-            assert!(ctx.set_slider("a", 0.7));
-            assert!(ctx.set_toggle("b", true), "landing is not surviving");
-        }
-        // The scene stops declaring `b`; the shell truncates as `render_canvas` does.
-        let declared = {
-            let mut ctx = SceneCtx::new(&mut knobs, None, None);
-            ctx.slider("a", 0.1, 0.0, 1.0, 0.0);
-            ctx.declared()
-        };
-        knobs.truncate(declared);
+        });
 
         let mut ctx = SceneCtx::new(&mut knobs, None, None);
         assert_eq!(
-            ctx.slider("a", 0.1, 0.0, 1.0, 0.0),
+            ctx.slider("a", 0.1, 0.0, 1.0, 0.0).get(),
             0.7,
             "a still-declared knob keeps its written value"
         );
         assert!(
-            !ctx.toggle("b", false),
+            !ctx.toggle("b", false).get(),
             "a truncated knob comes back at its default, write and all"
         );
     }

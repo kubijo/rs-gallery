@@ -583,10 +583,10 @@ fn callback(ui: &mut Ui, draw: impl CallbackTrait + 'static) {
 /// buffer the callback writes each frame, and the drawing covers the canvas edge to edge.
 #[scene(default)]
 fn gradient(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let top = ctx.color("top", TOP);
-    let bottom = ctx.color("bottom", BOTTOM);
+    let top = ctx.color("top", TOP).get();
+    let bottom = ctx.color("bottom", BOTTOM).get();
     // 1 is the straight ramp; either side of it pushes the midpoint up or down the height.
-    let bias = ctx.slider("bias", 1.0, 0.25, 4.0, 0.05);
+    let bias = ctx.slider("bias", 1.0, 0.25, 4.0, 0.05).get();
     if !ready(ctx, ui) {
         return;
     }
@@ -616,8 +616,8 @@ fn gradient(ctx: &mut SceneCtx, ui: &mut Ui) {
 /// went unread.
 #[scene("device pixels")]
 fn device_pixels(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let radius = ctx.slider("ring radius (px)", 48.0, 8.0, 120.0, 1.0);
-    let pitch = ctx.slider("rule pitch (px)", 16.0, 4.0, 64.0, 1.0);
+    let radius = ctx.slider("ring radius (px)", 48.0, 8.0, 120.0, 1.0).get();
+    let pitch = ctx.slider("rule pitch (px)", 16.0, 4.0, 64.0, 1.0).get();
     if !ready(ctx, ui) {
         return;
     }
@@ -652,7 +652,9 @@ fn device_pixels(ctx: &mut SceneCtx, ui: &mut Ui) {
 /// Hence the modest ceiling here.
 #[scene("clipped")]
 fn clipped(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let tall = ctx.slider("drawing height", 320.0, 180.0, 480.0, 10.0);
+    let tall = ctx
+        .slider("drawing height", 320.0, 180.0, 480.0, 10.0)
+        .get();
     if !ready(ctx, ui) {
         return;
     }
@@ -688,7 +690,9 @@ fn clipped(ctx: &mut SceneCtx, ui: &mut Ui) {
 fn colour_match(ctx: &mut SceneCtx, ui: &mut Ui) {
     const BAND: u32 = 90;
 
-    let tint = ctx.color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
+    let tint = ctx
+        .color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8))
+        .get();
     if !ready(ctx, ui) {
         return;
     }
@@ -736,7 +740,7 @@ fn colour_match(ctx: &mut SceneCtx, ui: &mut Ui) {
 /// and is reported as still moving — the picture being the moment the count landed on.
 #[scene("animated")]
 fn animated(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let speed = ctx.slider("speed", 3.0, 0.0, 12.0, 0.1);
+    let speed = ctx.slider("speed", 3.0, 0.0, 12.0, 0.1).get();
     if !ready(ctx, ui) {
         return;
     }
@@ -771,7 +775,9 @@ fn animated(ctx: &mut SceneCtx, ui: &mut Ui) {
 /// pipeline, since a depth attachment is part of what a pipeline is built against.
 #[scene("depth")]
 fn depth(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let turned = ctx.slider("turned", 0.6, 0.0, std::f32::consts::TAU, 0.01);
+    let turned = ctx
+        .slider("turned", 0.6, 0.0, std::f32::consts::TAU, 0.01)
+        .get();
     // Both sides take it, so the two stay comparable — and gallery's target is reallocated
     // to follow, which is the half of it a fixed size would never ask for.
     #[expect(
@@ -779,7 +785,7 @@ fn depth(ctx: &mut SceneCtx, ui: &mut Ui) {
         clippy::cast_sign_loss,
         reason = "a slider bounded well inside a pixel count"
     )]
-    let side = ctx.slider("side", 200.0, 80.0, 260.0, 10.0) as u32;
+    let side = ctx.slider("side", 200.0, 80.0, 260.0, 10.0).get() as u32;
     if !ready(ctx, ui) {
         return;
     }

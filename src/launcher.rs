@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{IsTerminal as _, Write as _},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -63,6 +63,7 @@ pub fn launch(
     setup: impl Fn(&egui::Context) + 'static,
 ) -> eframe::Result {
     let cli = Cli::parse();
+    crate::render::built_for(Utf8Path::new(manifest_dir));
     anstream::eprintln!("{}", version_banner());
     // Before the config is read, so a stale or broken `gallery.toml`
     // can't stop you finding out that the pinned version is the reason.
@@ -75,29 +76,33 @@ pub fn launch(
         .clone()
         .unwrap_or_else(|| Utf8Path::new(manifest_dir).join("gallery.toml"));
     let config = gallery_build::Config::read(&config_path).unwrap_or_else(|e| panic!("{e}"));
+    crate::render::use_cursor(config.record.cursor.as_ref());
 
-    build_lib(manifest_dir, &config.path, headless(&cli));
+    let dylib = build_lib(package, manifest_dir, &config.path, headless(&cli));
     // Made here because both sides are handed it from here: the watcher reports into it,
     // and the shell draws from it.
     let hot = HotStatus::new();
-    // The dylib is `lib<crate>.so`; the crate's lib name is the package name with dashes as underscores.
-    let mut source = HotDylib::new(&package.replace('-', "_"), cli.hot)
-        .expect("load the freshly built scenes dylib");
+    let mut source = HotDylib::at(dylib, cli.hot).expect("load the freshly built scenes dylib");
     if cli.hot {
         source.hot = Some(hot.clone());
     }
     let manifest = source.manifest();
     let globals = source.globals();
+    let plays = source.plays();
 
     // Everything above is how scenes get here at all, so a headless run branches only where the window
     // would have opened — before any watcher, which nothing would be left to shut down.
-    if let Some(capture) = shots(&cli, &config.path) {
+    let defaults = render::Defaults::of(&config).unwrap_or_else(|reason| fail(&reason.into()));
+    if let Some(capture) = shots(&cli, &config.path, &defaults) {
         return match render::render_with_globals(
             &manifest,
             globals,
+            &plays,
             settings.renderer,
             &setup,
             &capture,
+            render::LogMode::detect(cli.log, defaults.log)
+                .unwrap_or_else(|reason| fail(&reason.into())),
         ) {
             Ok(()) => Ok(()),
             Err(reason) => fail(&reason),
@@ -144,6 +149,48 @@ fn fail(problem: &Diagnostic) -> ! {
     std::process::exit(1)
 }
 
+/// `--record`'s recording,
+/// with the flags' format, hold and glide, else the catalog's.
+fn rendered_record(
+    record: render::Record,
+    cli: &Cli,
+    defaults: &render::RecordDefaults,
+) -> Result<render::Record, String> {
+    let has_play = cli.play.is_some();
+    let record = render::Record {
+        formats: cli.record_format.or(defaults.formats).unwrap_or_default(),
+        hold: cli.record_hold,
+        input: defaults.input,
+        glide: render::glide_with(
+            cli.record_glide
+                .as_ref()
+                .map(|GlideFlag(glide)| glide.easing(defaults.glide.easing))
+                .transpose()?,
+            defaults.glide,
+            has_play,
+        )?,
+        ..record
+    };
+    record.check(has_play)?;
+    Ok(record.holding(defaults.hold, has_play))
+}
+
+/// `--record-glide` as given, an easing's name checked.
+#[derive(Clone, Debug)]
+struct GlideFlag(render::GlideSetting);
+
+impl GlideFlag {
+    fn parse(name: &str) -> Result<Self, String> {
+        let setting = match name {
+            "true" => render::GlideSetting::On(true),
+            "false" => render::GlideSetting::On(false),
+            _ => render::GlideSetting::Eased(name.to_owned()),
+        };
+        setting.easing(None)?;
+        Ok(Self(setting))
+    }
+}
+
 /// Whether this run writes to stdout and exits instead of opening a window.
 fn headless(cli: &Cli) -> bool {
     cli.capture.is_some() || cli.render.is_some() || cli.list_knobs || cli.init_capture
@@ -152,19 +199,23 @@ fn headless(cli: &Cli) -> bool {
 /// The shots this invocation asks for, or `None` when it wants the window.
 ///
 /// A recipe describes its own. The single-scene flags describe one shot between them,
-/// so asking for several at once stays coherent — a listing or a generated recipe
-/// then says what the image beside it was set to.
-fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
+/// so asking for several at once stays coherent — a listing
+/// or a generated recipe then says what the image beside it was set to.
+fn shots(cli: &Cli, config: &Utf8Path, defaults: &render::Defaults) -> Option<render::Capture> {
     if !headless(cli) {
         return None;
     }
     if let Some(recipe) = &cli.capture {
-        // Relative to the config, like the scene globs: both describe the instance, not the shell.
+        // Relative to the config, like the scene globs:
+        // both describe the instance, not the shell.
         let recipe = config.parent().unwrap_or(Utf8Path::new(".")).join(recipe);
-        let mut capture =
-            render::read_recipe(&recipe, cli.out.as_deref()).unwrap_or_else(|reason| fail(&reason));
+        let mut capture = render::read_recipe(&recipe, cli.out.as_deref(), defaults)
+            .unwrap_or_else(|reason| fail(&reason));
         for shot in &mut capture.shots {
-            render::merge_overrides(&mut shot.globals, &cli.global);
+            shot.globals.extend(cli.global.iter().cloned());
+            if let Some(play) = &mut shot.play {
+                play.steps = cli.steps || defaults.steps.unwrap_or(false);
+            }
         }
         return Some(capture);
     }
@@ -172,26 +223,36 @@ fn shots(cli: &Cli, config: &Utf8Path) -> Option<render::Capture> {
     // `--frames` also drives a windowed profiling run, where any count is meaningful,
     // so it is checked here rather than by clap.
     render::check_frames(cli.frames).unwrap_or_else(|reason| fail(&reason.into()));
-    let scale = cli.scale.unwrap_or(render::DEFAULT_SCALE);
+    let render = &defaults.render;
+    let scale = cli.scale.or(render.scale).unwrap_or(render::DEFAULT_SCALE);
     render::check_scale(scale).unwrap_or_else(|reason| fail(&reason.into()));
+    let size = match &cli.size {
+        Some(size) => render::parse_size(size).unwrap_or_else(|reason| fail(&reason.into())),
+        None => render.size.unwrap_or(render::DEFAULT_SIZE),
+    };
     Some(render::Capture {
         shots: vec![render::Shot {
             scene,
             out: cli.render.clone(),
-            size: cli
-                .size
-                .as_deref()
-                .map_or(Ok(render::DEFAULT_SIZE), render::parse_size)
-                .unwrap_or_else(|reason| fail(&reason.into())),
+            size,
             scale,
-            knobs: render::merged_overrides(&cli.knob),
-            globals: render::merged_overrides(&cli.global),
-            frames: cli.frames,
-            trim: !cli.no_trim,
+            knobs: cli.knob.iter().cloned().collect(),
+            globals: cli.global.iter().cloned().collect(),
+            frames: cli.frames.or(render.frames),
+            trim: !cli.no_trim && render.trim.unwrap_or(true),
             // A recipe option: one shot on the command line is drawn as asked.
             settle: false,
             list: cli.list_knobs,
             template: cli.init_capture,
+            play: cli.play.clone().map(|name| render::ShotPlay {
+                name,
+                trace: render::Trace::default(),
+                steps: true,
+            }),
+            record: cli.record.map(|record| {
+                rendered_record(record, cli, &defaults.record)
+                    .unwrap_or_else(|reason| fail(&reason.into()))
+            }),
         }],
         // Both gather a recipe's shots; one shot on the command line has nothing to gather.
         sheet: None,
@@ -239,6 +300,54 @@ struct Cli {
     #[arg(long, value_name = "LABEL=VALUE", value_parser = render::parse_assignment, requires = "headless", conflicts_with = "capture")]
     knob: Vec<render::KnobOverride>,
 
+    /// Run one of the scene's plays before rendering it (capture plays belong in the recipe)
+    #[arg(
+        long,
+        value_name = "NAME",
+        requires = "render",
+        conflicts_with_all = ["init_capture", "capture"]
+    )]
+    play: Option<String>,
+
+    /// Record beside the render: `FPS:SECONDS`
+    /// once the scene settles, or `FPS` with `--play` to record the play
+    #[arg(
+        long,
+        value_name = "FPS[:SECONDS]",
+        value_parser = render::parse_record,
+        requires = "render",
+        conflicts_with_all = ["init_capture", "capture"]
+    )]
+    record: Option<render::Record>,
+
+    /// The recording's format: `mp4` (small, seekable), `apng` (lossless, comparable)
+    /// or `gif` (shows anywhere; 256 colours, at most 50 fps), or several from one run as `apng,gif`
+    /// [default: gallery.toml's `[record] format`, else mp4]
+    #[arg(long, value_name = "FORMAT[,FORMAT]", requires = "record")]
+    record_format: Option<render::VideoFormats>,
+
+    /// Seconds a play's recording pauses at each step's end, so a step can be followed;
+    /// 0 for none [default: gallery.toml's `[record] hold`, else 0.5]
+    #[arg(long, value_name = "SECONDS", requires = "record")]
+    record_hold: Option<f32>,
+
+    /// Glide a play's recorded pointer to each gesture:
+    ///  - `linear`, `cubic-in-out` or `cubic-out`
+    ///  - `true` (bare), gallery.toml's easing, else `cubic-in-out`
+    ///  - `false` or `off`, whatever gallery.toml says
+    ///
+    /// [default: gallery.toml's `[record] glide`, else off]
+    #[arg(
+        long,
+        verbatim_doc_comment,
+        value_name = "EASING",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = GlideFlag::parse,
+        requires = "record"
+    )]
+    record_glide: Option<GlideFlag>,
+
     /// Canvas size to render at [default: 1280x720]
     #[arg(long, value_name = "WxH")]
     size: Option<String>,
@@ -264,24 +373,62 @@ struct Cli {
     #[arg(long, value_name = "PATH", conflicts_with_all = ["render", "scene", "list_knobs", "init_capture", "size", "scale", "no_trim"])]
     capture: Option<Utf8PathBuf>,
 
+    /// Keep each play's whole log as it ran, rather than one line
+    /// for a play that passed (a single `--play` always does)
+    #[arg(long, requires = "capture")]
+    steps: bool,
+
+    /// How plays are shown as they run: `live`, redrawn in place;
+    /// `linear`, each play printed once it is over;
+    /// or `off` [default: live on a terminal, linear otherwise; GALLERY_LOG too]
+    #[arg(long, value_name = "MODE")]
+    log: Option<render::LogMode>,
+
     /// Where --capture writes, overriding the recipe's own `out`
     #[arg(long, value_name = "DIR", requires = "capture")]
     out: Option<Utf8PathBuf>,
 }
 
-/// Build the scenes dylib once, blocking, so the loader finds a `.so` on first launch.
+/// Build the scenes dylib of `package` once, blocking, so the loader finds it on first launch;
+/// where it is, which only cargo knows: its `build-dir` may be apart from where it puts it.
 ///
 /// A headless run's entire output is the paths it wrote, which a screen of `Compiling` lines
 /// buries. `--quiet` drops that progress and still lets errors through.
-fn build_lib(manifest_dir: &str, config: &Utf8Path, quiet: bool) {
+pub(crate) fn build_lib(
+    package: &str,
+    manifest_dir: &str,
+    config: &Utf8Path,
+    quiet: bool,
+) -> Utf8PathBuf {
     let mut command = build_command(manifest_dir, config);
     if quiet {
         command.arg("--quiet");
     }
+    command
+        .arg("--message-format=json-render-diagnostics")
+        .stderr(Stdio::inherit());
     let progress = Progress::start(quiet);
-    let built = command.status().is_ok_and(|status| status.success());
+    let built = command.output().ok();
     progress.clear();
-    assert!(built, "`cargo build --lib` for the scenes dylib failed");
+    let built = built.filter(|built| built.status.success());
+    let built = built.expect("`cargo build --lib` for the scenes dylib failed");
+    let file = crate::hot::dylib_file(&package.replace('-', "_"));
+    let dylib = dylib_in(&built.stdout, &file);
+    let dylib = dylib.filter(|dylib| dylib.is_file());
+    dylib.unwrap_or_else(|| panic!("`cargo build --lib` made no `{file}`; is it a dylib's crate?"))
+}
+
+/// Where cargo put `file`, as it `said` in its JSON messages.
+fn dylib_in(said: &[u8], file: &str) -> Option<Utf8PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Artifact {
+        filenames: Vec<Utf8PathBuf>,
+    }
+    let lines = said.split(|byte| *byte == b'\n');
+    let artifacts = lines.filter_map(|line| serde_json::from_slice::<Artifact>(line).ok());
+    artifacts
+        .flat_map(|artifact| artifact.filenames)
+        .find(|path| path.file_name() == Some(file))
 }
 
 /// A line saying the scenes are compiling, rubbed out again when they are.
@@ -329,8 +476,8 @@ fn build_command(manifest_dir: &str, config: &Utf8Path) -> Command {
 /// under any other profile it lands somewhere nothing reads, and the cold compile that produced it is
 /// pure cost.
 fn host_profile() -> Option<String> {
-    let exe = Utf8PathBuf::from_path_buf(std::env::current_exe().ok()?).ok()?;
-    let dir = exe.parent()?.file_name()?;
+    let dir = crate::hot::profile_dir().ok()?;
+    let dir = dir.file_name()?;
     Some(if dir == "debug" { "dev" } else { dir }.to_owned())
 }
 
@@ -484,6 +631,168 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_catalogs_hold_reaches_a_rendered_play_and_leaves_a_timed_recording_be() {
+        let catalog = render::RecordDefaults {
+            hold: Some(0.25),
+            ..render::RecordDefaults::default()
+        };
+        let hold = |args: &[&str]| {
+            let cli = Cli::parse_from(args);
+            let record = cli.record.expect("a recording");
+            rendered_record(record, &cli, &catalog)
+                .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+                .hold
+        };
+        let base = ["gallery", "--scene", "s", "--render", "s.png"];
+        assert_eq!(hold(&[&base[..], &["--record", "30:2"]].concat()), None);
+        let played = [&base[..], &["--play", "p", "--record", "30"]].concat();
+        assert_eq!(hold(&played), Some(0.25));
+        let own = [&played[..], &["--record-hold", "0"]].concat();
+        assert_eq!(hold(&own), Some(0.0), "the flag outranks the catalog");
+    }
+
+    #[test]
+    fn a_catalogs_format_and_panel_reach_a_rendered_recording_and_the_flag_outranks_its_format() {
+        let apng = render::VideoFormats::from(render::VideoFormat::Apng);
+        let catalog = render::RecordDefaults {
+            formats: Some(apng),
+            input: Some(render::Corner::TopRight),
+            ..render::RecordDefaults::default()
+        };
+        let rendered = |args: &[&str]| {
+            let cli = Cli::parse_from(args);
+            let record = cli.record.expect("a recording");
+            rendered_record(record, &cli, &catalog).unwrap_or_else(|e| panic!("{args:?}: {e}"))
+        };
+        let base = [
+            "gallery", "--scene", "s", "--render", "s.png", "--play", "p", "--record", "30",
+        ];
+        let record = rendered(&base);
+        assert_eq!(record.formats, apng);
+        assert_eq!(record.input, Some(render::Corner::TopRight));
+        let flagged = [&base[..], &["--record-format", "mp4"]].concat();
+        assert_eq!(
+            rendered(&flagged).formats,
+            render::VideoFormat::Mp4.into(),
+            "the flag outranks the catalog"
+        );
+    }
+
+    #[test]
+    fn a_catalogs_glide_reaches_a_rendered_play_and_the_flag_outranks_it() {
+        let paced = render::Glide {
+            speed: 600.0,
+            ..render::Glide::default()
+        };
+        let glide = |catalog: render::Glide, flags: &[&str]| {
+            let catalog = render::RecordDefaults {
+                glide: catalog,
+                ..render::RecordDefaults::default()
+            };
+            let args = [
+                &[
+                    "gallery", "--scene", "s", "--render", "s.png", "--play", "p", "--record", "30",
+                ][..],
+                flags,
+            ]
+            .concat();
+            let cli = Cli::parse_from(&args);
+            let record = cli.record.expect("a recording");
+            rendered_record(record, &cli, &catalog)
+                .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+                .glide
+        };
+        assert_eq!(glide(paced, &[]), paced, "the catalog's, off");
+        assert_eq!(
+            glide(paced, &["--record-glide"]),
+            render::Glide {
+                easing: Some(render::Easing::CubicInOut),
+                ..paced
+            },
+            "on, at the catalog's pace"
+        );
+        let linear = render::Glide {
+            easing: Some(render::Easing::Linear),
+            ..paced
+        };
+        assert_eq!(glide(linear, &[]), linear, "the catalog's, on");
+        assert_eq!(
+            glide(linear, &["--record-glide", "cubic-out"]).easing,
+            Some(render::Easing::CubicOut),
+            "the flag outranks the catalog"
+        );
+        for on in [&["--record-glide"][..], &["--record-glide", "true"]] {
+            assert_eq!(
+                glide(linear, on).easing,
+                Some(render::Easing::Linear),
+                "{on:?} keeps the catalog's easing"
+            );
+        }
+        for off in ["off", "false"] {
+            assert_eq!(
+                glide(linear, &["--record-glide", off]).easing,
+                None,
+                "`{off}` turns the catalog's glide off for the run"
+            );
+        }
+        let error = Cli::try_parse_from([
+            "gallery",
+            "--scene",
+            "s",
+            "--render",
+            "s.png",
+            "--record",
+            "30",
+            "--record-glide",
+            "bounce",
+        ])
+        .err()
+        .expect("an unknown easing is refused")
+        .to_string();
+        assert!(error.contains("or `off`"), "{error}");
+        let args = [
+            "gallery",
+            "--scene",
+            "s",
+            "--render",
+            "s.png",
+            "--record",
+            "30:1",
+            "--record-glide",
+        ];
+        let cli = Cli::parse_from(args);
+        let error = rendered_record(cli.record.expect("a recording"), &cli, &Default::default())
+            .expect_err("a recording without a play is refused a glide");
+        assert!(error.contains("takes no `glide`"), "{error}");
+        let off = Cli::parse_from(args.iter().copied().chain(["off"]));
+        let record = off.record.expect("a recording");
+        let unglided = rendered_record(record, &off, &Default::default())
+            .expect("turning the glide off is no harm without a play");
+        assert_eq!(unglided.glide.easing, None);
+    }
+
+    #[test]
+    fn the_dylib_is_where_cargo_says_it_put_it() {
+        let artifact = |files: &[&str]| {
+            serde_json::json!({ "reason": "compiler-artifact", "filenames": files }).to_string()
+        };
+        let file = crate::hot::dylib_file("app_gallery");
+        let (apart, other) = (
+            format!("/target/debug/{file}"),
+            "/target/debug/libserde.rlib",
+        );
+        let said = [
+            artifact(&[other]),
+            "a line of something else's".to_owned(),
+            artifact(&["/target/debug/libapp_gallery.rlib", &apart]),
+            serde_json::json!({ "reason": "build-finished", "success": true }).to_string(),
+        ];
+        let found = dylib_in(said.join("\n").as_bytes(), &file);
+        assert_eq!(found, Some(Utf8PathBuf::from(apart)));
+        assert_eq!(dylib_in(artifact(&[other]).as_bytes(), &file), None);
+    }
+
+    #[test]
     fn assignments_parse_like_recipe_scalars() {
         for (assignment, key, value) in [
             ("Language=zh-Hans", "Language", "zh-Hans"),
@@ -547,12 +856,12 @@ mod tests {
             "Language=Finnish",
         ]);
         assert_eq!(
-            shot.knobs,
-            vec![render::parse_assignment("Scale=2").unwrap()]
+            shot.knobs[..],
+            [render::parse_assignment("Scale=2").unwrap()]
         );
         assert_eq!(
-            shot.globals,
-            vec![render::parse_assignment("Language=Finnish").unwrap()]
+            shot.globals[..],
+            [render::parse_assignment("Language=Finnish").unwrap()]
         );
     }
 
@@ -564,16 +873,19 @@ mod tests {
         };
         let args: Vec<String> = serde_json::from_str(&args).expect("fixture arguments");
         let cli = Cli::parse_from(args);
-        let capture = shots(&cli, Utf8Path::new("gallery.toml")).expect("headless fixture");
+        let capture = shots(&cli, Utf8Path::new("gallery.toml"), &Default::default())
+            .expect("headless fixture");
         let manifest = crate::Linked.manifest();
         render::render_with_globals(
             &manifest,
             Some(crate::GlobalEntry::of::<
                 crate::scaffold_scenes::globals::Globals,
             >()),
+            &crate::Linked.plays(),
             crate::Renderer::Wgpu,
             &|_| {},
             &capture,
+            render::LogMode::Off,
         )
         .unwrap_or_else(|reason| fail(&reason));
     }
@@ -806,7 +1118,12 @@ Language = "English"
     }
 
     fn one_shot(args: &[&str]) -> render::Shot {
-        let capture = shots(&cli(args), Utf8Path::new("gallery.toml")).expect("a headless run");
+        let capture = shots(
+            &cli(args),
+            Utf8Path::new("gallery.toml"),
+            &Default::default(),
+        )
+        .expect("a headless run");
         assert!(capture.sheet.is_none(), "one shot has nothing to gather");
         assert_eq!(capture.shots.len(), 1, "one scene is one shot");
         capture.shots.into_iter().next().expect("the one shot")
@@ -827,7 +1144,12 @@ Language = "English"
             assert_eq!(headless(&cli(args)), headless_run, "{args:?}");
         }
         assert!(
-            shots(&cli(&["gallery"]), Utf8Path::new("gallery.toml")).is_none(),
+            shots(
+                &cli(&["gallery"]),
+                Utf8Path::new("gallery.toml"),
+                &Default::default()
+            )
+            .is_none(),
             "a windowed run asks for no shots"
         );
     }
@@ -860,6 +1182,38 @@ Language = "English"
             shot.size,
             egui::vec2(800.0, 600.0),
             "--size replaces the default"
+        );
+    }
+
+    #[test]
+    fn a_rendered_shot_takes_the_catalogs_render_table_and_each_flag_outranks_it() {
+        let catalog = render::Defaults {
+            render: render::RenderDefaults {
+                size: Some(egui::vec2(320.0, 200.0)),
+                scale: Some(2.0),
+                trim: Some(false),
+                frames: Some(4),
+            },
+            ..render::Defaults::default()
+        };
+        let shot = |flags: &[&str]| {
+            let args = [&["gallery", "--scene", "s", "--render", "s.png"][..], flags].concat();
+            shots(&cli(&args), Utf8Path::new("gallery.toml"), &catalog)
+                .expect("a headless run")
+                .shots
+                .remove(0)
+        };
+        let caught = shot(&[]);
+        assert_eq!(
+            (caught.size, caught.scale, caught.trim, caught.frames),
+            (egui::vec2(320.0, 200.0), 2.0, false, Some(4)),
+            "the catalog's"
+        );
+        let flagged = shot(&["--size", "100x100", "--scale", "1", "--frames", "6"]);
+        assert_eq!(
+            (flagged.size, flagged.scale, flagged.frames),
+            (egui::vec2(100.0, 100.0), 1.0, Some(6)),
+            "the flags'"
         );
     }
 

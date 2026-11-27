@@ -76,7 +76,7 @@ def _run_analyze(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="gallery-perf",
-        description="Analyse the profiles `just profile` records.",
+        description="Analyse the profiles `just dev::profile` records.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

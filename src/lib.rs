@@ -42,7 +42,7 @@ pub use egui;
 /// while `install_image_loaders` is not gated at all — so a host that forgets
 /// `features = ["extras-svg"]` gets a call that compiles and installs nothing.
 pub use egui_extras;
-pub use gallery_macros::scene;
+pub use gallery_macros::{play, scene};
 /// Macro plumbing: `#[scene]` expands to `::gallery::inventory::submit!`.
 /// Not meant to be named.
 #[doc(hidden)]
@@ -53,17 +53,19 @@ mod context;
 mod diagnostic;
 mod fonts;
 mod globals;
-// glutin builds its EGL backend everywhere but Apple, where the platform GL API is CGL. A headless
-// capture there would need a different context entirely; until one exists, `Renderer::Glow` captures
-// report that rather than failing to compile.
+// glutin builds its EGL backend everywhere but Apple, where the platform GL API is CGL.
+// A headless capture there would need a different context entirely; until one exists,
+// `Renderer::Glow` captures report that rather than failing to compile.
 #[cfg(not(target_vendor = "apple"))]
 mod glow_capture;
+mod handle;
 mod hot;
 mod knobs;
 mod launcher;
 mod offscreen;
 mod pass;
 mod perf;
+mod play;
 mod render;
 mod sheet;
 // Gallery's own chrome as scenes, off unless asked for: a consumer's sidebar is theirs.
@@ -72,17 +74,25 @@ mod sheet;
 mod shell_scenes;
 mod style;
 mod svg;
+mod testing;
 mod tree;
 mod update;
+mod verdicts;
+mod video;
 mod watch;
 mod window;
 pub use actions::action;
+#[doc(hidden)]
+pub use actions::report_actions_to as __report_actions_to;
 use actions::{Log, collecting, render_actions};
+#[doc(hidden)]
+pub use context::__run_scene;
 pub use context::{Checkerboard, PADDING, SceneCtx, SceneRevision, Stage, StageSpec};
 pub use globals::{CatalogGlobals, GlobalControls, GlobalEntry, GlobalKey, GlobalLabel};
 use globals::{GlobalState, GlobalWrite};
+pub use handle::{Knob, KnobValue};
 pub use hot::HotDylib;
-pub use knobs::{ChoiceStyle, Knob, Pad2D, Pad2DSpec};
+pub use knobs::{ChoiceStyle, KnobState, Pad2D, Pad2DSpec};
 use knobs::{
     KnobStore, has_panel_globals, render_global_toolbar, render_knobs, render_panel_globals,
 };
@@ -92,8 +102,22 @@ pub use offscreen::{ImageInput, Offscreen, Pointer, StageTexture};
 pub use pass::ScenePass;
 use pass::{PassStore, PassTarget, WgpuDeps};
 use perf::{PERF_WINDOW_SIZE, PerfStats, perf_window_pos, render_performance};
+#[doc(hidden)]
+pub use play::__in_scenes_dylib;
+pub use play::__run_play;
+pub use play::{
+    By, Canvas, DEFAULT_WAIT_FRAMES, DRAG_FRAMES, Expect, ExpectCanvas, Expected, Found, Numeric,
+    Pace, Play, PlayEntry, PlayError, PlayResult, SCROLL_FRAMES, SceneKey, Screenshot, Subject,
+};
+
+/// googletest's matchers, for what a play expects of a value: `eq`, `contains_substring`,
+/// `gt`, `all!`, `any!`, `not` and the rest. A plain value stands for `eq` to it.
+pub mod matchers {
+    pub use googletest::matchers::*;
+}
 use svg::Icons;
 pub use svg::{Icon, IconError};
+pub use testing::__test_main;
 use tree::{TreeNode, breadcrumb, build_tree, fuzzy, node_matches, scene_key, visible_scenes};
 use watch::{HotStatus, SceneWatcher, render_build_bar, render_hot_chip};
 
@@ -102,11 +126,14 @@ use watch::{HotStatus, SceneWatcher, render_build_bar, render_hot_chip};
 pub mod prelude {
     /// Every scene signature names it, so it comes bare rather than through `egui::`.
     pub use egui::Ui;
+    /// What plays name beyond their own shorthands: `Role::Link`, `Key::Tab`, `Modifiers::SHIFT`.
+    pub use egui::{Key, Modifiers, accesskit::Role};
 
     pub use crate::{
-        CatalogGlobals, Checkerboard, GlobalControls, GlobalKey, Icon, ImageInput, MSAA_SAMPLES,
-        Offscreen, PADDING, Pad2D, Pad2DSpec, Pointer, SceneCtx, SceneEntry, ScenePass,
-        SceneRevision, Stage, StageSpec, StageTexture, action, egui, scene, scene_meta, stage,
+        By, Canvas, CatalogGlobals, Checkerboard, GlobalControls, GlobalKey, Icon, ImageInput,
+        Knob, MSAA_SAMPLES, Offscreen, PADDING, Pace, Pad2D, Pad2DSpec, Play, PlayResult, Pointer,
+        SceneCtx, SceneEntry, ScenePass, SceneRevision, Screenshot, Stage, StageSpec, StageTexture,
+        action, egui, play, scene, scene_meta, stage,
     };
 }
 
@@ -212,6 +239,11 @@ pub trait SceneSource {
     fn globals(&mut self) -> Option<GlobalEntry> {
         None
     }
+
+    /// The plays registered beside the scenes.
+    fn plays(&mut self) -> Vec<PlayEntry> {
+        Vec::new()
+    }
 }
 
 /// Scenes compiled into this binary, read from the `inventory`
@@ -235,6 +267,10 @@ impl SceneSource for Linked {
             "a linked catalog may register only one CatalogGlobals type"
         );
         entry
+    }
+
+    fn plays(&mut self) -> Vec<PlayEntry> {
+        inventory::iter::<PlayEntry>().copied().collect()
     }
 }
 
@@ -275,6 +311,15 @@ pub enum Renderer {
     /// FBO — and show it via [`SceneCtx::register_native_texture`];
     /// [`SceneCtx::render_state`] is `None`.
     Glow,
+}
+
+impl Renderer {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Wgpu => "wgpu",
+            Self::Glow => "glow",
+        }
+    }
 }
 
 /// One process-wide signal handler points at the currently running window.
@@ -1097,7 +1142,7 @@ impl<S: SceneSource> Drop for Gallery<S> {
 pub(crate) fn render_canvas(
     ui: &mut egui::Ui,
     scene: &SceneEntry,
-    store: &mut Vec<Knob>,
+    store: &mut Vec<KnobState>,
     gl_deps: Option<GlDeps<'_>>,
     wgpu: Option<WgpuDeps<'_>>,
 ) -> egui::Vec2 {
@@ -1213,7 +1258,46 @@ fn paint_layers(context: &egui::Context, root: egui::LayerId) -> Vec<egui::Layer
 pub(crate) fn render_canvas_at(
     ui: &mut egui::Ui,
     scene: &SceneEntry,
-    store: &mut Vec<Knob>,
+    store: &mut Vec<KnobState>,
+    gl_deps: Option<GlDeps<'_>>,
+    wgpu: Option<WgpuDeps<'_>>,
+    revision: SceneRevision,
+    globals: Option<&GlobalState>,
+) -> Rendered {
+    render_canvas_with(ui, scene, store, &[], gl_deps, wgpu, revision, globals)
+}
+
+/// [`render_canvas_at`], holding `pinned` slots against the scene's writes.
+pub(crate) fn render_canvas_pinned(
+    ui: &mut egui::Ui,
+    scene: &SceneEntry,
+    store: &mut Vec<KnobState>,
+    pinned: &[context::Pin],
+    gl_deps: Option<GlDeps<'_>>,
+    wgpu: Option<WgpuDeps<'_>>,
+    globals: Option<&GlobalState>,
+) -> Rendered {
+    render_canvas_with(
+        ui,
+        scene,
+        store,
+        pinned,
+        gl_deps,
+        wgpu,
+        SceneRevision::INITIAL,
+        globals,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is a separate borrow of the caller's state"
+)]
+fn render_canvas_with(
+    ui: &mut egui::Ui,
+    scene: &SceneEntry,
+    store: &mut Vec<KnobState>,
+    pinned: &[context::Pin],
     gl_deps: Option<GlDeps<'_>>,
     wgpu: Option<WgpuDeps<'_>>,
     revision: SceneRevision,
@@ -1240,7 +1324,7 @@ pub(crate) fn render_canvas_at(
             // The canvas edge abuts shell panels, so only nested scene scrollers need a fade.
             ui.spacing_mut().scroll.fade = scene_fade;
             let scope = PaintScope::begin(ui);
-            let (declared, global_writes) = egui::Frame::new()
+            let ((declared, written), global_writes, panicked) = egui::Frame::new()
                 .inner_margin(egui::Margin::same(16))
                 .show(ui, |ui| {
                     let mut ctx = SceneCtx::with_globals(
@@ -1254,29 +1338,42 @@ pub(crate) fn render_canvas_at(
                             content_style.clone(),
                         )),
                     );
+                    ctx.pin(pinned);
                     (scene.render)(&mut ctx, ui);
-                    (ctx.declared(), ctx.take_global_writes())
+                    let panicked = ctx.take_panic();
+                    if let Some(panic) = &panicked {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            format!("The scene panicked: {panic}"),
+                        );
+                    }
+                    (ctx.finish(), ctx.take_global_writes(), panicked)
                 })
                 .inner;
+            if written {
+                ui.ctx().request_repaint();
+            }
             // Drop knobs the scene stopped declaring this frame.
             store.truncate(declared);
-            (scope.finish(ui.ctx()), global_writes)
+            (scope.finish(ui.ctx()), global_writes, panicked)
         });
-        let (painted, global_writes) = output.inner;
+        let (painted, global_writes, panicked) = output.inner;
         prepared.clip(ui.ctx(), output.inner_rect);
         painted.clip(ui.ctx(), output.inner_rect);
         Rendered {
             size: output.content_size,
             global_writes,
+            panicked,
         }
     })
     .inner
 }
 
-/// A rendered canvas: its content size, and the catalog globals its scene wrote.
+/// A rendered canvas: its content size, the catalog globals its scene wrote, and its panic.
 pub(crate) struct Rendered {
     pub(crate) size: egui::Vec2,
     pub(crate) global_writes: Vec<GlobalWrite>,
+    pub(crate) panicked: Option<context::ScenePanic>,
 }
 
 struct PreviewContextStyleGuard {
@@ -1910,6 +2007,7 @@ macro_rules! scenes_dylib {
 
         #[unsafe(no_mangle)]
         pub fn __gallery_manifest() -> $crate::Manifest {
+            $crate::__in_scenes_dylib();
             $crate::Manifest {
                 scenes: $crate::inventory::iter::<$crate::SceneEntry>()
                     .copied()
@@ -1924,6 +2022,8 @@ macro_rules! scenes_dylib {
         pub fn __gallery_globals() -> ::core::option::Option<$crate::GlobalEntry> {
             ::core::option::Option::None
         }
+
+        $crate::__gallery_shared_exports!();
     };
     ($globals:ty) => {
         $crate::catalog_globals!($globals);
@@ -1931,6 +2031,7 @@ macro_rules! scenes_dylib {
 
         #[unsafe(no_mangle)]
         pub fn __gallery_manifest() -> $crate::Manifest {
+            $crate::__in_scenes_dylib();
             $crate::Manifest {
                 scenes: $crate::inventory::iter::<$crate::SceneEntry>()
                     .copied()
@@ -1944,6 +2045,27 @@ macro_rules! scenes_dylib {
         #[unsafe(no_mangle)]
         pub fn __gallery_globals() -> ::core::option::Option<$crate::GlobalEntry> {
             ::core::option::Option::Some($crate::GlobalEntry::of::<$globals>())
+        }
+
+        $crate::__gallery_shared_exports!();
+    };
+}
+
+/// A scenes dylib's plays, and the entry point that sends its actions to the host.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __gallery_shared_exports {
+    () => {
+        #[unsafe(no_mangle)]
+        pub fn __gallery_plays() -> ::std::vec::Vec<$crate::PlayEntry> {
+            $crate::inventory::iter::<$crate::PlayEntry>()
+                .copied()
+                .collect()
+        }
+
+        #[unsafe(no_mangle)]
+        pub fn __gallery_report_actions_to(host: fn(::std::string::String)) {
+            $crate::__report_actions_to(host);
         }
     };
 }
@@ -2242,7 +2364,7 @@ mod tests {
                 .as_ref()
                 .expect("catalog globals")
                 .knobs()[0],
-            Knob::IconButtons { value: 1, .. }
+            KnobState::IconButtons { value: 1, .. }
         ));
     }
 
@@ -2284,7 +2406,7 @@ mod tests {
                 .as_ref()
                 .expect("catalog globals")
                 .knobs()[0],
-            Knob::IconButtons { value: 1, .. }
+            KnobState::IconButtons { value: 1, .. }
         ));
         let seen = SEEN_DARK.take();
         assert_eq!(
@@ -2531,7 +2653,7 @@ mod tests {
     ///
     /// The requested scene is deliberately not the first in the manifest, because the failure being
     /// guarded is quiet: a key that matches nothing leaves `still_here` false and the shell falls back
-    /// to the first scene, so `just profile <scene>` would measure the wrong one and say nothing.
+    /// to the first scene, so `just dev::profile <scene>` would measure the wrong one and say nothing.
     /// Driven headlessly, since a window drawing five frames is gone before anyone can look at it.
     #[test]
     fn a_requested_scene_is_the_one_selected_on_the_first_frame() {
@@ -3438,6 +3560,8 @@ mod scaffold_scenes {
     mod canvas_clip;
     #[path = "example.scene.rs"]
     mod example;
+    #[path = "form.scene.rs"]
+    mod form;
     #[path = "globals.scene.rs"]
     pub(crate) mod globals;
     #[path = "keyboard.scene.rs"]
@@ -3462,3 +3586,5 @@ type __GalleryGlobals = scaffold_scenes::globals::Globals;
 
 #[cfg(test)]
 mod keyboard_tests;
+#[cfg(test)]
+mod play_tests;

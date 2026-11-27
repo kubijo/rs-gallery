@@ -27,11 +27,13 @@ thread_local! {
 
 #[scene("vector shapes")]
 fn vector_shapes(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let accent = ctx.color("accent", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
-    let radius = ctx.slider("corner radius", 28.0, 0.0, 80.0, 1.0);
-    let stroke = ctx.slider("stroke width", 3.0, 0.5, 12.0, 0.5);
-    let spokes = ctx.slider("spokes", 16.0, 3.0, 64.0, 1.0) as u32;
-    let Pad2D { x: cx, y: cy } = ctx.pad2d(
+    let accent = ctx
+        .color("accent", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8))
+        .get();
+    let radius = ctx.slider("corner radius", 28.0, 0.0, 80.0, 1.0).get();
+    let stroke = ctx.slider("stroke width", 3.0, 0.5, 12.0, 0.5).get();
+    let spokes = ctx.slider("spokes", 16.0, 3.0, 64.0, 1.0).get() as u32;
+    let center = ctx.pad2d(
         "center",
         Pad2DSpec {
             default_x: 0.5,
@@ -43,6 +45,7 @@ fn vector_shapes(ctx: &mut SceneCtx, ui: &mut Ui) {
             invert_y: false,
         },
     );
+    let Pad2D { x: cx, y: cy } = center.get();
 
     ui.heading("femtovg, drawn into gallery's FBO");
     // Staged, so the femtovg frame carries the checkerboard, size caption and collapse toggle
@@ -98,7 +101,10 @@ fn vector_shapes(ctx: &mut SceneCtx, ui: &mut Ui) {
     // The image hit-tests itself: a press or drag moves the centre, and the knob follows.
     for at in staged.iter().flat_map(|shown| &shown.pointers) {
         if let Pointer::Down { x, y } | Pointer::Move { x, y } = *at {
-            ctx.set_pad2d("center", x / SIZE[0] as f32, y / SIZE[1] as f32);
+            center.set(Pad2D {
+                x: x / SIZE[0] as f32,
+                y: y / SIZE[1] as f32,
+            });
         }
     }
 

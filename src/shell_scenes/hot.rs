@@ -29,9 +29,9 @@ fn ago(seconds: f32) -> Instant {
 /// Every phase the chip can be in, in the order a good run passes through them.
 #[scene(default)]
 fn chip(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let building = ctx.slider("building for", 1.4, 0.0, 90.0, 0.1);
-    let took = ctx.slider("reload took", 1.8, 0.0, 30.0, 0.1);
-    let errors = ctx.slider("errors", 2.0, 0.0, 9.0, 1.0) as usize;
+    let building = ctx.slider("building for", 1.4, 0.0, 90.0, 0.1).get();
+    let took = ctx.slider("reload took", 1.8, 0.0, 30.0, 0.1).get();
+    let errors = ctx.slider("errors", 2.0, 0.0, 9.0, 1.0).get() as usize;
     // The working phases breathe, which needs frames to keep coming.
     ui.ctx().request_repaint();
 

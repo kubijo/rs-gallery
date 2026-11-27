@@ -44,6 +44,58 @@ struct Context {
     _display: Display,
 }
 
+/// The process's stderr pointed at `/dev/null` until dropped.
+///
+/// Listing EGL devices makes Mesa (26.0.3 here) probe every GPU, and one it has no driver for,
+/// such as an NVIDIA card, logs `pci id for fd N: 10de:…, driver (null)` per string queried.
+/// That goes through its loader's default logger (`QueryDeviceStringEXT` →
+/// `dri_get_drm_device_info`), before any display exists to set a quieter one, so neither
+/// `EGL_LOG_LEVEL` nor anything else reaches it. What else is written meanwhile waits,
+/// if it is through the lock of this copy of std, or is lost too, as a panic's message is.
+struct MutedStderr {
+    #[cfg(unix)]
+    saved: Option<std::os::fd::OwnedFd>,
+    /// One at a time: a second would save the first one's `/dev/null` and bring that back.
+    #[cfg(unix)]
+    _alone: std::io::StderrLock<'static>,
+}
+
+impl MutedStderr {
+    /// Muted where it can be; a failure leaves stderr as it was, noise and all.
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd as _;
+            let alone = std::io::stderr().lock();
+            let saved = (|| {
+                let null = std::fs::File::options()
+                    .write(true)
+                    .open("/dev/null")
+                    .ok()?;
+                let saved = rustix::io::dup(alone.as_fd()).ok()?;
+                rustix::stdio::dup2_stderr(null.as_fd()).ok()?;
+                Some(saved)
+            })();
+            Self {
+                saved,
+                _alone: alone,
+            }
+        }
+        #[cfg(not(unix))]
+        Self {}
+    }
+}
+
+impl Drop for MutedStderr {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(saved) = self.saved.take() {
+            // Nothing to report a failure to: stderr is what failed to come back.
+            _ = rustix::stdio::dup2_stderr(&saved);
+        }
+    }
+}
+
 impl GlowCapture {
     /// Build a GL context off the first EGL device that yields one, and a painter over it.
     ///
@@ -51,14 +103,17 @@ impl GlowCapture {
     /// When no device produces a usable context — no EGL at all, no device extensions,
     /// or a driver that refuses every config. The message lists what was tried.
     pub(crate) fn new() -> Result<Self, Diagnostic> {
-        let devices: Vec<Device> = Device::query_devices()
-            .map_err(|e| {
-                Diagnostic::new(format!("no EGL devices to render on: {e}")).hint(
-                    "headless glow capture needs EGL — install a mesa/EGL driver, \
-                     or configure `Renderer::Wgpu`",
-                )
-            })?
-            .collect();
+        let devices: Vec<Device> = {
+            let _muted = MutedStderr::new();
+            Device::query_devices()
+                .map_err(|e| {
+                    Diagnostic::new(format!("no EGL devices to render on: {e}")).hint(
+                        "headless glow capture needs EGL — install a mesa/EGL driver, \
+                         or configure `Renderer::Wgpu`",
+                    )
+                })?
+                .collect()
+        };
 
         // Two machines only agree on a rendered image if they rasterise it the same way, so the
         // reference tests pin a software renderer through this (`nix/test.nix`).
@@ -219,49 +274,85 @@ impl GlowCapture {
 /// and come back blank. Nothing a scene could soundly test for, either:
 /// a fresh context reissues GL names from 1, and a freed handle's address is commonly reused.
 #[derive(Clone)]
-pub(crate) struct SharedCapture(Rc<RefCell<GlowCapture>>);
+pub(crate) struct SharedCapture {
+    // Declared first, so a painter of its own
+    // is freed while its context is still there.
+    painter: Painting,
+    capture: Rc<RefCell<GlowCapture>>,
+}
+
+/// Which painter a [`SharedCapture`] draws through.
+#[derive(Clone)]
+enum Painting {
+    /// The run's, which a scene registers
+    /// its offscreen textures with.
+    Shared,
+    Own(Rc<OwnPainter>),
+}
+
+/// A painter of [`SharedCapture::with_own_painter`]'s,
+/// freeing its GL objects as it goes.
+struct OwnPainter(RefCell<egui_glow::Painter>);
+
+impl Drop for OwnPainter {
+    fn drop(&mut self) {
+        self.0.get_mut().destroy();
+    }
+}
 
 impl SharedCapture {
     /// # Errors
     /// As [`GlowCapture::new`] — and once per run rather than once per shot.
     pub(crate) fn new() -> Result<Self, Diagnostic> {
-        Ok(Self(Rc::new(RefCell::new(GlowCapture::new()?))))
+        Ok(Self {
+            painter: Painting::Shared,
+            capture: Rc::new(RefCell::new(GlowCapture::new()?)),
+        })
+    }
+
+    /// The same context, through a painter of its own: for an app
+    /// drawn alongside a shot, whose textures would otherwise replace
+    /// the shot's under the same ids, its font atlas first among them.
+    ///
+    /// # Errors
+    /// When the painter's shaders do not compile.
+    pub(crate) fn with_own_painter(&self) -> Result<Self, Diagnostic> {
+        let gl = self.capture.borrow().gl.clone();
+        let painter = egui_glow::Painter::new(gl, "", None, false)
+            .map_err(|e| Diagnostic::new(format!("open a second glow painter: {e}")))?;
+        Ok(Self {
+            painter: Painting::Own(Rc::new(OwnPainter(RefCell::new(painter)))),
+            capture: self.capture.clone(),
+        })
     }
 
     pub(crate) fn painter(&self) -> Rc<RefCell<egui_glow::Painter>> {
-        self.0.borrow().painter()
+        self.capture.borrow().painter()
     }
 
     /// The current context's `GL_MAX_TEXTURE_SIZE`.
     pub(crate) fn max_texture_dimension_2d(&self) -> u32 {
-        self.0.borrow().max_texture_dimension_2d
+        self.capture.borrow().max_texture_dimension_2d
+    }
+
+    fn with_painter<T>(&self, then: impl FnOnce(&mut egui_glow::Painter) -> T) -> T {
+        match &self.painter {
+            Painting::Shared => {
+                let painter = self.capture.borrow().painter();
+                then(&mut painter.borrow_mut())
+            }
+            Painting::Own(own) => then(&mut own.0.borrow_mut()),
+        }
     }
 }
 
 impl egui_kittest::TestRenderer for SharedCapture {
-    fn setup_eframe(&self, cc: &mut eframe::CreationContext<'_>, frame: &mut eframe::Frame) {
-        self.0.borrow().setup_eframe(cc, frame);
-    }
-
-    fn handle_delta(&mut self, delta: &mut egui::TexturesDelta) {
-        self.0.borrow_mut().handle_delta(delta);
-    }
-
-    fn render(
-        &mut self,
-        ctx: &egui::Context,
-        output: &egui::FullOutput,
-    ) -> Result<image::RgbaImage, String> {
-        self.0.borrow_mut().render(ctx, output)
-    }
-}
-
-impl egui_kittest::TestRenderer for GlowCapture {
     /// Hand the app the GL a scene draws with. Both fields are `pub` on `CreationContext`, unlike
     /// their counterparts on `Frame` — see `offscreen::RegisterTexture` for what that costs.
     fn setup_eframe(&self, cc: &mut eframe::CreationContext<'_>, _frame: &mut eframe::Frame) {
-        cc.gl = Some(self.gl.clone());
-        cc.get_proc_address = Some(self.loader.clone());
+        let capture = self.capture.borrow();
+        cc.gl = Some(capture.gl.clone());
+        cc.get_proc_address = Some(capture.loader.clone());
     }
 
     /// Upload what egui added or changed, then empty the delta — epaint 0.36 asserts on drop
@@ -269,17 +360,30 @@ impl egui_kittest::TestRenderer for GlowCapture {
     /// before `render`, whereas `Painter::paint_and_update_textures` frees after painting —
     /// the output still names them.
     fn handle_delta(&mut self, delta: &mut egui::TexturesDelta) {
-        let mut painter = self.painter.borrow_mut();
-        for (id, images) in delta.set.drain() {
-            for image in images {
-                painter.set_texture(id, &image);
+        self.with_painter(|painter| {
+            for (id, images) in delta.set.drain() {
+                for image in images {
+                    painter.set_texture(id, &image);
+                }
             }
-        }
+        });
         delta.free.clear();
     }
 
     fn render(
         &mut self,
+        ctx: &egui::Context,
+        output: &egui::FullOutput,
+    ) -> Result<image::RgbaImage, String> {
+        let capture = self.capture.clone();
+        self.with_painter(|painter| capture.borrow_mut().render(painter, ctx, output))
+    }
+}
+
+impl GlowCapture {
+    fn render(
+        &mut self,
+        painter: &mut egui_glow::Painter,
         ctx: &egui::Context,
         output: &egui::FullOutput,
     ) -> Result<image::RgbaImage, String> {
@@ -304,7 +408,6 @@ impl egui_kittest::TestRenderer for GlowCapture {
                 .insert(unsafe { Framebuffer::new(&self.gl, size_px)? }),
         };
 
-        let mut painter = self.painter.borrow_mut();
         // SAFETY (every call here): the context is current on this thread and owns `framebuffer`.
         unsafe {
             self.gl
@@ -424,6 +527,55 @@ impl Framebuffer {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn threads_that_mute_stderr_together_leave_it_as_it_was() {
+        use std::{
+            os::{fd::AsFd as _, unix::fs::MetadataExt as _},
+            sync::Barrier,
+        };
+        // Locked, as another test may have it muted.
+        let copy = || std::io::stderr().lock().as_fd().try_clone_to_owned();
+        let identity = || {
+            let stderr = std::fs::File::from(copy().expect("a copy"));
+            let stderr = stderr.metadata().expect("its metadata");
+            (stderr.dev(), stderr.ino())
+        };
+        let saved = copy().expect("a copy");
+        let before = identity();
+        let barrier = Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..200 {
+                        barrier.wait();
+                        drop(MutedStderr::new());
+                    }
+                });
+            }
+        });
+        let _alone = std::io::stderr().lock();
+        let after = identity();
+        rustix::stdio::dup2_stderr(&saved).expect("restored for the other tests");
+        assert_eq!(after, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_another_thread_writes_waits_until_stderr_is_back() {
+        use std::{io::Write as _, sync::mpsc, time::Duration};
+        let muted = MutedStderr::new();
+        let (wrote, written) = mpsc::channel();
+        std::thread::spawn(move || {
+            _ = std::io::stderr().write_all(b"");
+            wrote.send(()).expect("heard");
+        });
+        let early = written.recv_timeout(Duration::from_millis(200));
+        drop(muted);
+        assert!(early.is_err(), "it would be lost");
+        written.recv().expect("it is written then");
+    }
+
     /// Clear the bound framebuffer to a known colour and read one pixel back
     /// — proof that the context under test can actually draw,
     /// not merely that it was created.
@@ -458,6 +610,25 @@ mod tests {
     fn is_the_cleared_colour(pixel: [u8; 4]) -> bool {
         let near = |got: u8, want: u8| got.abs_diff(want) <= 1;
         near(pixel[0], 64) && near(pixel[1], 128) && near(pixel[2], 191) && pixel[3] == 255
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stderr_is_muted_while_devices_are_listed_and_given_back_after() {
+        use std::os::unix::fs::MetadataExt as _;
+        // Throughout, as another test may mute it meanwhile; a thread may lock it again.
+        let _alone = std::io::stderr().lock();
+        let target = || {
+            let meta = std::fs::metadata("/proc/self/fd/2").expect("fd 2 is open");
+            (meta.dev(), meta.ino())
+        };
+        let null = std::fs::metadata("/dev/null").expect("/dev/null");
+        let before = target();
+        {
+            let _muted = MutedStderr::new();
+            assert_eq!(target(), (null.dev(), null.ino()), "muted onto /dev/null");
+        }
+        assert_eq!(target(), before, "the same stderr as before");
     }
 
     #[test]

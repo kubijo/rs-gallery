@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="color-scheme" content="light dark">
+        <meta name="description"
+              content="What a catalog's tests came to: each play's log, snapshots and video.">
+        <title>{{ summary }} · catalog tests</title>
+        <link rel="icon" type="image/svg+xml" href="{{ favicon }}">
+        <style>{{ styles|safe }}</style>
+    </head>
+    <body>
+        <header id="top">
+            <h1>Catalog tests</h1>
+            <fieldset class="filter">
+                <legend class="unseen">Show</legend>
+                <input type="radio" name="show" id="show-all" checked>
+                <label for="show-all">All <b>{{ failed + unfinished + passed }}</b></label>
+                <input type="radio" name="show" id="show-failed">
+                <label for="show-failed" class="failed">Failed <b>{{ failed }}</b></label>
+                {% if unfinished > 0 %}
+                    <input type="radio" name="show" id="show-unfinished">
+                    <label for="show-unfinished" class="unfinished">Unfinished <b>{{ unfinished }}</b></label>
+                {% endif %}
+                <input type="radio" name="show" id="show-passed">
+                <label for="show-passed" class="passed">Passed <b>{{ passed }}</b></label>
+                {% if tolerated > 0 %}
+                    <input type="radio" name="show" id="show-tolerated">
+                    <label for="show-tolerated" class="tolerated">Tolerated <b>{{ tolerated }}</b></label>
+                {% endif %}
+                {% if earlier > 0 %}
+                    <input type="radio" name="show" id="show-earlier">
+                    <label for="show-earlier">Not run <b>{{ earlier }}</b></label>
+                {% endif %}
+            </fieldset>
+        </header>
+        <main>
+            {% for catalog in catalogs %}
+                <section class="catalog" id="{{ catalog.id }}">
+                    <h2>
+                        {{ catalog.krate }}
+                        <span class="aside">
+                            {{ catalog.renderer }} · <time datetime="{{ catalog.ran.rfc3339 }}">{{ catalog.ran.utc }}</time>
+                        </span>
+                    </h2>
+                    {% for scene in catalog.scenes %}
+                        {% include "scene.html" %}
+                    {% endfor %}
+                </section>
+            {% endfor %}
+            {% if catalogs.is_empty() %}
+                <p>No test has run yet.</p>
+            {% else %}
+                <p class="none">There are none.</p>
+            {% endif %}
+        </main>
+        {% include "minimap.html" %}
+        {% include "lightbox.html" %}
+        <script>{{ script|safe }}</script>
+    </body>
+</html>

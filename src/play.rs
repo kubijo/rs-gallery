@@ -1,0 +1,1404 @@
+//! Plays: scripts that drive a scene through its accessibility tree,
+//! finding widgets by label or role rather than by position.
+//!
+//! A play is compiled into the scenes dylib, which has its own copy of every crate.
+//! AccessKit hashes its node map with foldhash, seeded per copy,
+//! so only the host can search a tree the host built.
+//! Queries cross the [`PlayDriver`] vtable as a [`By`] and return owned [`Found`]s.
+//!
+//! Each gesture is a fixed sequence of frames,
+//! so a play draws the same frames on any machine.
+
+use std::{
+    cell::{Cell, RefCell},
+    fmt::{self, Debug, Display},
+    panic::{self, AssertUnwindSafe, Location},
+    sync::{
+        Once,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use camino::Utf8PathBuf;
+use egui::{
+    Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, Vec2,
+    accesskit::{self, Role},
+};
+use kittest::{AccessKitNode, NodeT, Queryable};
+
+mod expect;
+pub(crate) mod log;
+mod screenshot;
+mod shortcut;
+pub(crate) mod snapshot;
+pub(crate) mod tree;
+
+pub use expect::{Expect, Expected, Subject};
+use log::{Check, Entry, Outcome, What};
+pub use screenshot::{Canvas, ExpectCanvas, Screenshot};
+
+/// The key of the scene a play drives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SceneKey {
+    pub module_path: &'static str,
+    pub name: &'static str,
+}
+
+impl Display for SceneKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}::{}", self.module_path, self.name)
+    }
+}
+
+/// A play, as [`macro@crate::play`] registers it.
+#[derive(Clone, Copy)]
+pub struct PlayEntry {
+    pub scene: SceneKey,
+    /// The function's name, which a recipe or `--play` asks for.
+    pub name: &'static str,
+    /// Where the function is, to tell apart two plays of one name.
+    pub module_path: &'static str,
+    /// The function's source file; its snapshot references sit beside it.
+    pub file: &'static str,
+    pub run: fn(&mut Play<'_>) -> PlayResult,
+}
+
+inventory::collect!(PlayEntry);
+
+/// What a play, a step or a gesture came to.
+pub type PlayResult = Result<(), PlayError>;
+
+/// Why a play stopped, where in its source, and in which step.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PlayError {
+    reason: String,
+    /// The innermost step it happened in.
+    step: Option<String>,
+    /// The play's own line that failed.
+    at: Option<SourceAt>,
+    /// The labels in the tree when a widget could not be found.
+    on_screen: Vec<String>,
+    /// The check that failed, when a matcher is what stopped it.
+    check: Option<Box<Check>>,
+}
+
+/// A line in a play's or a scene's source.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct SourceAt {
+    pub(crate) file: String,
+    pub(crate) line: u32,
+    pub(crate) column: u32,
+}
+
+impl From<&Location<'_>> for SourceAt {
+    fn from(at: &Location<'_>) -> Self {
+        Self {
+            file: at.file().to_owned(),
+            line: at.line(),
+            column: at.column(),
+        }
+    }
+}
+
+impl PlayError {
+    pub fn new(reason: impl Display) -> Self {
+        Self {
+            reason: reason.to_string(),
+            step: None,
+            at: None,
+            on_screen: Vec::new(),
+            check: None,
+        }
+    }
+
+    pub(crate) fn check(&self) -> Option<&Check> {
+        self.check.as_deref()
+    }
+
+    pub(crate) fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub(crate) fn step(&self) -> Option<&str> {
+        self.step.as_deref()
+    }
+
+    pub(crate) fn at(&self) -> Option<&SourceAt> {
+        self.at.as_ref()
+    }
+
+    pub(crate) fn on_screen(&self) -> &[String] {
+        &self.on_screen
+    }
+
+    /// Blame `step`, unless a step inside it was already blamed.
+    fn in_step(mut self, step: &str) -> Self {
+        self.step.get_or_insert_with(|| step.to_owned());
+        self
+    }
+
+    /// Point at `at`, unless a line closer to the failure already was.
+    fn located(mut self, at: &Location<'_>) -> Self {
+        self.at.get_or_insert_with(|| at.into());
+        self
+    }
+
+    fn seeing(mut self, on_screen: Vec<String>) -> Self {
+        self.on_screen = on_screen;
+        self
+    }
+}
+
+/// What [`Play::get`] and [`Play::query`] panic with,
+/// so the report can lay the labels out.
+struct Missed(PlayError);
+
+impl Display for PlayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(step) = &self.step {
+            write!(f, "step `{step}`: ")?;
+        }
+        f.write_str(&self.reason)?;
+        if !self.on_screen.is_empty() {
+            write!(f, "; on screen: {}", self.on_screen.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PlayError {}
+
+impl From<String> for PlayError {
+    fn from(reason: String) -> Self {
+        Self::new(reason)
+    }
+}
+
+impl From<&str> for PlayError {
+    fn from(reason: &str) -> Self {
+        Self::new(reason)
+    }
+}
+
+/// Which widgets a query or gesture means; every condition set must hold.
+/// A bare `&str` is a label: `p.click("Save")`.
+///
+/// kittest's filter without its predicate,
+/// since a closure would run dylib code against the host's tree.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct By {
+    label: Option<String>,
+    label_contains: bool,
+    role: Option<Role>,
+    value: Option<String>,
+}
+
+impl By {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The accessible label, exactly; a text label's text counts too.
+    #[must_use]
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self.label_contains = false;
+        self
+    }
+
+    /// Any accessible label containing `part`.
+    #[must_use]
+    pub fn label_contains(mut self, part: impl Into<String>) -> Self {
+        self.label = Some(part.into());
+        self.label_contains = true;
+        self
+    }
+
+    #[must_use]
+    pub fn role(mut self, role: Role) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    /// Any button; `By::button().label("Save")` for one of them.
+    pub fn button() -> Self {
+        Self::new().role(Role::Button)
+    }
+
+    pub fn checkbox() -> Self {
+        Self::new().role(Role::CheckBox)
+    }
+
+    pub fn slider() -> Self {
+        Self::new().role(Role::Slider)
+    }
+
+    pub fn combo_box() -> Self {
+        Self::new().role(Role::ComboBox)
+    }
+
+    /// A single-line text field.
+    pub fn text_input() -> Self {
+        Self::new().role(Role::TextInput)
+    }
+
+    /// The current value, exactly: a text field's contents, a slider's number.
+    #[must_use]
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    fn kittest(&self) -> kittest::By<'_> {
+        let mut by = kittest::By::new();
+        match (&self.label, self.label_contains) {
+            (Some(label), false) => by = by.label(label),
+            (Some(part), true) => by = by.label_contains(part),
+            (None, _) => {}
+        }
+        if let Some(role) = self.role {
+            by = by.role(role);
+        }
+        if let Some(value) = &self.value {
+            by = by.value(value);
+        }
+        by
+    }
+}
+
+impl From<&str> for By {
+    fn from(label: &str) -> Self {
+        Self::new().label(label)
+    }
+}
+
+impl From<String> for By {
+    fn from(label: String) -> Self {
+        Self::new().label(label)
+    }
+}
+
+/// How a step names its target: `button "Save"`, `~"Sav"`, `= "Ada"`.
+impl Display for By {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut parts = Vec::new();
+        if let Some(role) = self.role {
+            parts.push(format!("{role:?}").to_lowercase());
+        }
+        match (&self.label, self.label_contains) {
+            (Some(label), false) => parts.push(format!("{label:?}")),
+            (Some(part), true) => parts.push(format!("~{part:?}")),
+            (None, _) => {}
+        }
+        if let Some(value) = &self.value {
+            parts.push(format!("= {value:?}"));
+        }
+        if parts.is_empty() {
+            parts.push("anything".to_owned());
+        }
+        f.write_str(&parts.join(" "))
+    }
+}
+
+/// A widget a query found, copied out of that frame's tree.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Found {
+    pub role: Role,
+    pub label: Option<String>,
+    pub value: Option<String>,
+    pub focused: bool,
+    pub disabled: bool,
+    /// On, off, or mixed for a checkbox standing for several;
+    /// `None` when it can't be toggled.
+    /// egui records a selected selectable label here too.
+    pub toggled: Option<accesskit::Toggled>,
+    pub selected: Option<bool>,
+    pub expanded: Option<bool>,
+    /// A slider's or a drag value's number, with its range.
+    pub numeric: Option<Numeric>,
+    pub hidden: bool,
+    pub read_only: bool,
+    pub required: bool,
+    /// What a tooltip says about it.
+    pub description: Option<String>,
+    /// What an empty text field shows in its place.
+    pub placeholder: Option<String>,
+    /// In points.
+    pub rect: egui::Rect,
+    /// The part of [`rect`](Self::rect) a pointer can reach, in points:
+    /// cut by the scroll areas and clips around it, and by the canvas,
+    /// so empty when it is scrolled away or past the canvas's edge.
+    ///
+    /// `None` where egui keeps no such rectangle,
+    /// for a widget that doesn't sense the pointer.
+    pub in_sight: Option<egui::Rect>,
+    target: Target,
+}
+
+/// A widget's number and the range it can take.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Numeric {
+    pub value: f64,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
+}
+
+/// Where a focus request goes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Target {
+    node: accesskit::NodeId,
+    tree: accesskit::TreeId,
+}
+
+impl Found {
+    fn request(&self, action: accesskit::Action) -> Event {
+        Event::AccessKitActionRequest(accesskit::ActionRequest {
+            action,
+            target_node: self.target.node,
+            target_tree: self.target.tree,
+            data: None,
+        })
+    }
+}
+
+/// What a play runs a scene through.
+///
+/// Only gallery implements it, so its methods run as host code.
+/// Only host code can search the tree.
+pub(crate) trait PlayDriver {
+    /// The play's panics are kept off the terminal by `quieten`, which is turned off around
+    /// a render: that runs the scene's paint callbacks where nothing of the play's can catch
+    /// a panic, see [`IN_SCENES_DYLIB`].
+    fn quietened_by(&mut self, quieten: Quieten);
+
+    /// The widgets `by` matches in the last frame's tree.
+    ///
+    /// # Errors
+    /// When the tree can't be read.
+    fn query(&self, by: &By) -> Result<Vec<Found>, String>;
+
+    /// Every non-empty label in the tree, for failure messages; none when it can't be read.
+    fn labels(&self) -> Vec<String>;
+
+    /// Draw one frame with `events` as its input.
+    ///
+    /// # Errors
+    /// When the frame cannot be drawn as asked, e.g. a bad knob value or an ambiguous key.
+    fn frame(&mut self, events: Vec<Event>) -> Result<(), String>;
+
+    /// The actions the scene reported since the last call.
+    fn take_actions(&mut self) -> Vec<String>;
+
+    /// Hold a knob at `value`, written as `--knob` takes it, from the next frame on.
+    fn set_knob(&mut self, key: &str, value: String);
+
+    /// The knob keys that have not landed on a knob since they were last set.
+    fn unlanded(&self) -> Vec<Unlanded>;
+
+    /// The knob key whose value failed the last frame, when one did.
+    fn bad_knob(&self) -> Option<String>;
+
+    /// Screenshot the canvas for step `index` and return where it was written,
+    /// or `None` when this run keeps no trace.
+    /// Written per step, so a long play holds no images in memory.
+    ///
+    /// # Errors
+    /// When the screenshot cannot be taken or written.
+    fn trace(&mut self, index: usize, label: &str) -> Result<Option<Utf8PathBuf>, String>;
+
+    /// A step has ended: a recording pauses on it, so the step can be followed.
+    fn end_step(&mut self);
+
+    /// The play's log entry `index` began, or ended as `entry` now says.
+    fn logged(&mut self, index: usize, entry: &Entry);
+
+    /// Compare what `ask` is of, as it is now, with the reference it names.
+    ///
+    /// # Errors
+    /// When a screenshot cannot be taken, the check is misused,
+    /// its play or its name can name no reference, or the reference is already another check's.
+    fn compare(&mut self, ask: &snapshot::Ask<'_>) -> Result<snapshot::Look, String>;
+
+    /// The last [`compare`](Self::compare) is the check's verdict: write what it leaves behind.
+    ///
+    /// # Errors
+    /// When a file cannot be written.
+    fn keep(&mut self) -> Result<log::Kept, String>;
+}
+
+/// [`PlayDriver::query`] over a tree, `in_sight` saying
+/// how much of a node's widget shows; host code only.
+pub(crate) fn query_tree(
+    root: AccessKitNode<'_>,
+    pixels_per_point: f32,
+    by: &By,
+    in_sight: &dyn Fn(accesskit::NodeId) -> Option<egui::Rect>,
+) -> Vec<Found> {
+    let root = TreeNode { node: root };
+    root.query_all(by.kittest())
+        .map(|found| {
+            let node = found.node;
+            let (node_id, tree) = node.locate();
+            Found {
+                role: node.role(),
+                label: label(&node),
+                value: node.value(),
+                focused: node.is_focused(),
+                disabled: node.is_disabled(),
+                toggled: node.toggled(),
+                selected: node.is_selected(),
+                expanded: node.data().is_expanded(),
+                numeric: node.numeric_value().map(|value| Numeric {
+                    value,
+                    min: node.min_numeric_value(),
+                    max: node.max_numeric_value(),
+                    step: node.numeric_value_step(),
+                }),
+                hidden: node.is_hidden(),
+                // Not the consumer's own `is_read_only`,
+                // which holds for every role that can't be edited.
+                read_only: node.data().is_read_only(),
+                required: node.is_required(),
+                description: node.description(),
+                placeholder: node.placeholder().map(str::to_owned),
+                rect: points(node.bounding_box(), pixels_per_point),
+                in_sight: in_sight(node_id),
+                target: Target {
+                    node: node_id,
+                    tree,
+                },
+            }
+        })
+        .collect()
+}
+
+/// [`PlayDriver::labels`] over a tree; host code only.
+pub(crate) fn tree_labels(root: AccessKitNode<'_>) -> Vec<String> {
+    let root = TreeNode { node: root };
+    let mut labels: Vec<String> = root
+        .query_all(kittest::By::new().predicate(|node| label(node).is_some_and(|l| !l.is_empty())))
+        .filter_map(|found| label(&found.node))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    labels.retain(|label| seen.insert(label.clone()));
+    labels
+}
+
+/// A node's label as kittest's `By::label` reads it.
+/// AccessKit keeps a text label's text in its value.
+fn label(node: &AccessKitNode<'_>) -> Option<String> {
+    if node.role() == Role::Label {
+        node.value()
+    } else {
+        node.label()
+    }
+}
+
+/// A node for kittest's queries to walk.
+#[derive(Clone)]
+struct TreeNode<'tree> {
+    node: AccessKitNode<'tree>,
+}
+
+impl Debug for TreeNode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        kittest::debug_fmt_node(self, f)
+    }
+}
+
+impl<'tree> NodeT<'tree> for TreeNode<'tree> {
+    fn accesskit_node(&self) -> AccessKitNode<'tree> {
+        self.node
+    }
+
+    fn new_related(&self, node: AccessKitNode<'tree>) -> Self {
+        Self { node }
+    }
+}
+
+#[expect(clippy::cast_possible_truncation, reason = "screen coordinates")]
+fn points(bounds: Option<accesskit::Rect>, pixels_per_point: f32) -> egui::Rect {
+    let Some(bounds) = bounds else {
+        return egui::Rect::NOTHING;
+    };
+    let ppp = f64::from(pixels_per_point);
+    egui::Rect::from_min_max(
+        Pos2::new((bounds.x0 / ppp) as f32, (bounds.y0 / ppp) as f32),
+        Pos2::new((bounds.x1 / ppp) as f32, (bounds.y1 / ppp) as f32),
+    )
+}
+
+/// The handle a play gets.
+///
+/// Gestures take a [`By`] and wait, a frame at a time,
+/// until exactly one widget matches.
+///
+/// [`query`](Self::query), [`get`](Self::get) and their kin read the tree.
+pub struct Play<'d> {
+    driver: &'d mut dyn PlayDriver,
+    /// The play's function, as its [`PlayEntry`] names it.
+    name: &'static str,
+    module_path: &'static str,
+    file: &'static str,
+    frame: u32,
+    actions: Vec<String>,
+    log: Vec<Entry>,
+    /// Labels of the steps now running, outermost first.
+    open: Vec<String>,
+    /// Steps finished so far, which numbers their screenshots.
+    steps_done: usize,
+    wait_frames: u32,
+    pace: Pace,
+    knobs_set: KnobsSet,
+}
+
+/// A knob key whose value never landed.
+pub(crate) struct Unlanded {
+    pub(crate) key: String,
+    /// When the driver knows: the knob couldn't take the value (past its range,
+    /// an option it doesn't offer), only a group or button held the label,
+    /// or the knob the key matched before is not declared now.
+    pub(crate) why: Option<String>,
+}
+
+impl Unlanded {
+    fn into_error(self) -> PlayError {
+        PlayError::new(
+            self.why
+                .unwrap_or_else(|| format!("no knob matches `{}`", self.key)),
+        )
+    }
+}
+
+/// Each knob key the play set, and the line that last set it.
+#[derive(Default)]
+struct KnobsSet(Vec<(String, &'static Location<'static>)>);
+
+impl KnobsSet {
+    fn set(&mut self, key: &str, at: &'static Location<'static>) {
+        self.0.retain(|(set, _)| set != key);
+        self.0.push((key.to_owned(), at));
+    }
+
+    fn at(&self, key: &str) -> Option<&'static Location<'static>> {
+        self.0.iter().find(|(set, _)| set == key).map(|(_, at)| *at)
+    }
+}
+
+/// What a play run came to.
+pub(crate) struct PlayRun {
+    pub(crate) log: Vec<Entry>,
+    pub(crate) frames: u32,
+    pub(crate) failure: Option<PlayError>,
+}
+
+/// How long gestures and [`Play::wait_for`] wait, in frames.
+pub const DEFAULT_WAIT_FRAMES: u32 = 60;
+/// The default [`Pace`]'s pointer moves between a drag's press and release.
+pub const DRAG_FRAMES: u32 = 10;
+/// The default [`Pace`]'s wheel events a scroll is split into.
+pub const SCROLL_FRAMES: u32 = 5;
+
+/// How fast a play's gestures go, in frames, and how exactly they aim.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Pace {
+    /// Pointer moves between a drag's press and release, at least 1.
+    pub drag_frames: u32,
+    /// Wheel events a scroll is split into, at least 1.
+    pub scroll_frames: u32,
+    /// Frames each typed character takes; 0 types the whole text in one.
+    pub frames_per_char: u32,
+    /// Whether pointer gestures aim off a widget's middle, at a point its label fixes.
+    pub off_centre: bool,
+}
+
+impl Default for Pace {
+    fn default() -> Self {
+        Self {
+            drag_frames: DRAG_FRAMES,
+            scroll_frames: SCROLL_FRAMES,
+            frames_per_char: 0,
+            off_centre: false,
+        }
+    }
+}
+
+impl Pace {
+    /// About as a person goes, at 60 frames a second:
+    /// a drag in ¾ s, a scroll in ⅓ s, 20 characters a second, and aimed off-centre.
+    #[must_use]
+    pub const fn showcase() -> Self {
+        Self {
+            drag_frames: 45,
+            scroll_frames: 20,
+            frames_per_char: 3,
+            off_centre: true,
+        }
+    }
+}
+/// Most frames a play's last knob keys get to land in once it is over.
+const TAIL_FRAMES: u32 = 8;
+
+/// Run `play`, its panic caught by the `std` this copy of gallery links,
+/// which is the only one that can catch it.
+#[doc(hidden)]
+pub fn __run_play(play: &mut Play<'_>, run: fn(&mut Play<'_>) -> PlayResult) -> PlayResult {
+    play.caught(run)
+}
+
+pub(crate) fn run(entry: &PlayEntry, driver: &mut dyn PlayDriver) -> PlayRun {
+    let mut play = Play {
+        driver,
+        name: entry.name,
+        module_path: entry.module_path,
+        file: entry.file,
+        frame: 0,
+        actions: Vec::new(),
+        log: Vec::new(),
+        open: Vec::new(),
+        steps_done: 0,
+        wait_frames: DEFAULT_WAIT_FRAMES,
+        pace: Pace::default(),
+        knobs_set: KnobsSet::default(),
+    };
+    // A `#[play]` catches its own panics, in the copy of gallery that raised them.
+    // This catches one from an entry built by hand, and leaves the hook loud:
+    // a panic from gallery's own code under a scenes dylib aborts, and should say why first.
+    let mut failure = match panic::catch_unwind(AssertUnwindSafe(|| (entry.run)(&mut play))) {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(panic) => Some(panicked(panic)),
+    };
+    // A knob may come and go as the scene changes, so a key is held to account
+    // only once the play is over, and only if its last value never landed.
+    if failure.is_none() {
+        // Only the play's own keys: the shot's were checked before it began.
+        let unseen = |play: &Play<'_>| {
+            let mut unseen: Vec<_> = play
+                .driver
+                .unlanded()
+                .into_iter()
+                .filter_map(|left| Some((play.knobs_set.at(&left.key)?, left)))
+                .collect();
+            // An unknown key first, so a typo is not hidden behind a known reason.
+            unseen.sort_by_key(|(_, left)| left.why.is_some());
+            unseen
+        };
+        // Keys set after the play's last frame get frames to land in while they keep landing:
+        // one may declare another's knob, or widen its range.
+        // A frame judges what earlier frames declared, so two must land nothing before giving up.
+        let mut left = unseen(&play);
+        let mut idle = 0;
+        for _ in 0..TAIL_FRAMES {
+            if left.is_empty() || idle == 2 {
+                break;
+            }
+            if let Err(error) = play.frame(Vec::new()) {
+                failure = Some(error);
+                break;
+            }
+            let now = unseen(&play);
+            idle = if now.len() < left.len() { 0 } else { idle + 1 };
+            left = now;
+        }
+        if failure.is_none() {
+            failure = left
+                .into_iter()
+                .next()
+                .map(|(at, left)| left.into_error().located(at));
+        }
+    }
+    PlayRun {
+        log: play.log,
+        frames: play.frame,
+        failure,
+    }
+}
+
+impl Play<'_> {
+    /// A named part of the script, logged and traced as one.
+    /// A panic inside it is reported as the step's failure, naming the step.
+    ///
+    /// # Errors
+    /// Whatever stopped the step, prefixed with its label.
+    #[track_caller]
+    pub fn step(
+        &mut self,
+        label: impl Into<String>,
+        body: impl FnOnce(&mut Self) -> PlayResult,
+    ) -> PlayResult {
+        let label = label.into();
+        let path = self
+            .open
+            .iter()
+            .chain([&label])
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" › ");
+        self.entered(What::Step { label, path }, Location::caller(), body)
+    }
+
+    /// Log `what`, run `body` inside it, and close the entry on how it went,
+    /// pointing at `at` when nothing inside points closer.
+    ///
+    /// A step, or a gesture outside one, is what the report counts as a step:
+    /// it is screenshotted, pauses a recording, and is blamed for a failure inside it.
+    fn entered(
+        &mut self,
+        what: What,
+        at: &Location<'_>,
+        body: impl FnOnce(&mut Self) -> PlayResult,
+    ) -> PlayResult {
+        let index = self.log.len();
+        let opens_step = matches!(what, What::Step { .. });
+        if let What::Step { label, .. } = &what {
+            self.open.push(label.clone());
+        }
+        self.log.push(Entry {
+            depth: self.open.len() - usize::from(opens_step),
+            frames: self.frame..self.frame,
+            at: Some(at.into()),
+            outcome: None,
+            trace: None,
+            what,
+        });
+        self.driver.logged(index, &self.log[index]);
+        let mut outcome = self.caught(body);
+        if opens_step {
+            self.open.pop();
+        }
+        let step = self.log[index].step_path().map(str::to_owned);
+        let mut trace = None;
+        if let Some(path) = &step {
+            match self.driver.trace(self.steps_done, path) {
+                Ok(taken) => trace = taken,
+                Err(failed) => outcome = outcome.and(Err(PlayError::new(failed))),
+            }
+            self.steps_done += 1;
+            self.driver.end_step();
+        }
+        let entry = &mut self.log[index];
+        entry.frames.end = self.frame;
+        entry.trace = trace;
+        entry.outcome = Some(if outcome.is_ok() {
+            Outcome::Passed
+        } else {
+            Outcome::Failed
+        });
+        self.driver.logged(index, &self.log[index]);
+        outcome.map_err(|error| {
+            let error = error.located(at);
+            match &step {
+                Some(path) => error.in_step(path),
+                None => error,
+            }
+        })
+    }
+
+    /// `body` of this play, its panics [`caught`] and kept off the terminal.
+    /// Generic, as [`caught`] is.
+    fn caught(&mut self, body: impl FnOnce(&mut Self) -> PlayResult) -> PlayResult {
+        self.driver.quietened_by(quieten);
+        caught(|| body(self)).and_then(|outcome| outcome)
+    }
+
+    /// Log a finished check, and fail with it when its `outcome` is a failure.
+    /// `nothing_matched` puts the labels on screen into the failure.
+    fn checked(
+        &mut self,
+        check: Check,
+        start: u32,
+        at: &Location<'_>,
+        outcome: impl Into<Outcome>,
+        nothing_matched: bool,
+    ) -> PlayResult {
+        let outcome = outcome.into();
+        self.log.push(Entry {
+            depth: self.open.len(),
+            frames: start..self.frame,
+            at: Some(at.into()),
+            outcome: Some(outcome),
+            trace: None,
+            what: What::Check(Box::new(check.clone())),
+        });
+        let index = self.log.len() - 1;
+        self.driver.logged(index, &self.log[index]);
+        if outcome != Outcome::Failed {
+            return Ok(());
+        }
+        let mut error = PlayError::new(check.summary()).located(at);
+        if nothing_matched {
+            error = error.seeing(self.driver.labels());
+        }
+        error.check = Some(Box::new(check));
+        Err(error)
+    }
+
+    /// The widgets `by` matches, or a panic that fails the play with why they can't be read.
+    #[track_caller]
+    fn matches(&self, by: &By) -> Vec<Found> {
+        self.driver
+            .query(by)
+            .unwrap_or_else(|reason| panic::panic_any(Missed(PlayError::new(reason))))
+    }
+
+    /// Every widget `by` matches.
+    ///
+    /// # Panics
+    /// When the accessibility tree can't be read; inside a step, that fails the step.
+    #[track_caller]
+    pub fn query_all(&self, by: impl Into<By>) -> Vec<Found> {
+        self.matches(&by.into())
+    }
+
+    /// The widget `by` matches, if any.
+    ///
+    /// # Panics
+    /// When it matches several, or the accessibility tree can't be read;
+    /// inside a step, that fails the step.
+    #[track_caller]
+    pub fn query(&self, by: impl Into<By>) -> Option<Found> {
+        let by = by.into();
+        let mut found = self.matches(&by);
+        if found.len() > 1 {
+            panic::panic_any(Missed(PlayError::new(format!(
+                "{} widgets match {by}; narrow it with a role or an exact label",
+                found.len()
+            ))));
+        }
+        found.pop()
+    }
+
+    /// The one widget `by` matches.
+    ///
+    /// # Panics
+    /// When it matches none or several, or the accessibility tree can't be read;
+    /// inside a step, that fails the step.
+    #[track_caller]
+    pub fn get(&self, by: impl Into<By>) -> Found {
+        let by = by.into();
+        match self.query(by.clone()) {
+            Some(found) => found,
+            None => panic::panic_any(Missed(
+                PlayError::new(format!("nothing matches {by}")).seeing(self.driver.labels()),
+            )),
+        }
+    }
+
+    /// [`query`](Self::query) by exact label.
+    #[track_caller]
+    pub fn query_by_label(&self, label: &str) -> Option<Found> {
+        self.query(label)
+    }
+
+    /// [`get`](Self::get) by exact label.
+    #[track_caller]
+    pub fn get_by_label(&self, label: &str) -> Found {
+        self.get(label)
+    }
+
+    /// Draw `frames` frames with no input.
+    ///
+    /// # Errors
+    /// When a frame cannot be drawn.
+    #[track_caller]
+    pub fn idle(&mut self, frames: u32) -> PlayResult {
+        let at = Location::caller();
+        for _ in 0..frames {
+            self.frame(Vec::new()).map_err(|error| error.located(at))?;
+        }
+        Ok(())
+    }
+
+    /// Draw frames until `ready` holds, within the wait budget.
+    ///
+    /// # Errors
+    /// When it never holds; the error lists what was on screen.
+    #[track_caller]
+    pub fn wait_for(&mut self, mut ready: impl FnMut(&Self) -> bool) -> PlayResult {
+        let at = Location::caller();
+        let start = self.frame;
+        let mut waited = 0;
+        loop {
+            let held = ready(self);
+            if held || waited == self.wait_frames {
+                let check = Check {
+                    subject: "condition".to_owned(),
+                    matcher: "wait_for",
+                    negated: false,
+                    expected: "holds".to_owned(),
+                    actual: Some(if held {
+                        "held".to_owned()
+                    } else {
+                        format!("never held in {waited} frames")
+                    }),
+                    explanation: None,
+                    message: None,
+                    kept: None,
+                };
+                return self
+                    .checked(check, start, at, held, true)
+                    .map_err(|mut error| {
+                        // The condition is a closure with nothing to name it by,
+                        // so the wait is what the failure reports; the log keeps the check.
+                        error.reason = format!("still waiting after {waited} frames");
+                        error.check = None;
+                        error
+                    });
+            }
+            self.frame(Vec::new()).map_err(|error| error.located(at))?;
+            waited += 1;
+        }
+    }
+
+    /// How many frames gestures and [`wait_for`](Self::wait_for) wait.
+    pub fn set_wait_frames(&mut self, frames: u32) {
+        self.wait_frames = frames;
+    }
+
+    /// How fast the drags, scrolls and typing from here on go:
+    /// [`Pace::showcase`] for a recording to watch.
+    pub fn set_pace(&mut self, pace: Pace) {
+        self.pace = pace;
+    }
+
+    /// Move the pointer onto the widget.
+    ///
+    /// # Errors
+    /// When no single widget matches `by` in time.
+    #[track_caller]
+    pub fn hover(&mut self, by: impl Into<By>) -> PlayResult {
+        self.gesture("hover", by.into(), Location::caller(), |p, at| {
+            p.frame(vec![Event::PointerMoved(aim(&at, p.pace.off_centre)?)])?;
+            p.frame(Vec::new())
+        })
+    }
+
+    /// Click the widget with the primary button,
+    /// at its centre unless the [`Pace`] aims off it.
+    ///
+    /// # Errors
+    /// When no single widget matches `by` in time.
+    #[track_caller]
+    pub fn click(&mut self, by: impl Into<By>) -> PlayResult {
+        self.gesture("click", by.into(), Location::caller(), |p, at| {
+            let center = aim(&at, p.pace.off_centre)?;
+            p.frame(vec![Event::PointerMoved(center)])?;
+            p.frame(vec![button(center, true)])?;
+            p.frame(vec![button(center, false)])?;
+            p.frame(Vec::new())
+        })
+    }
+
+    /// Give the widget keyboard focus, as assistive technology would.
+    ///
+    /// # Errors
+    /// When no single widget matches `by` in time.
+    #[track_caller]
+    pub fn focus(&mut self, by: impl Into<By>) -> PlayResult {
+        self.gesture("focus", by.into(), Location::caller(), |p, at| {
+            p.frame(vec![at.request(accesskit::Action::Focus)])?;
+            p.frame(Vec::new())
+        })
+    }
+
+    /// Focus the widget and replace what it holds with `text`.
+    ///
+    /// # Errors
+    /// When no single widget matches `by` in time.
+    #[track_caller]
+    pub fn fill(&mut self, by: impl Into<By>, text: &str) -> PlayResult {
+        self.gesture("fill", by.into(), Location::caller(), |p, at| {
+            p.frame(vec![at.request(accesskit::Action::Focus)])?;
+            // Select everything first, so the text replaces it rather than joining it.
+            p.frame(vec![
+                Event::ModifiersChanged(Modifiers::COMMAND),
+                keyboard(Key::A, true, Modifiers::COMMAND),
+            ])?;
+            p.frame(vec![
+                keyboard(Key::A, false, Modifiers::COMMAND),
+                Event::ModifiersChanged(Modifiers::NONE),
+            ])?;
+            if text.is_empty() {
+                // egui drops empty text input, so the selection is deleted instead.
+                p.frame(vec![keyboard(Key::Backspace, true, Modifiers::NONE)])?;
+                p.frame(vec![keyboard(Key::Backspace, false, Modifiers::NONE)])?;
+            } else {
+                p.text_frames(text)?;
+            }
+            p.frame(Vec::new())
+        })
+    }
+
+    /// Put `text` in at the play's [`Pace`]: at once, or a character at a time.
+    fn text_frames(&mut self, text: &str) -> PlayResult {
+        let per_char = self.pace.frames_per_char;
+        if per_char == 0 && !text.is_empty() {
+            return self.frame(vec![Event::Text(text.to_owned())]);
+        }
+        for typed in text.chars() {
+            self.frame(vec![Event::Text(typed.to_string())])?;
+            for _ in 1..per_char {
+                self.frame(Vec::new())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Type `text` into whatever has focus.
+    ///
+    /// # Errors
+    /// When a frame cannot be drawn.
+    #[track_caller]
+    pub fn type_text(&mut self, text: &str) -> PlayResult {
+        self.unnamed(format!("type {text:?}"), Location::caller(), |p| {
+            p.text_frames(text)?;
+            p.frame(Vec::new())
+        })
+    }
+
+    /// Press and release a key, with any modifiers held:
+    /// `"Enter"`, `"Cmd+A"`, `"Shift+Tab"`.
+    /// Key names are egui's ([`Key::name`]), modifiers `Cmd`, `Ctrl`, `Alt` and `Shift`,
+    /// all regardless of case. As on Linux and Windows, `Cmd` and `Ctrl` are the same key.
+    ///
+    /// # Errors
+    /// When `shortcut` names no key, or a frame cannot be drawn.
+    #[track_caller]
+    pub fn press(&mut self, shortcut: &str) -> PlayResult {
+        let at = Location::caller();
+        match shortcut::parse(shortcut) {
+            Ok((modifiers, key)) => self.pressed(modifiers, key, at),
+            Err(reason) => self.unnamed(format!("press {shortcut}"), at, |_| {
+                Err(PlayError::new(reason))
+            }),
+        }
+    }
+
+    /// Press and release `key` with `modifiers` held.
+    ///
+    /// # Errors
+    /// When a frame cannot be drawn.
+    #[track_caller]
+    pub fn press_with(&mut self, modifiers: Modifiers, key: Key) -> PlayResult {
+        self.pressed(modifiers, key, Location::caller())
+    }
+
+    fn pressed(&mut self, modifiers: Modifiers, key: Key, at: &Location<'_>) -> PlayResult {
+        let shortcut = egui::KeyboardShortcut::new(modifiers, key)
+            // One spelling on every machine, so a play's step labels and trace names do not differ.
+            .format(&egui::ModifierNames::NAMES, false);
+        self.unnamed(format!("press {shortcut}"), at, |p| {
+            p.frame(vec![
+                Event::ModifiersChanged(modifiers),
+                keyboard(key, true, modifiers),
+            ])?;
+            p.frame(vec![
+                keyboard(key, false, modifiers),
+                Event::ModifiersChanged(Modifiers::NONE),
+            ])?;
+            p.frame(Vec::new())
+        })
+    }
+
+    /// Press where a click would and move by `delta` points (`[x, y]` will do),
+    /// easing in and out, then let go.
+    ///
+    /// # Errors
+    /// When no single widget matches `by` in time.
+    #[track_caller]
+    pub fn drag(&mut self, by: impl Into<By>, delta: impl Into<Vec2>) -> PlayResult {
+        let delta = delta.into();
+        self.gesture("drag", by.into(), Location::caller(), |p, at| {
+            let center = aim(&at, p.pace.off_centre)?;
+            p.frame(vec![Event::PointerMoved(center)])?;
+            p.frame(vec![button(center, true)])?;
+            let moves = p.pace.drag_frames.max(1);
+            for step in 1..=moves {
+                #[expect(clippy::cast_precision_loss, reason = "a handful of frames")]
+                let along = egui::emath::easing::cubic_in_out(step as f32 / moves as f32);
+                p.frame(vec![Event::PointerMoved(center + delta * along)])?;
+            }
+            p.frame(vec![button(center + delta, false)])?;
+            p.frame(Vec::new())
+        })
+    }
+
+    /// Scroll the content under the widget by `delta` points;
+    /// `[x, y]` will do for `delta`.
+    ///
+    /// # Errors
+    /// When no single widget matches `by` in time.
+    #[track_caller]
+    pub fn scroll(&mut self, by: impl Into<By>, delta: impl Into<Vec2>) -> PlayResult {
+        let delta = delta.into();
+        self.gesture("scroll", by.into(), Location::caller(), |p, at| {
+            p.frame(vec![Event::PointerMoved(aim(&at, p.pace.off_centre)?)])?;
+            let steps = p.pace.scroll_frames.max(1);
+            #[expect(clippy::cast_precision_loss, reason = "a handful of frames")]
+            let each = delta / steps as f32;
+            for _ in 0..steps {
+                p.frame(vec![Event::MouseWheel {
+                    unit: MouseWheelUnit::Point,
+                    delta: each,
+                    phase: TouchPhase::Move,
+                    modifiers: Modifiers::NONE,
+                }])?;
+            }
+            p.frame(Vec::new())
+        })
+    }
+
+    /// Hold a knob at `value`, written as `--knob` takes it, from the next frame on.
+    /// A value the knob can't take yet, such as one past its range, waits for a frame that can.
+    /// The play fails once over if the key's last value never landed: no knob matched it,
+    /// or the knob never could take it.
+    #[track_caller]
+    pub fn set_knob(&mut self, key: &str, value: impl Display) {
+        self.knobs_set.set(key, Location::caller());
+        self.driver.set_knob(key, value.to_string());
+    }
+
+    /// What the scene has reported through [`action`](crate::action) during the play.
+    pub fn actions(&self) -> &[String] {
+        &self.actions
+    }
+
+    fn frame(&mut self, events: Vec<Event>) -> PlayResult {
+        if let Err(error) = self.driver.frame(events) {
+            let error = PlayError::new(error);
+            // A bad knob value is the `set_knob` call's fault,
+            // not the gesture's that drew the frame.
+            let set_at = self
+                .driver
+                .bad_knob()
+                .and_then(|key| self.knobs_set.at(&key));
+            return Err(match set_at {
+                Some(at) => error.located(at),
+                None => error,
+            });
+        }
+        self.frame += 1;
+        self.actions.extend(self.driver.take_actions());
+        Ok(())
+    }
+
+    /// Wait for `by` to match one widget, then run `frames` on it,
+    /// logged as its own step unless one is already open.
+    fn gesture(
+        &mut self,
+        verb: &str,
+        by: By,
+        at: &Location<'_>,
+        frames: impl FnOnce(&mut Self, Found) -> PlayResult,
+    ) -> PlayResult {
+        self.unnamed(format!("{verb} {by}"), at, |p| {
+            let target = p.locate(&by)?;
+            frames(p, target)
+        })
+    }
+
+    /// `body` logged as a gesture, which counts as a step of its own outside one,
+    /// pointing at `at` on failure.
+    fn unnamed(
+        &mut self,
+        label: String,
+        at: &Location<'_>,
+        body: impl FnOnce(&mut Self) -> PlayResult,
+    ) -> PlayResult {
+        self.entered(What::Gesture { label }, at, body)
+    }
+
+    /// The one widget `by` matches,
+    /// looked for on this frame and each of the next `wait_frames`.
+    fn locate(&mut self, by: &By) -> Result<Found, PlayError> {
+        let mut waited = 0;
+        loop {
+            let mut found = match self.driver.query(by) {
+                Ok(found) => found,
+                // Waited out: the next frame may draw the widget this one's tree lacks.
+                Err(_) if waited < self.wait_frames => Vec::new(),
+                Err(reason) => return Err(PlayError::new(reason)),
+            };
+            match found.len() {
+                1 => return Ok(found.remove(0)),
+                // None and several are both waited out: a list redrawing can show two for a frame.
+                _ if waited < self.wait_frames => {
+                    self.frame(Vec::new())?;
+                    waited += 1;
+                }
+                0 => {
+                    return Err(PlayError::new(format!(
+                        "nothing matched {by} within {waited} frames"
+                    ))
+                    .seeing(self.driver.labels()));
+                }
+                many => {
+                    return Err(PlayError::new(format!(
+                        "{many} widgets still match {by} after {waited} frames; \
+                         narrow it with a role or an exact label"
+                    )));
+                }
+            }
+        }
+    }
+}
+
+/// The most points [`off_centre`] moves an aim across and down its widget.
+const OFF_CENTRE: Vec2 = Vec2::new(16.0, 4.0);
+
+/// `centre` moved within `shown` to a point `label` fixes,
+/// by at most a third of its size and [`OFF_CENTRE`].
+/// CRC-32 fixes it: unlike egui's hashes, it is the same on every machine.
+pub(crate) fn off_centre(centre: Pos2, shown: egui::Rect, label: &str) -> Pos2 {
+    let [a, b, c, d] = crc32fast::hash(label.as_bytes()).to_le_bytes();
+    let unit =
+        |bits: [u8; 2]| f32::from(u16::from_le_bytes(bits)) / f32::from(u16::MAX) * 2.0 - 1.0;
+    let reach = (shown.size() / 3.0).min(OFF_CENTRE);
+    centre + Vec2::new(unit([a, b]), unit([c, d])) * reach
+}
+
+/// Where a pointer gesture aims on `at`: the centre of what shows of it,
+/// else of the whole of it, if it has a place on screen at all;
+/// moved [`off_centre`] by its label when `off_centre` says.
+fn aim(at: &Found, off_centre: bool) -> Result<Pos2, PlayError> {
+    let centre = centre(at)?;
+    let shown = at.in_sight.unwrap_or(at.rect);
+    Ok(match &at.label {
+        Some(label) if off_centre => self::off_centre(centre, shown, label),
+        _ => centre,
+    })
+}
+
+fn centre(at: &Found) -> Result<Pos2, PlayError> {
+    let named = || {
+        at.label
+            .as_deref()
+            .map_or_else(|| format!("{:?}", at.role), |label| format!("`{label}`"))
+    };
+    match at.in_sight {
+        Some(shown) if !shown.is_positive() => Err(PlayError::new(format!(
+            "{} is out of sight, scrolled away or past the canvas's edge; scroll it into view first",
+            named()
+        ))),
+        Some(shown) => Ok(shown.center()),
+        None if at.rect.center().is_finite() => Ok(at.rect.center()),
+        None => Err(PlayError::new(format!(
+            "{} matched, but has no place on screen to point at",
+            named()
+        ))),
+    }
+}
+
+fn button(pos: Pos2, pressed: bool) -> Event {
+    Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+fn keyboard(key: Key, pressed: bool, modifiers: Modifiers) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers,
+    }
+}
+
+thread_local! {
+    /// Set while a play runs, so its panics reach the report rather than the terminal.
+    static QUIET: Cell<bool> = const { Cell::new(false) };
+    /// Where the last quiet panic was raised.
+    static RAISED_AT: RefCell<Option<SourceAt>> = const { RefCell::new(None) };
+    /// The scene this thread drew last.
+    static LAST_DRAWN: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// This copy of gallery is a scenes dylib's. A panic raised outside a catch of its own, as by
+/// a scene's paint callback while the host renders, unwinds into the host, whose `std`
+/// aborts on it: "Rust cannot catch foreign exceptions". A hook can only say so first.
+pub(crate) static IN_SCENES_DYLIB: AtomicBool = AtomicBool::new(false);
+
+/// Mark this copy of gallery as [`IN_SCENES_DYLIB`].
+#[doc(hidden)]
+pub fn __in_scenes_dylib() {
+    IN_SCENES_DYLIB.store(true, Ordering::Relaxed);
+}
+
+/// Sets whether this thread's panics keep off the terminal, in the copy of gallery it is from;
+/// returns whether they did.
+pub(crate) type Quieten = fn(bool) -> bool;
+
+fn quieten(quiet: bool) -> bool {
+    QUIET.replace(quiet)
+}
+
+#[cfg(test)]
+pub(crate) fn is_quiet() -> bool {
+    QUIET.get()
+}
+
+/// Note that this thread draws `scene`, for a panic raised once it is drawn.
+pub(crate) fn draws(scene: &'static str) {
+    LAST_DRAWN.set(Some(scene));
+}
+
+/// Run `body`, turning a panic into a [`PlayError`]
+/// that points at the line that raised it.
+///
+/// Generic, so it is compiled into whichever copy of gallery calls it.
+/// A scenes dylib can carry its own `std`, with its own panic hook,
+/// and the hook has to be armed in the copy whose code panics.
+pub(crate) fn caught<T>(body: impl FnOnce() -> T) -> Result<T, PlayError> {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if QUIET.get() {
+                RAISED_AT.set(info.location().map(SourceAt::from));
+            } else {
+                previous(info);
+                if let Some(scene) = LAST_DRAWN.get()
+                    && IN_SCENES_DYLIB.load(Ordering::Relaxed)
+                {
+                    eprintln!(
+                        "gallery: scene `{scene}` panicked after it was drawn, most likely in a paint \
+                         callback: unless it catches that itself, the process ends here"
+                    );
+                }
+            }
+        }));
+    });
+    // A panic some other catch handled can have left its line behind.
+    RAISED_AT.take();
+    let was = QUIET.replace(true);
+    let outcome = panic::catch_unwind(AssertUnwindSafe(body));
+    QUIET.set(was);
+    outcome.map_err(|panic| {
+        let mut error = panicked(panic);
+        if error.at.is_none() {
+            error.at = RAISED_AT.take();
+        }
+        error
+    })
+}
+
+/// A panic's payload as the failure it reports:
+/// what [`Play::get`] missed, or its message.
+fn panicked(panic: Box<dyn std::any::Any + Send>) -> PlayError {
+    match panic.downcast::<Missed>() {
+        Ok(missed) => missed.0,
+        Err(panic) => PlayError::new(
+            panic
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panicked".to_owned()),
+        ),
+    }
+}

@@ -27,14 +27,16 @@ fn plain(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
 }
 
 /// Controls (knobs) are declarative-by-use: each `ctx.<knob>` call
-/// adds a control to the right-hand panel and returns its value.
+/// adds a control to the right-hand panel and returns a handle to its value.
 /// Read them before the stage, which holds `ctx` for the call.
 #[scene("with controls")]
 fn with_controls(ctx: &mut SceneCtx, ui: &mut Ui) {
-    let name = ctx.text("name", "world");
-    let size = ctx.slider("size", 24.0, 12.0, 64.0, 1.0);
-    let shout = ctx.toggle("uppercase", false);
-    let color = ctx.color("color", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
+    let name = ctx.text("name", "world").get();
+    let size = ctx.slider("size", 24.0, 12.0, 64.0, 1.0).get();
+    let shout = ctx.toggle("uppercase", false).get();
+    let color = ctx
+        .color("color", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8))
+        .get();
 
     let name = if shout { name.to_uppercase() } else { name };
     // The chosen text colour stays the same under either theme.
@@ -119,7 +121,7 @@ fn full_canvas(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
 /// its own viewport and you get a second scrollbar around the first.
 #[scene("scrolling")]
 fn scrolling(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
-    let rows = ctx.slider("rows", 200.0, 0.0, 1000.0, 1.0) as usize;
+    let rows = ctx.slider("rows", 200.0, 0.0, 1000.0, 1.0).get() as usize;
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
     // Last frame's count: this frame's is not known until the stage below has drawn.
     let drawn_id = egui::Id::new("scrolling-drawn");
@@ -157,10 +159,10 @@ fn segmented_buttons(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
         "done",
     ];
 
-    let weight = ctx.buttons("weight", WEIGHTS, 1);
-    let step = ctx.buttons("step", STEPS, 0);
-    let size = ctx.slider("size", 28.0, 12.0, 48.0, 1.0);
-    let note = ctx.text("note", "");
+    let weight = ctx.buttons("weight", WEIGHTS, 1).get();
+    let step = ctx.buttons("step", STEPS, 0).get();
+    let size = ctx.slider("size", 28.0, 12.0, 48.0, 1.0).get();
+    let note = ctx.text("note", "").get();
 
     let mut text = egui::RichText::new(STEPS[step]).size(size);
     text = match weight {

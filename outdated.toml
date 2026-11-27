@@ -1,4 +1,4 @@
-# Exact upgrades accepted by `just outdated`. New findings and unused exceptions are errors.
+# Exact upgrades accepted by `just dev::outdated`. New findings and unused exceptions are errors.
 # Compatible updates are always checked, including for the packages listed here.
 [[exceptions]]
 packages = ["eframe", "egui", "egui_extras", "egui_kittest"]
@@ -7,4 +7,13 @@ latest = "0.37.0"
 reason = """
 The current egui_ltreeview and egui-elegance releases require the existing egui generation.
 Upgrade the shell and test helpers together when those scene dependencies support the newer one.
+"""
+
+[[exceptions]]
+packages = ["kittest"]
+project = "0.4.0"
+latest = "0.5.0"
+reason = """
+Plays search trees through egui_kittest's own kittest, and egui_kittest 0.36 is built on 0.4;
+a second copy's types would not be its types. Moves with the egui upgrade above.
 """

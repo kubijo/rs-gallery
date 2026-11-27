@@ -17,9 +17,21 @@ hot:
 update:
     cargo run -- --check-updates
 
+# Test the catalog: every scene drawn and every play run; ARGS filter, e.g. `play::` or `--list`.
+test *ARGS:
+    cargo test --test scenes -- {{ ARGS }}
+
 # Render SCENE's canvas to OUT as a PNG, at its default knobs — no window.
 render SCENE OUT SIZE="1280x720":
     cargo run --quiet -- --scene {{ SCENE }} --render {{ OUT }} --size {{ SIZE }}
+
+# Run one of SCENE's plays and render where it leaves off; a failure keeps a screenshot per step.
+play SCENE PLAY OUT SIZE="1280x720":
+    cargo run --quiet -- --scene {{ SCENE }} --play {{ PLAY }} --render {{ OUT }} --size {{ SIZE }}
+
+# Record the tasks board's tour to OUT, with an MP4 and a GIF to share beside it, the pointer gliding between gestures.
+showcase OUT="showcase.png":
+    cargo run --quiet -- --scene tasks --play tours_the_board --render {{ OUT }} --size 960x540 --record 60 --record-format gif,mp4 --record-glide
 
 # Render every shot in a capture recipe (render with knobs set).
 capture FILE="capture.toml" OUT="":

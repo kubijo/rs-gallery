@@ -5,6 +5,144 @@ so a minor release may carry a breaking change.
 
 ## [Unreleased]
 
+- **Breaking: knob accessors return a `Knob<T>` handle.** `ctx.slider`, `toggle`, `text`, `color`, `select`, `radio`,
+  `buttons` and `pad2d` return a handle: `get()` reads it, `set(value)` writes it, snapped as its control would, from
+  anywhere in the frame, a change callback included. Migrating:
+
+  | Before                                                  | After                                                   |
+  | ------------------------------------------------------- | ------------------------------------------------------- |
+  | `let n = ctx.slider("n", 1.0, 0.0, 9.0, 1.0);`          | `let n = ctx.slider("n", 1.0, 0.0, 9.0, 1.0).get();`    |
+  | `ctx.set_slider`, `set_toggle`, `set_text`, `set_color` | `knob.set(value)` on the accessor's handle              |
+  | `ctx.set_select("mode", "auto")`                        | `mode.select("auto")`                                   |
+  | `ctx.set_select_index("mode", i)`                       | `mode.set(i)`                                           |
+  | `ctx.set_pad2d("aim", x, y)`                            | `aim.set(Pad2D { x, y })`                               |
+  | `gallery::Knob::Slider { .. }`, `&mut [Knob]`           | `gallery::KnobState::Slider { .. }`, `&mut [KnobState]` |
+
+  `set` returns `false` for a value the knob can't take, not for a missing label: it always reaches its own knob. A
+  handle is for its frame; kept longer, it refuses writes. In a capture, a knob the recipe or a play's `set_knob` holds
+  refuses them too, so the scene draws the held value and a `settle` shot settles; a catalog global it holds still takes
+  `set_global`.
+
+  A write stores what the panel's control would. A slider snaps as egui does, with no clamp after, so a step that
+  doesn't divide the range can land past `max`: `set(10.0)` on `0..=1` step `0.4` stores `1.2`, where `set_slider`
+  stored `1.0`. A colour goes through HSVA as the picker does, which changes only an invalid premultiplied colour.
+
+- **Knob ranges follow the accessor.** A slider's or pad's range now updates, clamping the value, when the scene
+  declares a new one, as a select's options already did. A recipe or `set_knob` value its knob can't take yet waits:
+  past the range, an option not offered, or a group or button where a knob of that label is hidden. So a range, an
+  option list or a knob that follows another knob replays. The value fails if its knob still refuses it at the end, or
+  if it never landed before its knob was hidden; a landed value whose knob is later hidden, group or not, passes.
+
+- **Fixed: fine slider steps.** A step of `1e-5` or less snapped every value to a whole number.
+
+- **Fixed: recipes refused every value for a reversed range** (`min > max`), which the panel takes either way round.
+
+- **Fixed: a knob sharing its label with a group or button was out of a recipe's reach.** Among the knobs a key matches
+  equally well, by exact label or by regex, one holding a value now wins over a group or button, and while that knob is
+  hidden the value waits for it.
+
+- **A recipe or play key stays on one knob.** A key that lands on one knob and later another, across a shot's settles
+  and its play, fails instead of setting both: one whose own knob is hidden, at first or later, reads as a regex that
+  can match another label. A regex key no longer follows a label that changes. A play's failure points at the `set_knob`
+  behind a bad value, says when a key's knob is hidden rather than missing, and a state it leaves that fails the shot
+  names the play.
+
+- **Plays: scripted interactions.** `#[play(scene_fn)] fn name(p: &mut Play) -> PlayResult` drives a scene the way a
+  person would — `click`, `hover`, `focus`, `fill`, `type_text`, `press`, `drag`, `scroll` — finding widgets by their
+  accessible label or role. Each gesture is a fixed sequence of frames, so a play draws the same frames anywhere. A
+  pointer gesture aims at what shows of its widget, and fails at once if it is scrolled out of sight. `press` takes a
+  shortcut as written, `"Cmd+A"` or `"Shift+Tab"`, and a typo fails saying what it most likely meant; `drag` and
+  `scroll` take `[x, y]`; `By::button()`, `slider()`, `checkbox()`, `combo_box()` and `text_input()` name a role, and
+  the prelude brings `Key`, `Modifiers` and `Role` for the rest. `wait_for` draws frames until a condition holds; `step`
+  names part of a script and takes the blame for a panic in it; `expect_action` waits for the scene to report an action,
+  given as a string or a matcher; `set_knob` holds a knob over the recipe.
+
+- **Captures run plays.** `[[shot]] play = "name"` and `--play NAME` capture the state a play leaves behind — hover,
+  focus, typed text, which no knob can set. The report lists each step and its frames. A failing play keeps a screenshot
+  per step beside the shot (`trace = "always"` keeps a passing play's too), and the instance justfile gains `just play`.
+
+- **Fixed: a capture cut off a scene's windows and popups.** Trimming kept the scene's content alone, and so did growing
+  a canvas too small for it. An `egui::Window` or popup a scene shows over its content is now captured whole.
+
+- **Plays check with matchers that wait.** `p.expect(by)` checks the widget a locator matches — `to_exist`,
+  `to_be_absent`, `to_have_count`, `to_have_value`, `to_have_label`, `to_have_description`, `to_have_placeholder`,
+  `to_have_numeric_value`, `to_be_focused`, `to_be_disabled`, `to_be_enabled`, `to_be_checked`,
+  `to_be_partially_checked`, `to_be_selected`, `to_be_expanded`, `to_be_visible`, `to_be_hidden` — drawing frames until
+  it holds, with `.not()`, `.because(…)` and `.within(frames)`. Values compare by equality or by googletest's matchers,
+  re-exported as `gallery::matchers`; `p.expect_value` polls any computed value. A failure says what was expected and
+  found. `Found` carries a widget's toggled, selected, expanded, numeric, hidden, read-only, required, description and
+  placeholder state. The template's `checks` scene is a form whose play passes every matcher.
+
+- **Catalog tests compare screenshots.** `p.expect(Canvas).to_match_screenshot("saved")` in a play compares the canvas
+  with a reference in `__snapshots__/` beside the play's file, one per renderer, once the scene stops asking for frames.
+  It covers open popups, and grows a canvas too small for its content. With no reference, or past its budget, it fails
+  and leaves `.new.png` and `.diff.png` beside it; `UPDATE_SNAPSHOTS=1` takes the new one. `gallery.toml`'s
+  `[snapshots]` sets the budget, `threshold` and `tolerance`, per renderer too, and
+  `Screenshot::named("saved").tolerance(400)` per check. A capture that runs the play compares nothing and logs the
+  check as skipped. One that passes with pixels differing within its budget is logged as tolerated, `≈`, saying how many
+  differ; the HTML report marks its test and has a filter for them.
+
+- **Catalog tests compare what a scene says.** `to_match_accesskit_snapshot("saved")`, on `p.expect(Canvas)` or on one
+  widget with what is inside it, compares the accessibility tree with `saved.accesskit.json`, in the shape
+  `egui_inspection_tools` writes one. It is taken and refused as a screenshot is; a failure shows the lines changed.
+
+- **A play's log shows as it runs.** Its steps, gestures and checks are redrawn in place on a terminal, a passing play
+  folding to one line, and printed once each play is over anywhere else — a pipe, CI, `TERM=dumb`, an agent's harness.
+  `--steps` keeps every tree, `--log live|linear|off` and `GALLERY_LOG` override the choice, and `GALLERY_LOG_PACE`
+  slows the live log down by so many milliseconds a redraw. The report's `play` and `failed_shots` gain the whole `log`,
+  and a failed shot the `check` that failed it. A failed catalog test shows its play's log after its report.
+
+- **A failed play does not stop the run.** The other shots still run; the summary marks each shot passed or failed, each
+  failure follows in a numbered panel pointing at the play's own line, and the run exits non-zero. The report's
+  `failed_shots` lists every failure step by step.
+
+- **Errors read as reports.** miette lays them out: what failed, why, the names in play, and what to do. Colour,
+  box-drawing, clickable paths and wrapping follow what the terminal supports, and a CI log keeps whole lines. The
+  source a failure points at is highlighted, in the terminal and in the tests' HTML report, and so is an AccessKit
+  snapshot's diff, its changed lines tinted and the words that changed on them more. Screenshot folders, play steps and
+  the run's report all show up, linked, in a capture's summary.
+
+- **Fixed: the Actions panel heard nothing from a scenes dylib.** The dylib's copy of gallery kept actions to itself; it
+  now reports them to the shell.
+
+- **Fixed: an `Icon` drew its hidden paths.** A path with `visibility="hidden"` is no longer painted.
+
+- **Recipes grouped into `just dev`, `just demo` and `just release`.** `validate`, `format`, `snapshots`, `audit`,
+  `docs`, `outdated`, `profile` and the `upgrade` recipes are `just dev::…` (`just dev::validate`); the demos are
+  `just demo::wgpu`, `femtovg`, `plays` and `shell-scenes`; `just tag` and `just release-check` are `just release::tag`
+  and `just release::check`.
+
+- **Catalog defaults.** `gallery.toml`'s `[render]` sets `size`, `scale`, `trim` and `frames` for every shot, below a
+  recipe, its shots and the flags; `[plays]` sets `steps` and `log`, below the flags and `GALLERY_LOG`. A recipe takes a
+  root `frames` too.
+
+- **Recordings.** A shot's `record = { fps, seconds }`, or `--record FPS:SECONDS`, writes what it draws beside its PNG,
+  frame *n* at exactly *n* / fps. A play shot's `record = { fps }` records the whole play (`video = "failing"` keeps it
+  only on failure), pausing `hold` seconds at each step's end, with the keys, mouse and pointer drawn over it but never
+  in screenshots. `glide` (`--record-glide [EASING|off]`) eases the pointer to each gesture along an arc and rests it a
+  moment before it acts, in the file only. Formats: a seekable H.264 MP4 (the default), a lossless, byte-identical APNG,
+  and a GIF of 256 colours and at most 50 fps; `format = ["apng", "gif"]` (`--record-format apng,gif`) writes several
+  from one run. `gallery.toml`'s `[record]` sets all of it for every recording, the tests' MP4s too but for `format`; a
+  shot's own `format`, `hold` and `glide`, then the flags, override it. `set_pace(Pace::showcase())` slows a play's
+  drags, scrolls and typing and aims them off-centre. The template's `studio` and `tasks` scenes show it off, and
+  `just showcase` records the board as an MP4 and a GIF. The report names each file with its frames drawn, held and
+  glided, and what a frame cost to draw, capture and encode.
+
+- **Dependencies.** usvg 0.50, notify 9 and process-wrap 11; simplecss 0.2 and svgtypes 0.16, already under usvg, to
+  check cursors as usvg reads them; gif 0.14 and quantette 0.6 for GIFs.
+
+- **Catalog tests.** `gallery::test_main!(renderer)` in a `harness = false` test makes every scene a `smoke::<scene>`
+  test and every play a `play::<scene>::<name>` test, run through the same scenes dylib the window loads; `just test` in
+  the template runs them. To add it to an existing instance, copy `tests/scenes.rs` and its `[[test]]` entry from the
+  template. A failing play's report points at a video of it, its input shown; `gallery.toml`'s `[tests]` sets `video` to
+  `"off"`, `"failing"` (the default) or `"always"`, and `output` to the directory they go to. Recording costs less with
+  the `[profile.dev.package]` of the template's `Cargo.toml`. Every run leaves an HTML report of the tests in there,
+  `index.html`, with their logs, snapshots and videos.
+
+- **A panicking scene no longer takes everything down.** `#[scene]` catches the panic in the scenes dylib, where it was
+  raised: the window shows it in place of the scene, a capture fails just that shot, and a test just that scene's test,
+  each naming the scene's own line. A panic in a paint callback still ends the process, after naming the scene.
+
 ## [0.16.0] - 2026-10-26
 
 - **Scenes can write catalog globals.** `SceneCtx::set_global(key, value)` keeps a story's own switcher and the window

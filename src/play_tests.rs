@@ -1,0 +1,2439 @@
+//! Plays, run through a capture the way `--play` and a recipe's `play =` run them.
+
+#![cfg(not(target_vendor = "apple"))]
+
+use camino::{Utf8Path, Utf8PathBuf};
+
+use crate::{
+    By, Linked, Manifest, Play, PlayEntry, PlayError, PlayResult, Renderer, SceneCtx, SceneEntry,
+    SceneKey, SceneSource,
+    diagnostic::Diagnostic,
+    render::{
+        Capture, DEFAULT_SCALE, LogMode, Overrides, Shot, ShotPlay, Trace, VideoFormat,
+        render_with_globals,
+    },
+};
+
+mod matchers;
+mod screenshots;
+
+/// A fresh directory of this test's own.
+fn scratch(name: &str) -> Utf8PathBuf {
+    let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+        .expect("a UTF-8 temp dir")
+        .join("gallery-play")
+        .join(name);
+    _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+fn shot(scene: &str, out: &Utf8Path, play: &str, trace: Trace) -> Shot {
+    Shot {
+        scene: scene.to_owned(),
+        out: Some(out.to_owned()),
+        size: egui::vec2(320.0, 240.0),
+        scale: DEFAULT_SCALE,
+        knobs: Overrides::default(),
+        globals: Overrides::default(),
+        frames: None,
+        trim: true,
+        settle: false,
+        list: false,
+        template: false,
+        play: Some(ShotPlay {
+            name: play.to_owned(),
+            trace,
+            steps: false,
+        }),
+        record: None,
+    }
+}
+
+fn capture(
+    manifest: &Manifest,
+    plays: &[PlayEntry],
+    shot: Shot,
+    report: Option<Utf8PathBuf>,
+) -> Result<(), Diagnostic> {
+    render_with_globals(
+        manifest,
+        None,
+        plays,
+        Renderer::Glow,
+        &|_: &egui::Context| {},
+        &Capture {
+            shots: vec![shot],
+            sheet: None,
+            report,
+        },
+        LogMode::Off,
+    )
+}
+
+type PlayFn = fn(&mut Play<'_>) -> PlayResult;
+type SceneFn = fn(&mut SceneCtx<'_>, &mut egui::Ui);
+
+/// One scene and its plays, standing in for a scene file.
+fn catalog(
+    render: fn(&mut SceneCtx<'_>, &mut egui::Ui),
+    plays: &[(&'static str, PlayFn)],
+) -> (Manifest, Vec<PlayEntry>) {
+    let manifest = Manifest {
+        scenes: vec![SceneEntry {
+            render,
+            name: "scene",
+            module_path: "plays",
+            default: true,
+            order: 0,
+            source: "",
+        }],
+        groups: Vec::new(),
+    };
+    let plays = plays
+        .iter()
+        .map(|&(name, run)| PlayEntry {
+            scene: SceneKey {
+                module_path: "plays",
+                name: "scene",
+            },
+            name,
+            module_path: "plays",
+            file: file!(),
+            run,
+        })
+        .collect();
+    (manifest, plays)
+}
+
+fn two_buttons(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    _ = ui.button("Present");
+    _ = ui.button("Also present");
+}
+
+fn trace_files(dir: &Utf8Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+const FORM: &str = "gallery::scaffold_scenes::form::Form";
+const KEYBOARD: &str = "gallery::scaffold_scenes::keyboard::Keyboard";
+
+#[test]
+fn the_form_play_saves_and_the_report_lists_its_steps() {
+    let dir = scratch("form");
+    let out = dir.join("form.png");
+    let report = dir.join("capture.json");
+    capture(
+        &Linked.manifest(),
+        &Linked.plays(),
+        shot(FORM, &out, "saves_after_a_moment", Trace::Always),
+        Some(report.clone()),
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+
+    assert!(out.exists(), "the post-play state was captured");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    let play = &report["shots"][0]["play"];
+    assert_eq!(play["name"], "saves_after_a_moment");
+    let labels: Vec<&str> = play["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| step["label"].as_str().expect("a label"))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            r#"fill "Name""#,
+            r#"click "Count""#,
+            r#"click "Count""#,
+            r#"click button "Save""#,
+            "the save lands",
+        ],
+        "a gesture outside a step is a step of its own"
+    );
+    for step in play["steps"].as_array().expect("steps") {
+        let trace = step["trace"]
+            .as_str()
+            .expect("`trace = always` keeps every step");
+        assert!(Utf8Path::new(trace).exists(), "`{trace}` was written");
+    }
+}
+
+#[test]
+fn the_keyboard_plays_pass_and_keep_no_trace() {
+    for play in ["tab_counts_while_focused", "typing_fills_a_field"] {
+        let dir = scratch(&format!("keyboard-{play}"));
+        let out = dir.join("keyboard.png");
+        capture(
+            &Linked.manifest(),
+            &Linked.plays(),
+            shot(KEYBOARD, &out, play, Trace::Failing),
+            None,
+        )
+        .unwrap_or_else(|failure| panic!("`{play}`: {}", failure.plain()));
+        assert!(
+            trace_files(&dir.join("keyboard.steps")).is_empty(),
+            "a passing play keeps no trace unless asked"
+        );
+    }
+}
+
+#[test]
+fn a_missing_widget_fails_its_step_naming_what_was_there_and_keeps_the_trace() {
+    fn missing(p: &mut Play<'_>) -> PlayResult {
+        p.set_wait_frames(2);
+        p.step("press the missing button", |p| {
+            p.click(By::new().label("Absent"))
+        })
+    }
+    let (manifest, plays) = catalog(two_buttons, &[("missing", missing)]);
+    let dir = scratch("missing");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "missing",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("the play fails")
+    .plain();
+
+    assert!(
+        failure.contains("step `press the missing button`"),
+        "{failure}"
+    );
+    assert!(failure.contains("nothing matched"), "{failure}");
+    assert!(
+        failure.contains("`Present`"),
+        "lists what was on screen: {failure}"
+    );
+    assert_eq!(
+        trace_files(&dir.join("shot.steps")),
+        ["01-press-the-missing-button.png"]
+    );
+}
+
+#[test]
+fn a_failed_play_reports_its_steps_reason_and_line_in_the_json() {
+    fn missing(p: &mut Play<'_>) -> PlayResult {
+        p.set_wait_frames(2);
+        p.step("press the missing button", |p| p.click("Absent"))
+    }
+    let (manifest, plays) = catalog(two_buttons, &[("missing", missing)]);
+    let dir = scratch("failed-report");
+    let report = dir.join("capture.json");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "missing",
+            Trace::Failing,
+        ),
+        Some(report.clone()),
+    )
+    .expect_err("the play fails");
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    assert_eq!(json["complete"], false);
+    let failed = &json["failed_shots"][0];
+    assert_eq!(failed["name"], "shot", "{json}");
+    assert_eq!(failed["play"], "missing");
+    assert_eq!(failed["failed_step"], "press the missing button");
+    assert!(
+        failed["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("nothing matched")),
+        "{json}"
+    );
+    assert!(
+        failed["on_screen"]
+            .as_array()
+            .is_some_and(|labels| labels.iter().any(|label| label == "Present")),
+        "{json}"
+    );
+    assert!(
+        failed["at"]
+            .as_str()
+            .is_some_and(|at| at.starts_with("src/play_tests.rs:")),
+        "points at the play's own line: {json}"
+    );
+    let steps = failed["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 1, "{json}");
+    assert!(
+        steps[0]["trace"].is_string(),
+        "the failure keeps its trace: {json}"
+    );
+}
+
+#[test]
+fn a_failed_play_does_not_stop_the_shots_after_it() {
+    fn missing(p: &mut Play<'_>) -> PlayResult {
+        p.set_wait_frames(2);
+        p.click("Absent")
+    }
+    fn present(p: &mut Play<'_>) -> PlayResult {
+        p.click("Present")
+    }
+    let (manifest, plays) = catalog(two_buttons, &[("missing", missing), ("present", present)]);
+    let dir = scratch("keeps-going");
+    let report = dir.join("capture.json");
+    let failure = render_with_globals(
+        &manifest,
+        None,
+        &plays,
+        Renderer::Glow,
+        &|_: &egui::Context| {},
+        &Capture {
+            shots: vec![
+                shot(
+                    "plays::scene",
+                    &dir.join("first.png"),
+                    "missing",
+                    Trace::Failing,
+                ),
+                shot(
+                    "plays::scene",
+                    &dir.join("second.png"),
+                    "present",
+                    Trace::Failing,
+                ),
+            ],
+            sheet: None,
+            report: Some(report.clone()),
+        },
+        LogMode::Off,
+    )
+    .expect_err("one play failed")
+    .plain();
+
+    assert!(failure.contains("1 of 2 shots failed"), "{failure}");
+    assert!(
+        dir.join("second.png").exists(),
+        "the shot after the failure still ran"
+    );
+    assert!(
+        !dir.join("first.png").exists(),
+        "the failed shot wrote no image"
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    assert_eq!(json["shots"].as_array().map(Vec::len), Some(1), "{json}");
+    assert_eq!(
+        json["failed_shots"].as_array().map(Vec::len),
+        Some(1),
+        "{json}"
+    );
+    assert_eq!(json["failed_shots"][0]["name"], "first", "{json}");
+}
+
+#[test]
+fn fill_replaces_what_a_field_already_holds() {
+    fn prefilled(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let id = ui.make_persistent_id("prefilled");
+        let mut text = ui.data_mut(|data| {
+            data.get_temp_mut_or_insert_with(id, || "Bob".to_owned())
+                .clone()
+        });
+        let label = ui.label("Name");
+        ui.text_edit_singleline(&mut text).labelled_by(label.id);
+        ui.data_mut(|data| data.insert_temp(id, text));
+    }
+    fn rename(p: &mut Play<'_>) -> PlayResult {
+        p.fill("Name", "Ada")?;
+        p.step("the field holds only the new name", |p| {
+            assert_eq!(p.get_by_label("Name").value.as_deref(), Some("Ada"));
+            Ok(())
+        })?;
+        p.fill("Name", "")?;
+        p.step("filling nothing empties it", |p| {
+            assert_eq!(p.get_by_label("Name").value.unwrap_or_default(), "");
+            Ok(())
+        })
+    }
+    let (manifest, plays) = catalog(prefilled, &[("rename", rename)]);
+    let dir = scratch("fill-replaces");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "rename",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+#[test]
+fn a_locator_matching_two_widgets_fails_rather_than_picking_one() {
+    fn ambiguous(p: &mut Play<'_>) -> PlayResult {
+        p.set_wait_frames(3);
+        p.click(By::new().label_contains("resent"))
+    }
+    let (manifest, plays) = catalog(two_buttons, &[("ambiguous", ambiguous)]);
+    let dir = scratch("ambiguous");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "ambiguous",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("the play fails")
+    .plain();
+    assert!(failure.contains("2 widgets still match"), "{failure}");
+}
+
+/// The panic hook may touch none of its own state that a thread has destroyed by then:
+/// a panic in a hook ends the process.
+#[test]
+fn a_panic_as_a_thread_ends_is_no_harm_to_the_process() {
+    struct PanicsLate(std::sync::mpsc::Sender<bool>);
+    impl Drop for PanicsLate {
+        fn drop(&mut self) {
+            let caught = std::panic::catch_unwind(|| panic!("as the thread ends")).is_err();
+            self.0.send(caught).expect("the test waits");
+        }
+    }
+    thread_local! {
+        static LATE: std::cell::RefCell<Option<PanicsLate>> = const { std::cell::RefCell::new(None) };
+    }
+    let (late, told) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // Destroyed after what comes to life with the panic below.
+        LATE.set(Some(PanicsLate(late)));
+        crate::play::caught(|| panic!("a play's")).expect_err("it panics");
+    })
+    .join()
+    .expect("the thread ends");
+    assert_eq!(told.recv(), Ok(true));
+}
+
+#[test]
+fn a_panic_in_a_step_fails_that_step() {
+    fn panics(p: &mut Play<'_>) -> PlayResult {
+        p.step("asserts", |_| panic!("boom"))
+    }
+    let (manifest, plays) = catalog(two_buttons, &[("panics", panics)]);
+    let dir = scratch("panics");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "panics",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("the play fails")
+    .plain();
+    assert!(failure.contains("failed at step `asserts`"), "{failure}");
+    assert!(
+        failure.contains("╰─▶ boom"),
+        "the panic is the cause: {failure}"
+    );
+}
+
+#[test]
+fn wait_for_gives_up_after_its_budget() {
+    fn never(p: &mut Play<'_>) -> PlayResult {
+        p.set_wait_frames(3);
+        p.wait_for(|p| p.query_by_label("Never").is_some())
+    }
+    let (manifest, plays) = catalog(two_buttons, &[("never", never)]);
+    let dir = scratch("never");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "never",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("the play fails")
+    .plain();
+    assert!(
+        failure.contains("still waiting after 3 frames"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn an_unknown_play_names_the_ones_there_are() {
+    fn nothing(_: &mut Play<'_>) -> PlayResult {
+        Ok(())
+    }
+    let (manifest, plays) = catalog(two_buttons, &[("nothing", nothing)]);
+    let dir = scratch("unknown");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "nope",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("no such play")
+    .plain();
+    assert!(failure.contains("has no play `nope`"), "{failure}");
+}
+
+#[test]
+fn a_knob_no_frame_declares_fails_its_play_and_not_the_run() {
+    fn misspelt(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("tpyo", 1);
+        p.idle(2)
+    }
+    fn fine(p: &mut Play<'_>) -> PlayResult {
+        p.idle(1)
+    }
+    let (manifest, plays) = catalog(two_buttons, &[("misspelt", misspelt), ("fine", fine)]);
+    let dir = scratch("unknown-knob");
+    let report = dir.join("capture.json");
+    let failure = render_with_globals(
+        &manifest,
+        None,
+        &plays,
+        Renderer::Glow,
+        &|_: &egui::Context| {},
+        &Capture {
+            shots: vec![
+                shot(
+                    "plays::scene",
+                    &dir.join("first.png"),
+                    "misspelt",
+                    Trace::Failing,
+                ),
+                shot(
+                    "plays::scene",
+                    &dir.join("second.png"),
+                    "fine",
+                    Trace::Failing,
+                ),
+            ],
+            sheet: None,
+            report: Some(report.clone()),
+        },
+        LogMode::Off,
+    )
+    .expect_err("the misspelt play fails")
+    .plain();
+
+    assert!(failure.contains("1 of 2 shots failed"), "{failure}");
+    assert!(dir.join("second.png").exists(), "the run went on");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    let failed = &json["failed_shots"][0];
+    assert!(
+        failed["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("no knob matches `tpyo`")),
+        "{json}"
+    );
+    assert!(
+        failed["at"]
+            .as_str()
+            .is_some_and(|at| at.starts_with("src/play_tests.rs:")),
+        "points at the `set_knob` line: {json}"
+    );
+}
+
+#[test]
+fn a_knob_set_as_the_last_thing_a_play_does_still_counts() {
+    fn loudness(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let loud = ctx.toggle("loud", false).get();
+        ui.label(if loud { "LOUD" } else { "quiet" });
+    }
+    fn turn_it_up_last(p: &mut Play<'_>) -> PlayResult {
+        p.idle(1)?;
+        p.set_knob("loud", true);
+        Ok(())
+    }
+    let (manifest, plays) = catalog(loudness, &[("turn_it_up_last", turn_it_up_last)]);
+    let dir = scratch("last-knob");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "turn_it_up_last",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+fn shown_slider(ctx: &mut SceneCtx<'_>, _: &mut egui::Ui) {
+    if ctx.toggle("show", true).get() {
+        ctx.slider("x", 1.0, 0.0, 10.0, 1.0);
+    }
+}
+
+#[test]
+fn a_value_past_its_range_fails_the_play_even_once_its_knob_is_hidden() {
+    fn past_then_hide(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("x", 12);
+        p.idle(2)?;
+        p.set_knob("show", false);
+        p.idle(2)
+    }
+    let (manifest, plays) = catalog(shown_slider, &[("past_then_hide", past_then_hide)]);
+    let dir = scratch("past-range-hidden");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "past_then_hide",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("12 never landed")
+    .plain();
+    assert!(
+        failure.contains("takes 0 ..= 10; 12 is outside it"),
+        "{failure}"
+    );
+}
+
+/// A group heading of the label left in view is no stand-in for the knob the play hid.
+#[test]
+fn a_recipe_knob_the_play_hides_behind_a_group_of_its_label_still_passes() {
+    fn sectioned(ctx: &mut SceneCtx<'_>, _: &mut egui::Ui) {
+        let open = ctx.toggle("open", true).get();
+        ctx.group("size");
+        if open {
+            ctx.slider("size", 1.0, 0.0, 10.0, 1.0);
+        }
+    }
+    fn close(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("open", false);
+        p.idle(3)
+    }
+    let (manifest, plays) = catalog(sectioned, &[("close", close)]);
+    let dir = scratch("hidden-behind-group");
+    let mut closing = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "close",
+        Trace::Failing,
+    );
+    closing.knobs = [crate::render::KnobOverride {
+        key: "size".to_owned(),
+        value: "7".to_owned(),
+    }]
+    .into_iter()
+    .collect();
+    capture(&manifest, &plays, closing, None)
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+#[test]
+fn a_failed_play_says_which_knob_never_took_its_value() {
+    fn past_then_fail(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("x", 12);
+        // A step, so the report's screenshots hint stands beside the knob's.
+        p.step("wait", |p| p.idle(2))?;
+        Err(PlayError::new("expected x at 12"))
+    }
+    let (manifest, plays) = catalog(shown_slider, &[("past_then_fail", past_then_fail)]);
+    let dir = scratch("past-range-hint");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "past_then_fail",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("the play fails")
+    .plain();
+    assert!(failure.contains("expected x at 12"), "{failure}");
+    assert!(
+        failure.contains("not at the value set: knob `x` takes 0 ..= 10; 12 is outside it"),
+        "{failure}"
+    );
+    assert!(
+        failure.contains("screenshots of each step are in"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn a_later_value_past_its_range_fails_though_an_earlier_one_landed() {
+    fn landed_then_past(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("x", 5);
+        p.idle(2)?;
+        p.set_knob("x", 12);
+        p.idle(2)?;
+        p.set_knob("show", false);
+        p.idle(2)
+    }
+    let (manifest, plays) = catalog(shown_slider, &[("landed_then_past", landed_then_past)]);
+    let dir = scratch("landed-then-past");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "landed_then_past",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("12 never landed, whatever 5 did")
+    .plain();
+    assert!(failure.contains("12 is outside it"), "{failure}");
+}
+
+#[test]
+fn knobs_set_last_get_frames_to_land_one_after_another() {
+    // No label contains another, or a key would land on the wrong knob as a regex.
+    fn gated(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let top = ctx.slider("top", 10.0, 1.0, 20.0, 1.0).get();
+        // Declared from last frame's toggle, so `level` shows up a frame after `show` lands.
+        let id = egui::Id::new("shown last frame");
+        let shown = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
+        let show = ctx.toggle("show", false).get();
+        ui.data_mut(|data| data.insert_temp(id, show));
+        if shown {
+            ctx.slider("level", 1.0, 0.0, top, 1.0);
+        }
+    }
+    fn reveal_last(p: &mut Play<'_>) -> PlayResult {
+        p.idle(1)?;
+        p.set_knob("show", true);
+        p.set_knob("top", 20);
+        p.set_knob("level", 15);
+        Ok(())
+    }
+    let (manifest, plays) = catalog(gated, &[("reveal_last", reveal_last)]);
+    let dir = scratch("tail-frames");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "reveal_last",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+#[test]
+fn a_key_set_twice_is_blamed_on_its_last_set() {
+    static LAST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    fn twice(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("x", 12);
+        LAST.store(line!() + 1, std::sync::atomic::Ordering::Relaxed);
+        p.set_knob("x", 13);
+        p.idle(2)
+    }
+    let (manifest, plays) = catalog(shown_slider, &[("twice", twice)]);
+    let dir = scratch("set-twice");
+    let report = dir.join("capture.json");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "twice",
+            Trace::Failing,
+        ),
+        Some(report.clone()),
+    )
+    .expect_err("13 is past the range");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    let failed = &json["failed_shots"][0];
+    assert!(
+        failed["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("13 is outside it")),
+        "{json}"
+    );
+    let line = LAST.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        failed["at"]
+            .as_str()
+            .is_some_and(|at| at.starts_with(&format!("src/play_tests.rs:{line}:"))),
+        "points at the second `set_knob`, line {line}: {json}"
+    );
+}
+
+/// The report a failed one-shot capture wrote, and the shot it failed.
+fn failed_shot(scene: SceneFn, name: &'static str, run: PlayFn) -> serde_json::Value {
+    let (manifest, plays) = catalog(scene, &[(name, run)]);
+    let dir = scratch(name);
+    let report = dir.join("capture.json");
+    capture(
+        &manifest,
+        &plays,
+        shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
+        Some(report.clone()),
+    )
+    .expect_err("the shot fails");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    json["failed_shots"][0].clone()
+}
+
+fn reason(failed: &serde_json::Value) -> &str {
+    failed["reason"].as_str().unwrap_or_default()
+}
+
+/// `x` also reads as a regex matching `max`, which it lands on while its own knob is hidden.
+fn shadowed(ctx: &mut SceneCtx<'_>, _: &mut egui::Ui) {
+    ctx.slider("max", 1.0, 0.0, 10.0, 1.0);
+    if ctx.toggle("show", false).get() {
+        ctx.slider("x", 1.0, 0.0, 10.0, 1.0);
+    }
+}
+
+#[test]
+fn a_key_that_moves_to_another_knob_fails_rather_than_set_both() {
+    fn reveal(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("x", 5);
+        p.idle(2)?;
+        p.set_knob("show", true);
+        p.idle(2)
+    }
+    let failed = failed_shot(shadowed, "reveal", reveal);
+    assert!(
+        reason(&failed).contains("knob key `x` matched `max`, then `x`"),
+        "{failed}"
+    );
+}
+
+#[test]
+fn a_play_ending_with_its_knob_hidden_does_not_let_the_settle_move_the_key() {
+    fn shown_shadowed(ctx: &mut SceneCtx<'_>, _: &mut egui::Ui) {
+        ctx.slider("max", 1.0, 0.0, 10.0, 1.0);
+        if ctx.toggle("show", true).get() {
+            ctx.slider("x", 1.0, 0.0, 10.0, 1.0);
+        }
+    }
+    fn set_then_hide(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("x", 5);
+        p.idle(2)?;
+        p.set_knob("show", false);
+        Ok(())
+    }
+    let (manifest, plays) = catalog(shown_shadowed, &[("set_then_hide", set_then_hide)]);
+    let dir = scratch("set-then-hide");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "set_then_hide",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("`x` would land on `max` once hidden")
+    .plain();
+    assert!(
+        failure.contains("knob key `x` matched `x`, then `max`"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn a_value_set_while_its_knob_is_hidden_says_so_rather_than_no_knob_matches() {
+    fn hide_then_set(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("x", 5);
+        p.idle(2)?;
+        p.set_knob("show", false);
+        p.idle(2)?;
+        p.set_knob("x", 6);
+        Ok(())
+    }
+    let failed = failed_shot(shown_slider, "hide_then_set", hide_then_set);
+    assert!(
+        reason(&failed).contains("knob `x`, which `x` matched before, is not declared now"),
+        "{failed}"
+    );
+}
+
+#[test]
+fn a_bad_value_set_last_is_blamed_on_its_set_knob() {
+    static AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    fn bad_last(p: &mut Play<'_>) -> PlayResult {
+        p.idle(1)?;
+        AT.store(line!() + 1, std::sync::atomic::Ordering::Relaxed);
+        p.set_knob("x", "abc");
+        Ok(())
+    }
+    let failed = failed_shot(shown_slider, "bad_last", bad_last);
+    assert!(
+        reason(&failed).contains("`abc` is not a number"),
+        "{failed}"
+    );
+    let line = AT.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        failed["at"]
+            .as_str()
+            .is_some_and(|at| at.starts_with(&format!("src/play_tests.rs:{line}:"))),
+        "points at the `set_knob`, line {line}: {failed}"
+    );
+}
+
+#[test]
+fn a_state_a_passing_play_leaves_past_a_range_names_the_play() {
+    fn ranged(ctx: &mut SceneCtx<'_>, _: &mut egui::Ui) {
+        let top = ctx.slider("top", 10.0, 1.0, 20.0, 1.0).get();
+        ctx.slider("level", 1.0, 0.0, top, 1.0);
+    }
+    fn narrow(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("level", 8);
+        p.idle(2)?;
+        p.set_knob("top", 5);
+        p.idle(2)
+    }
+    let (manifest, plays) = catalog(ranged, &[("narrow", narrow)]);
+    let dir = scratch("narrow");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "narrow",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("8 is past the narrowed range")
+    .plain();
+    assert!(
+        failure.contains("play `narrow` on `scene` passed, but the state it left fails the shot"),
+        "{failure}"
+    );
+    assert!(failure.contains("8 is outside it"), "{failure}");
+}
+
+#[test]
+fn two_plays_of_one_name_for_one_scene_are_refused_naming_both() {
+    fn nothing(_: &mut Play<'_>) -> PlayResult {
+        Ok(())
+    }
+    let (manifest, mut plays) = catalog(two_buttons, &[("smoke", nothing)]);
+    plays.push(PlayEntry {
+        module_path: "elsewhere",
+        ..plays[0]
+    });
+    let dir = scratch("twin-plays");
+    let failure = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "smoke",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("the name is ambiguous")
+    .plain();
+    assert!(failure.contains("2 plays named `smoke`"), "{failure}");
+    assert!(failure.contains("plays::smoke"), "{failure}");
+    assert!(failure.contains("elsewhere::smoke"), "{failure}");
+}
+
+#[test]
+fn a_recipe_knob_the_scene_hides_does_not_fail_a_play() {
+    fn modal(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        if ctx.toggle("advanced", true).get() {
+            let gain = ctx.slider("gain", 1.0, 0.0, 10.0, 1.0).get();
+            ui.label(format!("gain {gain}"));
+        }
+        ui.label("modal");
+    }
+    fn look(p: &mut Play<'_>) -> PlayResult {
+        p.idle(2)?;
+        p.step("the simple mode shows", |p| {
+            p.get_by_label("modal");
+            assert!(p.query_by_label("gain 2").is_none(), "gain is hidden");
+            Ok(())
+        })
+    }
+    let (manifest, plays) = catalog(modal, &[("look", look)]);
+    let dir = scratch("hidden-knob");
+    let mut simple = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "look",
+        Trace::Failing,
+    );
+    simple.knobs = [
+        crate::render::KnobOverride {
+            key: "advanced".to_owned(),
+            value: "false".to_owned(),
+        },
+        crate::render::KnobOverride {
+            key: "gain".to_owned(),
+            value: "2".to_owned(),
+        },
+    ]
+    .into_iter()
+    .collect();
+    capture(&manifest, &plays, simple, None)
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+#[test]
+fn a_knob_a_play_sets_outranks_the_recipe_through_the_capture() {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+    fn loudness(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let loud = ctx.toggle("loud", false).get();
+        LAST.set(Some(loud));
+        ui.label(if loud { "LOUD" } else { "quiet" });
+    }
+    fn turn_it_up(p: &mut Play<'_>) -> PlayResult {
+        p.set_knob("loud", true);
+        p.idle(3)?;
+        p.step("the scene took it", |p| {
+            p.get_by_label("LOUD");
+            Ok(())
+        })
+    }
+    let (manifest, plays) = catalog(loudness, &[("turn_it_up", turn_it_up)]);
+    let dir = scratch("knob");
+    let mut quiet = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "turn_it_up",
+        Trace::Failing,
+    );
+    quiet.knobs = [crate::render::KnobOverride {
+        key: "loud".to_owned(),
+        value: "false".to_owned(),
+    }]
+    .into_iter()
+    .collect();
+    capture(&manifest, &plays, quiet, None).unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    assert_eq!(
+        LAST.get(),
+        Some(true),
+        "the captured frame drew the play's value"
+    );
+}
+
+#[test]
+fn a_play_writes_the_same_bytes_twice() {
+    let run = |name: &str| {
+        let dir = scratch(name);
+        let out = dir.join("form.png");
+        capture(
+            &Linked.manifest(),
+            &Linked.plays(),
+            shot(FORM, &out, "saves_after_a_moment", Trace::Failing),
+            None,
+        )
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+        std::fs::read(&out).expect("the capture")
+    };
+    assert!(
+        run("same-once") == run("same-twice"),
+        "two runs of one play differ"
+    );
+}
+
+/// A block of 60×20 pixels in a grey nothing else here is drawn in.
+fn marker(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(60.0, 20.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 0.0, egui::Color32::from_rgb(1, 200, 77));
+}
+
+/// Whether the PNG at `path` holds the whole [`marker`].
+fn holds_the_marker(path: &Utf8Path) -> bool {
+    let image = image::open(path).expect("a PNG").to_rgba8();
+    let marked = image
+        .pixels()
+        .filter(|pixel| pixel.0 == [1, 200, 77, 255])
+        .count();
+    marked == 60 * 20
+}
+
+#[test]
+fn a_popup_a_play_leaves_open_is_whole_in_the_shot_and_its_step_screenshots() {
+    fn menu(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.menu_button("Menu", |ui| {
+            _ = ui.button("Open");
+            marker(ui);
+        });
+    }
+    fn opens(p: &mut Play<'_>) -> PlayResult {
+        p.click("Menu")?;
+        p.step("the menu is open", |p| p.expect("Open").to_exist())
+    }
+    let (manifest, plays) = catalog(menu, &[("opens", opens)]);
+    let dir = scratch("popup");
+    let out = dir.join("shot.png");
+    capture(
+        &manifest,
+        &plays,
+        shot("plays::scene", &out, "opens", Trace::Always),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    assert!(holds_the_marker(&out), "the shot");
+    let steps = dir.join("shot.steps");
+    let last = trace_files(&steps).pop().expect("a step");
+    assert!(holds_the_marker(&steps.join(&last)), "{last}");
+}
+
+#[test]
+fn a_window_is_captured_whole_where_it_stands_and_past_the_canvas() {
+    fn aside(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        egui::Window::new("Aside")
+            .fixed_pos([150.0, 120.0])
+            .show(ui.ctx(), marker);
+    }
+    fn tall(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        egui::Window::new("Tall")
+            .fixed_pos([0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.add_space(300.0);
+                marker(ui);
+            });
+    }
+    for (name, scene) in [("aside", aside as SceneFn), ("tall", tall)] {
+        let (manifest, plays) = catalog(scene, &[]);
+        let out = scratch(&format!("window-{name}")).join("shot.png");
+        let still = Shot {
+            play: None,
+            ..shot("plays::scene", &out, "", Trace::Always)
+        };
+        capture(&manifest, &plays, still, None)
+            .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+        assert!(holds_the_marker(&out), "{name}");
+    }
+}
+
+#[test]
+fn a_window_parked_off_the_canvas_is_left_there() {
+    fn parked(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.label("Here");
+        egui::Area::new(egui::Id::new("parked"))
+            .fixed_pos([50_000.0, 50_000.0])
+            .constrain(false)
+            .show(ui.ctx(), |ui| ui.label("Away"));
+    }
+    let (manifest, plays) = catalog(parked, &[]);
+    let out = scratch("window-parked").join("shot.png");
+    let still = Shot {
+        play: None,
+        ..shot("plays::scene", &out, "", Trace::Always)
+    };
+    capture(&manifest, &plays, still, None).unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let image = image::open(&out).expect("a PNG");
+    assert!(image.width() < 320, "{}×{}", image.width(), image.height());
+}
+
+#[test]
+fn a_passing_run_clears_an_old_trace_and_nothing_else() {
+    let dir = scratch("stale");
+    let trace = dir.join("form.steps");
+    std::fs::create_dir_all(&trace).expect("the trace dir");
+    std::fs::write(trace.join("07-an-old-failure.png"), b"stale").expect("a stale trace");
+    std::fs::write(trace.join("notes.txt"), b"mine").expect("an unrelated file");
+    capture(
+        &Linked.manifest(),
+        &Linked.plays(),
+        shot(
+            FORM,
+            &dir.join("form.png"),
+            "saves_after_a_moment",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    assert_eq!(trace_files(&trace), ["notes.txt"]);
+}
+
+/// The number at the end of the one label starting with `prefix`.
+fn reading(p: &Play<'_>, prefix: &str) -> f32 {
+    let found = p.get(By::new().label_contains(prefix));
+    let label = found.label.expect("a labelled reading");
+    label[prefix.len()..]
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("`{label}` ends in a number"))
+}
+
+#[test]
+fn a_plays_pace_sets_how_many_frames_its_drags_scrolls_and_typing_take() {
+    fn pad_and_field(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let (_, response) = ui.allocate_exact_size(egui::vec2(200.0, 60.0), egui::Sense::drag());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "pad"));
+        let id = ui.make_persistent_id("typed");
+        let mut typed: String =
+            ui.data_mut(|data| data.get_temp_mut_or_default::<String>(id).clone());
+        let label = ui.label("Field");
+        if ui
+            .text_edit_singleline(&mut typed)
+            .labelled_by(label.id)
+            .changed()
+        {
+            crate::action(format!("field {typed}"));
+        }
+        ui.data_mut(|data| data.insert_temp(id, typed));
+    }
+    fn gestures(p: &mut Play<'_>) -> PlayResult {
+        p.drag("pad", [100.0, 0.0])?;
+        p.scroll("pad", [0.0, -50.0])?;
+        p.click("Field")?;
+        p.type_text("abc")?;
+        p.expect("Field").to_have_value("abc")?;
+        p.type_text("")?;
+        p.fill("Field", "xyz")?;
+        p.expect("Field").to_have_value("xyz")
+    }
+    fn paced(p: &mut Play<'_>) -> PlayResult {
+        p.set_pace(crate::play::Pace {
+            drag_frames: 30,
+            scroll_frames: 12,
+            frames_per_char: 2,
+            off_centre: false,
+        });
+        gestures(p)?;
+        p.expect_action("field a")?;
+        p.expect_action("field ab")
+    }
+    // How many frames each gesture of `run` took, by its label.
+    let spans = |name: &'static str, run: PlayFn| {
+        let (manifest, plays) = catalog(pad_and_field, &[(name, run)]);
+        let dir = scratch(name);
+        let report = dir.join("capture.json");
+        capture(
+            &manifest,
+            &plays,
+            shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
+            Some(report.clone()),
+        )
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+        let log = json["shots"][0]["play"]["log"]
+            .as_array()
+            .expect("a log")
+            .clone();
+        let span = |label: &str| {
+            let entry = log
+                .iter()
+                .find(|entry| entry["label"] == label)
+                .unwrap_or_else(|| panic!("no `{label}` in {log:#?}"));
+            entry["frames"][1].as_u64().expect("an end")
+                - entry["frames"][0].as_u64().expect("a start")
+        };
+        [
+            span("drag \"pad\""),
+            span("scroll \"pad\""),
+            span("type \"abc\""),
+            span("type \"\""),
+            span("fill \"Field\""),
+        ]
+    };
+    assert_eq!(
+        spans("unpaced", gestures),
+        [14, 7, 2, 1, 5],
+        "by default: 10 moves, 5 wheel steps and the text at once, each with its frames around"
+    );
+    assert_eq!(
+        spans("paced", paced),
+        [34, 14, 7, 1, 10],
+        "paced: 30 moves, 12 wheel steps and 2 frames a character, typed or filled; \
+         no text, no frames of it"
+    );
+}
+
+#[test]
+fn an_off_centre_aim_is_the_point_its_labels_crc_32_picks_on_every_machine() {
+    let wide = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 40.0));
+    let at = crate::play::off_centre(wide.center(), wide, "Wide");
+    // zlib's CRC-32 of "Wide" is 0x0cd123dc: its low half picks x, its high half y.
+    let picked = egui::pos2(100.0 - 0.719_844_4 * 16.0, 20.0 - 0.899_870_3 * 4.0);
+    assert!(at.distance(picked) < 0.001, "{at:?}, not {picked:?}");
+}
+
+#[test]
+fn an_off_centre_pace_presses_near_the_middle_at_the_same_point_each_run() {
+    static PRESSED: std::sync::Mutex<Option<(egui::Pos2, egui::Rect)>> =
+        std::sync::Mutex::new(None);
+    fn wide(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let button = ui.add_sized([200.0, 40.0], egui::Button::new("Wide"));
+        if let Some(at) = ui.input(|input| input.pointer.press_origin()) {
+            *PRESSED.lock().expect("the press") = Some((at, button.rect));
+        }
+    }
+    fn clicks(p: &mut Play<'_>) -> PlayResult {
+        p.set_pace(crate::play::Pace {
+            off_centre: true,
+            ..crate::play::Pace::default()
+        });
+        p.click("Wide")
+    }
+    let pressed = |name: &'static str| {
+        let (manifest, plays) = catalog(wide, &[(name, clicks)]);
+        let dir = scratch(name);
+        capture(
+            &manifest,
+            &plays,
+            shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
+            None,
+        )
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+        PRESSED.lock().expect("the press").take().expect("pressed")
+    };
+    let (at, rect) = pressed("off-centre");
+    let off = at - rect.center();
+    assert!(off.length() > 1.0, "off the middle: {at:?} in {rect:?}");
+    assert!(
+        off.x.abs() <= 16.0 && off.y.abs() <= 4.0 && rect.contains(at),
+        "near it, within the button: {at:?} in {rect:?}"
+    );
+    assert_eq!(pressed("off-centre-again").0, at, "the same point each run");
+}
+
+#[test]
+fn a_drag_eases_into_its_move_and_out_of_it() {
+    static HELD_AT: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
+    fn pad(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let (_, response) = ui.allocate_exact_size(egui::vec2(200.0, 60.0), egui::Sense::drag());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "pad"));
+        if let Some(at) = ui.input(|input| {
+            input
+                .pointer
+                .primary_down()
+                .then(|| input.pointer.latest_pos())
+                .flatten()
+        }) {
+            HELD_AT.lock().expect("the places").push(at.x);
+        }
+    }
+    fn drags(p: &mut Play<'_>) -> PlayResult {
+        p.drag("pad", [100.0, 0.0])
+    }
+    let (manifest, plays) = catalog(pad, &[("eases", drags)]);
+    let dir = scratch("drag-eases");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "eases",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let held = HELD_AT.lock().expect("the places").clone();
+    let steps: Vec<f32> = held.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let middle = steps.len() / 2;
+    assert!(
+        steps[1] < steps[middle] && steps[steps.len() - 1] < steps[middle],
+        "slow, fast, slow: {steps:?}"
+    );
+}
+
+#[test]
+fn a_drag_moves_the_pointer_across_the_widget_while_held() {
+    fn pad(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let id = ui.make_persistent_id("dragged");
+        let mut dragged: f32 = ui.data_mut(|data| *data.get_temp_mut_or_default(id));
+        let (_, response) = ui.allocate_exact_size(egui::vec2(200.0, 60.0), egui::Sense::drag());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "pad"));
+        dragged += response.drag_delta().x;
+        ui.data_mut(|data| data.insert_temp(id, dragged));
+        ui.label(format!("dragged {dragged}"));
+    }
+    fn drag_right(p: &mut Play<'_>) -> PlayResult {
+        p.drag("pad", [100.0, 0.0])?;
+        p.step("the pad followed", |p| {
+            let dragged = reading(p, "dragged");
+            // `Response::drag_delta` is zero until `InputState::is_decidedly_dragging`,
+            // so the first move may go uncounted.
+            assert!(dragged > 50.0, "dragged {dragged} of 100 points");
+            Ok(())
+        })
+    }
+    let (manifest, plays) = catalog(pad, &[("drag_right", drag_right)]);
+    let dir = scratch("drag");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "drag_right",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+#[test]
+fn a_scroll_moves_the_content_under_the_widget() {
+    fn list(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let id = ui.make_persistent_id("offset");
+        let offset: f32 = ui.data_mut(|data| *data.get_temp_mut_or_default(id));
+        ui.label(format!("offset {offset}"));
+        let output = egui::ScrollArea::vertical()
+            .max_height(80.0)
+            .show(ui, |ui| {
+                for row in 0..40 {
+                    ui.label(format!("row {row}"));
+                }
+            });
+        ui.data_mut(|data| data.insert_temp(id, output.state.offset.y));
+    }
+    fn scroll_down(p: &mut Play<'_>) -> PlayResult {
+        p.scroll("row 1", [0.0, -200.0])?;
+        p.step("the list moved", |p| {
+            let offset = reading(p, "offset");
+            assert!(offset > 0.0, "scrolled to {offset}");
+            Ok(())
+        })
+    }
+    let (manifest, plays) = catalog(list, &[("scroll_down", scroll_down)]);
+    let dir = scratch("scroll");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "scroll_down",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+/// Buttons in a list shorter than they are,
+/// and how many clicks reached each.
+fn clickable_rows(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    let id = ui.make_persistent_id("clicks");
+    let mut clicks: u32 = ui.data_mut(|data| *data.get_temp_mut_or_default(id));
+    ui.label(format!("clicks {clicks}"));
+    egui::ScrollArea::vertical()
+        .max_height(60.0)
+        .show(ui, |ui| {
+            if ui
+                .add_sized([120.0, 200.0], egui::Button::new("tall"))
+                .clicked()
+            {
+                clicks += 1;
+            }
+            for row in 0..40 {
+                if ui.button(format!("row {row}")).clicked() {
+                    clicks += 1;
+                }
+            }
+        });
+    ui.data_mut(|data| data.insert_temp(id, clicks));
+}
+
+/// What the capture of `clickable_rows` running `run` came to.
+fn clicking(name: &'static str, run: PlayFn) -> Result<(), Diagnostic> {
+    let (manifest, plays) = catalog(clickable_rows, &[(name, run)]);
+    let dir = scratch(name);
+    capture(
+        &manifest,
+        &plays,
+        shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
+        None,
+    )
+}
+
+#[test]
+fn a_pointer_gesture_at_a_widget_out_of_sight_fails_saying_so() {
+    fn click_far_row(p: &mut Play<'_>) -> PlayResult {
+        p.click("row 30")
+    }
+    let failure = clicking("click_far_row", click_far_row).expect_err("row 30 is scrolled away");
+    let plain = failure.plain();
+    assert!(plain.contains("`row 30` is out of sight"), "{plain}");
+    assert!(plain.contains("scroll it into view"), "{plain}");
+}
+
+#[test]
+fn a_pointer_gesture_aims_at_the_part_of_a_widget_in_sight() {
+    fn click_tall(p: &mut Play<'_>) -> PlayResult {
+        p.click("tall")?;
+        p.step("the click reached it", |p| {
+            let clicks = reading(p, "clicks");
+            assert_eq!(clicks, 1.0, "its centre is below the list's bottom edge");
+            Ok(())
+        })
+    }
+    clicking("click_tall", click_tall).unwrap_or_else(|failure| panic!("{}", failure.plain()));
+}
+
+fn switch(ctx: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    let on = ctx.toggle("on", false).get();
+    ui.label(if on { "ON" } else { "off" });
+}
+
+fn flip(p: &mut Play<'_>) -> PlayResult {
+    p.step("before", |p| p.idle(2))?;
+    p.set_knob("on", true);
+    p.step("after", |p| p.idle(3))
+}
+
+fn flip_then_fail(p: &mut Play<'_>) -> PlayResult {
+    p.idle(2)?;
+    Err(PlayError::new("it was never going to pass"))
+}
+
+fn nested(p: &mut Play<'_>) -> PlayResult {
+    p.step("outer", |p| p.step("inner", |p| p.idle(2)))
+}
+
+fn tab_then_hover(p: &mut Play<'_>) -> PlayResult {
+    p.step("tab", |p| p.press("Tab"))?;
+    p.step("hover", |p| p.hover("off"))
+}
+
+/// Every file in `dir`, by name, with its bytes.
+fn files(dir: &Utf8Path) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<_> = dir
+        .read_dir_utf8()
+        .expect("the directory")
+        .map(|entry| {
+            let entry = entry.expect("an entry");
+            (
+                entry.file_name().to_owned(),
+                std::fs::read(entry.path()).expect("the file"),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn a_plays_input_shows_on_its_recording_and_nowhere_else() {
+    let record = |input| crate::render::Record {
+        fps: 30,
+        seconds: None,
+        keep: Trace::Always,
+        formats: crate::render::VideoFormat::Apng.into(),
+        hold: None,
+        input,
+        glide: crate::render::Glide::default(),
+    };
+    let (plain, _) = record_play("input-off", tab_then_hover, Trace::Always, record(None));
+    let (shown, _) = record_play(
+        "input-on",
+        tab_then_hover,
+        Trace::Always,
+        record(Some(crate::render::Corner::BottomLeft)),
+    );
+    let png = |video: &Utf8Path| std::fs::read(video.with_extension("png")).expect("the PNG");
+    assert_eq!(
+        png(&plain),
+        png(&shown),
+        "the shot's PNG never shows the input"
+    );
+    let steps = |video: &Utf8Path| files(&video.with_extension("steps"));
+    assert_eq!(steps(&plain), steps(&shown), "nor do its step screenshots");
+
+    let last = |video: &Utf8Path| {
+        let (_, frames) = crate::video::decode(video);
+        frames.last().expect("a frame").image.clone()
+    };
+    let (plain, shown) = (last(&plain), last(&shown));
+    let (width, height) = shown.dimensions();
+    let bottom_left = |image: &image::RgbaImage| {
+        image::imageops::crop_imm(image, 0, height / 2, width / 2, height / 2).to_image()
+    };
+    assert_ne!(
+        bottom_left(&plain),
+        bottom_left(&shown),
+        "the Tab pressed a second ago is listed in the bottom-left corner"
+    );
+}
+
+/// Asks for a wider window once it is pointed at.
+fn widens(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    ui.label("Hello");
+    if ui.ui_contains_pointer() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(400.0, 240.0)));
+    }
+}
+
+#[test]
+fn a_recording_whose_canvas_changes_size_fails_its_shot_and_no_play() {
+    for format in [VideoFormat::Apng, VideoFormat::Mp4] {
+        for input in [None, Some(crate::render::Corner::BottomLeft)] {
+            let (dir, outcome) = record_pointing("widens", widens, points, 1.0, format, input);
+            let failure = outcome.expect_err("it can't be recorded").plain();
+            assert!(
+                failure.contains("play `points` on `scene` passed, but its recording failed"),
+                "{failure}"
+            );
+            assert!(
+                failure.contains("the canvas went from 320×240 to 400×240 while it was recorded"),
+                "{failure}"
+            );
+            let left = trace_files(&dir);
+            assert_eq!(left, ["shot.steps"], "its image and its recording");
+        }
+    }
+}
+
+#[test]
+fn a_recording_without_a_play_whose_canvas_changes_size_leaves_no_file() {
+    fn sways(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let wide = ui.ctx().cumulative_pass_nr() % 2 == 1;
+        let size = egui::vec2(if wide { 400.0 } else { 320.0 }, 240.0);
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+    }
+    let (manifest, plays) = catalog(sways, &[]);
+    let dir = scratch("sways");
+    let mut shot = shot("plays::scene", &dir.join("shot.png"), "", Trace::Failing);
+    shot.play = None;
+    let formats = [VideoFormat::Apng, VideoFormat::Mp4];
+    shot.record = Some(crate::render::Record {
+        seconds: Some(0.5),
+        formats: crate::render::VideoFormats::of(formats).expect("two formats"),
+        ..pointing_record(VideoFormat::Mp4, None)
+    });
+    let failure = capture(&manifest, &plays, shot, None).expect_err("it can't be recorded");
+    let failure = failure.plain();
+    assert!(
+        failure.contains("the recording of shot `shot` failed"),
+        "{failure}"
+    );
+    let times = failure.matches("the canvas went from").count();
+    assert_eq!(times, 1, "for both formats: {failure}");
+    assert_eq!(trace_files(&dir), Vec::<String>::new());
+}
+
+#[test]
+fn a_recording_whose_directory_cannot_be_made_says_so_once() {
+    let (manifest, plays) = catalog(two_buttons, &[]);
+    let dir = scratch("record-nowhere");
+    std::fs::create_dir_all(&dir).expect("made");
+    let file = dir.join("renders");
+    std::fs::write(&file, "a file where the directory goes").expect("written");
+    let mut shot = shot("plays::scene", &file.join("shot.png"), "", Trace::Failing);
+    shot.play = None;
+    shot.record = Some(pointing_record(VideoFormat::Mp4, None));
+    let failure = capture(&manifest, &plays, shot, None).expect_err("there is nowhere to put it");
+    let failure = failure.plain();
+    assert!(
+        failure.contains("the recording of shot `shot` failed"),
+        "{failure}"
+    );
+    let times = failure.matches(&format!("create `{file}")).count();
+    assert_eq!(times, 1, "{failure}");
+}
+
+#[test]
+fn a_recording_that_fails_its_shot_fails_no_other() {
+    fn fails_first(p: &mut Play<'_>) -> PlayResult {
+        p.expect("Nowhere").within(0).to_exist()
+    }
+    let (manifest, plays) = catalog(widens, &[("points", points), ("fails_first", fails_first)]);
+    let dir = scratch("record-others");
+    let shots = [
+        ("resized", Some("points")),
+        ("unseen", Some("fails_first")),
+        ("fine", Some("points")),
+        ("without_a_play", None),
+    ];
+    let shots = shots.map(|(name, play)| {
+        let mut shot = shot(
+            "plays::scene",
+            &dir.join(format!("{name}.png")),
+            play.unwrap_or_default(),
+            Trace::Failing,
+        );
+        shot.play = shot.play.filter(|_| play.is_some());
+        let recorded = matches!(name, "resized" | "unseen");
+        shot.record = recorded.then(|| pointing_record(VideoFormat::Mp4, None));
+        shot
+    });
+    let report = dir.join("capture.json");
+    let verdict = render_with_globals(
+        &manifest,
+        None,
+        &plays,
+        Renderer::Glow,
+        &|_: &egui::Context| {},
+        &Capture {
+            shots: shots.into(),
+            sheet: None,
+            report: Some(report.clone()),
+        },
+        LogMode::Off,
+    )
+    .expect_err("two shots fail")
+    .plain();
+    assert!(verdict.contains("2 of 4 shots failed"), "{verdict}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    let failed = json["failed_shots"].as_array().expect("the failed shots");
+    let reasons: Vec<_> = failed.iter().map(|shot| shot["reason"].as_str()).collect();
+    let [Some(resized), Some(unseen)] = reasons[..] else {
+        panic!("{json:#}");
+    };
+    assert!(resized.contains("the canvas went from"), "{resized}");
+    assert!(
+        unseen.contains("Nowhere"),
+        "the play's own failure, though nothing was recorded: {unseen}"
+    );
+    let failed = &failed[0];
+    assert_eq!(failed.get("failed_step"), None, "no step of it: {failed:#}");
+    assert_eq!(failed["log"][0]["outcome"], "passed", "{failed:#}");
+    assert_eq!(failed["lost_videos"][0], failed["reason"], "{failed:#}");
+    assert!(dir.join("fine.png").exists(), "the shots after still run");
+}
+
+#[test]
+fn a_recording_there_is_no_writing_to_ends_the_run_and_is_left_alone() {
+    let (manifest, plays) = catalog(two_buttons, &[]);
+    for play in [None, Some("idles")] {
+        fn idles(p: &mut Play<'_>) -> PlayResult {
+            p.idle(1)
+        }
+        let plays = match play {
+            Some(name) => catalog(two_buttons, &[(name, idles)]).1,
+            None => plays.clone(),
+        };
+        let dir = scratch("record-blocked");
+        let blocked = dir.join("blocked.mp4");
+        std::fs::create_dir_all(&blocked).expect("a directory where a file goes");
+        std::fs::write(blocked.join("kept"), "").expect("written");
+        let shots = ["blocked", "after"].map(|name| {
+            let out = dir.join(format!("{name}.png"));
+            let mut shot = shot(
+                "plays::scene",
+                &out,
+                play.unwrap_or_default(),
+                Trace::Failing,
+            );
+            shot.play = shot.play.filter(|_| play.is_some());
+            let both = [VideoFormat::Apng, VideoFormat::Mp4];
+            shot.record = Some(crate::render::Record {
+                seconds: Some(0.1),
+                formats: crate::render::VideoFormats::of(both).expect("two formats"),
+                ..pointing_record(VideoFormat::Mp4, None)
+            });
+            shot
+        });
+        let failure = render_with_globals(
+            &manifest,
+            None,
+            &plays,
+            Renderer::Glow,
+            &|_: &egui::Context| {},
+            &Capture {
+                shots: shots.into(),
+                sheet: None,
+                report: None,
+            },
+            LogMode::Off,
+        )
+        .expect_err("the run ends")
+        .plain();
+        assert!(
+            failure.contains("the recording of shot `blocked` failed"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains(&format!("create `{blocked}`")),
+            "{failure}"
+        );
+        assert_eq!(trace_files(&dir), ["blocked.mp4"], "with {play:?}");
+        assert!(blocked.join("kept").exists());
+    }
+}
+
+fn points(p: &mut Play<'_>) -> PlayResult {
+    p.hover("Hello")
+}
+
+fn presses(p: &mut Play<'_>) -> PlayResult {
+    p.click("Hello")
+}
+
+/// Draws as many frames as a click, the pointer never coming.
+fn waits(p: &mut Play<'_>) -> PlayResult {
+    p.idle(4)
+}
+
+/// The last frame of the recording `record_pointing` makes of `run`.
+fn last_recorded(
+    name: &str,
+    scene: SceneFn,
+    run: PlayFn,
+    scale: f32,
+    input: Option<crate::render::Corner>,
+) -> image::RgbaImage {
+    let (dir, outcome) = record_pointing(name, scene, run, scale, VideoFormat::Apng, input);
+    outcome.unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let (_, mut frames) = crate::video::decode(&dir.join("shot.apng"));
+    frames.pop().expect("a frame").image
+}
+
+fn pointing_record(
+    format: VideoFormat,
+    input: Option<crate::render::Corner>,
+) -> crate::render::Record {
+    crate::render::Record {
+        fps: 30,
+        seconds: None,
+        keep: Trace::Always,
+        formats: format.into(),
+        hold: None,
+        input,
+        glide: crate::render::Glide::default(),
+    }
+}
+
+/// A recording of `run`, a play named `points` that points at the `Hello` of `scene`,
+/// and the directory it is in.
+fn record_pointing(
+    name: &str,
+    scene: SceneFn,
+    run: PlayFn,
+    scale: f32,
+    format: VideoFormat,
+    input: Option<crate::render::Corner>,
+) -> (Utf8PathBuf, Result<(), crate::diagnostic::Diagnostic>) {
+    let (manifest, plays) = catalog(scene, &[("points", run)]);
+    let dir = scratch(name);
+    let mut recorded = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "points",
+        Trace::Failing,
+    );
+    recorded.scale = scale;
+    recorded.record = Some(pointing_record(format, input));
+    let outcome = capture(&manifest, &plays, recorded, None);
+    (dir, outcome)
+}
+
+#[test]
+fn a_zoomed_scenes_recording_shows_the_pointer_where_it_is() {
+    static HELLO: std::sync::Mutex<egui::Pos2> = std::sync::Mutex::new(egui::Pos2::ZERO);
+    fn tall(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.ctx().set_zoom_factor(2.0);
+        ui.add_space(40.0);
+        let hello = ui.horizontal(|ui| {
+            ui.add_space(60.0);
+            ui.label("Hello")
+        });
+        *HELLO.lock().expect("the place") = hello.inner.rect.center();
+        ui.add_space(400.0);
+    }
+    for scale in [1.0, 1.5] {
+        let corner = Some(crate::render::Corner::BottomLeft);
+        let shown = last_recorded("zoomed-input", tall, presses, scale, corner);
+        let shot = last_recorded("zoomed-waits", tall, waits, scale, corner);
+        assert!(shown.height() as f32 > 800.0 * scale, "{}", shown.height());
+        let aimed = *HELLO.lock().expect("the place") * 2.0 * scale;
+        // The panel in the corner lights the button too, far from the pointer.
+        let near = 100.0 * scale;
+        let added: Vec<egui::Pos2> = shown
+            .enumerate_pixels()
+            .filter(|(x, y, pixel)| *pixel != shot.get_pixel(*x, *y))
+            .map(|(x, y, _)| egui::pos2(x as f32, y as f32))
+            .filter(|at| aimed.distance(*at) < near)
+            .collect();
+        // The cursor keeps its 24 points whatever the zoom, its hotspot 1 in from its corner.
+        let corner = aimed - egui::Vec2::splat(scale + 1.0);
+        let reach = corner + egui::Vec2::splat(24.0 * scale + 1.0);
+        let inside = |at: &egui::Pos2| {
+            (corner.x..=reach.x).contains(&at.x) && (corner.y..=reach.y).contains(&at.y)
+        };
+        assert!(!added.is_empty(), "a cursor is drawn at {scale}");
+        assert!(
+            added.iter().all(inside),
+            "the cursor, and no more, is where the pointer is at {scale}"
+        );
+    }
+}
+
+#[test]
+fn a_shot_has_no_cursor_where_the_pointer_hovers() {
+    fn hello(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.label("Hello");
+    }
+    let [hovered, untouched] =
+        [("points", points as PlayFn), ("waits", waits)].map(|(name, run)| {
+            let (manifest, plays) = catalog(hello, &[(name, run)]);
+            let dir = scratch(&format!("cursorless-{name}"));
+            let out = dir.join("shot.png");
+            capture(
+                &manifest,
+                &plays,
+                shot("plays::scene", &out, name, Trace::Failing),
+                None,
+            )
+            .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+            image::open(&out).expect("the shot").to_rgba8()
+        });
+    assert!(
+        hovered == untouched,
+        "a label looks the same hovered; only egui_kittest's cursor would tell them apart"
+    );
+}
+
+/// A field labelled `Field`, to type into.
+fn field(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    let id = ui.make_persistent_id("typed");
+    let mut typed: String = ui.data_mut(|data| data.get_temp_mut_or_default::<String>(id).clone());
+    let label = ui.label("Field");
+    ui.text_edit_singleline(&mut typed).labelled_by(label.id);
+    ui.data_mut(|data| data.insert_temp(id, typed));
+}
+
+/// Clicks `Field`, then types into it twice in one step.
+fn types_twice(p: &mut Play<'_>) -> PlayResult {
+    p.click("Field")?;
+    p.step("type", |p| {
+        p.type_text("ab")?;
+        p.type_text("cd")
+    })
+}
+
+#[test]
+fn text_typed_by_two_gestures_shows_as_two_runs_on_the_recording() {
+    let (_, outcome) = record_pointing(
+        "typed-twice",
+        field,
+        types_twice,
+        1.0,
+        VideoFormat::Apng,
+        Some(crate::render::Corner::BottomLeft),
+    );
+    outcome.unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let laid = crate::render::KEYS_LAID.with_borrow(Clone::clone);
+    assert_eq!(laid, ["\"ab\"", "\"cd\""]);
+}
+
+#[test]
+fn a_recording_draws_gallerys_cursor_on_the_pointer_and_its_pressed_one_on_a_press() {
+    static HELLO: std::sync::Mutex<egui::Pos2> = std::sync::Mutex::new(egui::Pos2::ZERO);
+    fn hello(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        *HELLO.lock().expect("the place") = ui.label("Hello").rect.center();
+    }
+    let lit = |pixel: &image::Rgba<u8>| pixel.0[0] > 230 && pixel.0[2] < 120;
+    for (run, name, pressed) in [
+        (points as PlayFn, "hovering", false),
+        (presses, "pressing", true),
+    ] {
+        let recorded = last_recorded(name, hello, run, 1.0, None);
+        let shot = last_recorded(&format!("{name}-waits"), hello, waits, 1.0, None);
+        // A hovered canvas tints its scroll bar's track by a shade; the cursor stands out.
+        let stands_out = |a: &image::Rgba<u8>, b: &image::Rgba<u8>| {
+            a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 16)
+        };
+        let added: Vec<(u32, u32, &image::Rgba<u8>)> = recorded
+            .enumerate_pixels()
+            .filter(|(x, y, pixel)| stands_out(pixel, shot.get_pixel(*x, *y)))
+            .collect();
+        let xs = added.iter().map(|(x, _, _)| *x);
+        let ys = added.iter().map(|(_, y, _)| *y);
+        let corner = xs
+            .clone()
+            .min()
+            .zip(ys.clone().min())
+            .expect("a cursor drawn");
+        let reach = xs.max().zip(ys.max()).expect("a cursor drawn");
+        // Its hotspot is 1 in from its top-left corner, and the pointer is on the label's middle.
+        let aimed = *HELLO.lock().expect("the place") - egui::Vec2::splat(1.0);
+        let off = egui::pos2(corner.0 as f32, corner.1 as f32).distance(aimed);
+        assert!(
+            off <= 2.0,
+            "{name}: the cursor is on the pointer: {off} from it"
+        );
+        assert!(
+            reach.0 - corner.0 < 24 && reach.1 - corner.1 < 24,
+            "{name}: the cursor, and only it, is added to the frame: {corner:?} to {reach:?}"
+        );
+        let lights = added.iter().any(|(_, _, pixel)| lit(pixel));
+        assert_eq!(lights, pressed, "{name}: lit only while a button is held");
+    }
+}
+
+#[test]
+fn a_recording_too_large_for_its_format_is_not_made_and_says_so() {
+    fn wide(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.ctx().set_zoom_factor(2.0);
+        ui.set_min_width(2_000.0);
+        ui.label("Hello");
+    }
+    let (manifest, plays) = catalog(wide, &[("points", points)]);
+    let dir = scratch("zoomed-large");
+    let mp4 = dir.join("shot.mp4");
+    std::fs::create_dir_all(&dir).expect("made");
+    std::fs::write(&mp4, "an earlier run's").expect("written");
+    let mut large = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "points",
+        Trace::Failing,
+    );
+    let both = [VideoFormat::Apng, VideoFormat::Mp4];
+    large.record = Some(crate::render::Record {
+        formats: crate::render::VideoFormats::of(both).expect("two formats"),
+        ..pointing_record(VideoFormat::Mp4, None)
+    });
+    let failure = capture(&manifest, &plays, large, None).expect_err("4000 pixels wide");
+    let failure = failure.plain();
+    assert!(failure.contains("is past the 3840×2160"), "{failure}");
+    assert!(!failure.contains("an APNG"), "it records one: {failure}");
+    assert!(!mp4.exists());
+
+    let apng = dir.join("shot.apng");
+    assert!(!crate::video::decode(&apng).1.is_empty(), "it is recorded");
+    assert!(
+        failure.contains(&format!("the play is recorded in {apng}")),
+        "{failure}"
+    );
+}
+
+#[test]
+fn one_play_records_in_every_format_asked_for_from_the_same_frames() {
+    let record = |formats| crate::render::Record {
+        fps: 30,
+        seconds: None,
+        keep: Trace::Always,
+        formats,
+        hold: None,
+        input: None,
+        glide: crate::render::Glide::default(),
+    };
+    let both = crate::render::VideoFormats::of([
+        crate::render::VideoFormat::Apng,
+        crate::render::VideoFormat::Mp4,
+    ])
+    .expect("two formats");
+    let (apng, report) = record_play("both-formats", flip, Trace::Always, record(both));
+    let mp4 = apng.with_extension("mp4");
+    assert!(mp4.exists(), "`{mp4}` beside `{apng}`");
+    let videos = report["shots"][0]["videos"]
+        .as_array()
+        .expect("a list of recordings");
+    let formats: Vec<_> = videos
+        .iter()
+        .map(|video| video["format"].as_str())
+        .collect();
+    assert_eq!(formats, [Some("apng"), Some("mp4")]);
+    assert_eq!(
+        videos[0]["frames"], videos[1]["frames"],
+        "both files hold every frame the play drew"
+    );
+
+    let (alone, _) = record_play(
+        "apng-alone",
+        flip,
+        Trace::Always,
+        record(crate::render::VideoFormat::Apng.into()),
+    );
+    assert_eq!(
+        std::fs::read(&apng).expect("the APNG"),
+        std::fs::read(&alone).expect("the lone APNG"),
+        "the MP4 beside it changes nothing in the APNG"
+    );
+}
+
+/// A play shot recording at 30 fps, kept as `keep` says
+/// and pausing `hold` seconds at step ends;
+/// the recording and the run's report.
+fn recorded_play(
+    name: &'static str,
+    run: PlayFn,
+    keep: Trace,
+    hold: Option<f32>,
+) -> (Utf8PathBuf, serde_json::Value) {
+    record_play(
+        name,
+        run,
+        Trace::Failing,
+        crate::render::Record {
+            fps: 30,
+            seconds: None,
+            keep,
+            formats: crate::render::VideoFormat::Apng.into(),
+            hold,
+            input: None,
+            glide: crate::render::Glide::default(),
+        },
+    )
+}
+
+/// A play shot recorded as `record` says, its step screenshots
+/// kept as `trace` says; the recording and the run's report.
+fn record_play(
+    name: &'static str,
+    run: PlayFn,
+    trace: Trace,
+    record: crate::render::Record,
+) -> (Utf8PathBuf, serde_json::Value) {
+    let (manifest, plays) = catalog(switch, &[(name, run)]);
+    let dir = scratch(name);
+    let report = dir.join("capture.json");
+    let mut recorded = shot("plays::scene", &dir.join("shot.png"), name, trace);
+    recorded.record = Some(record);
+    _ = capture(&manifest, &plays, recorded, Some(report.clone()));
+    let json = serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    (dir.join("shot.apng"), json)
+}
+
+fn far_apart(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label("Left");
+        ui.add_space(400.0);
+        ui.label("Right");
+    });
+}
+
+fn crosses(p: &mut Play<'_>) -> PlayResult {
+    p.hover("Left")?;
+    p.hover("Right")
+}
+
+/// `run` on `far_apart`, recorded as `glide` says:
+/// its written frames, and the shot's report.
+fn recorded_crossing(
+    name: &str,
+    run: PlayFn,
+    glide: crate::render::Glide,
+) -> (Vec<image::RgbaImage>, serde_json::Value) {
+    let (manifest, plays) = catalog(far_apart, &[("crosses", run)]);
+    let dir = scratch(name);
+    let report = dir.join("capture.json");
+    let mut recorded = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "crosses",
+        Trace::Always,
+    );
+    recorded.size = egui::vec2(640.0, 120.0);
+    recorded.record = Some(crate::render::Record {
+        hold: Some(0.0),
+        glide,
+        ..pointing_record(VideoFormat::Apng, None)
+    });
+    capture(&manifest, &plays, recorded, Some(report.clone()))
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let (_, frames) = crate::video::decode(&dir.join("shot.apng"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    (
+        frames.into_iter().map(|frame| frame.image).collect(),
+        json["shots"][0].clone(),
+    )
+}
+
+/// `crosses` recorded with `glide`:
+/// the pointer's middle on each frame showing one, and the shot's report.
+/// Hovered labels look the same, so only the pointer stands out.
+fn crossing(name: &str, glide: crate::render::Glide) -> (Vec<f32>, serde_json::Value) {
+    let (still, _) = recorded_crossing(&format!("{name}-still"), waits, glide);
+    let scene = still.last().expect("a frame");
+    let (frames, report) = recorded_crossing(name, crosses, glide);
+    let middles = frames
+        .iter()
+        .filter_map(|frame| {
+            let xs: Vec<u32> = frame
+                .enumerate_pixels()
+                .filter(|(x, y, pixel)| {
+                    let was = scene.get_pixel(*x, *y);
+                    // Past the shade a hovered canvas tints its scroll track by.
+                    pixel.0.iter().zip(was.0).any(|(a, b)| a.abs_diff(b) > 16)
+                })
+                .map(|(x, _, _)| x)
+                .collect();
+            let (&low, &high) = (xs.iter().min()?, xs.iter().max()?);
+            #[expect(clippy::cast_precision_loss, reason = "a few hundred pixels")]
+            let middle = xs.iter().sum::<u32>() as f32 / xs.len() as f32;
+            // Wider than a pointer is the scene still laying out.
+            (high - low < 40).then_some(middle)
+        })
+        .collect();
+    (middles, report)
+}
+
+#[test]
+fn a_gliding_recording_moves_the_pointer_between_gestures_and_the_play_draws_no_more() {
+    let (placed, jumped) = crossing("glide-off", crate::render::Glide::default());
+    let (left, right) = (placed[0], placed[placed.len() - 1]);
+    assert!(
+        right - left > 300.0,
+        "it goes from Left to Right: {placed:?}"
+    );
+    let between = |x: &f32| left + 20.0 < *x && *x < right - 20.0;
+    assert!(
+        !placed.iter().any(between),
+        "without a glide it jumps: {placed:?}"
+    );
+
+    let glide = crate::render::Glide {
+        easing: Some(crate::render::Easing::Linear),
+        ..crate::render::Glide::default()
+    };
+    let (glides, glided) = crossing("glide-on", glide);
+    let way: Vec<f32> = glides.into_iter().filter(between).collect();
+    assert!(way.len() >= 5, "it passes through on its way: {way:?}");
+    assert!(
+        way.windows(2).all(|pair| pair[0] < pair[1]),
+        "from Left to Right: {way:?}"
+    );
+    let drawn = &jumped["play"]["frames"];
+    assert_eq!(
+        &glided["play"]["frames"], drawn,
+        "the play draws the same frames"
+    );
+    let video = &glided["videos"][0];
+    assert_eq!(
+        &video["frames"], drawn,
+        "the video counts the play's frames as drawn"
+    );
+    let added = video["glided"].as_u64().expect("the glide's frames");
+    assert!(
+        added >= way.len() as u64,
+        "the glide's frames are counted apart: {video}"
+    );
+    assert_eq!(jumped["videos"][0]["glided"], 0, "{}", jumped["videos"][0]);
+}
+
+#[test]
+fn a_glided_pointer_dwells_before_it_presses_and_only_then() {
+    fn clicks_right(p: &mut Play<'_>) -> PlayResult {
+        p.hover("Left")?;
+        p.click("Right")
+    }
+    let glided = |name: &str, run: PlayFn, dwell: f32| {
+        let glide = crate::render::Glide {
+            easing: Some(crate::render::Easing::Linear),
+            dwell,
+            ..crate::render::Glide::default()
+        };
+        let (_, report) = recorded_crossing(name, run, glide);
+        report["videos"][0]["glided"]
+            .as_u64()
+            .expect("the glide's frames")
+    };
+    assert_eq!(
+        glided("dwells", clicks_right, 0.2) - glided("dwells-not", clicks_right, 0.0),
+        6,
+        "0.2 s at 30 fps before the press"
+    );
+    assert_eq!(
+        glided("hovers-dwelling", crosses, 0.2),
+        glided("hovers", crosses, 0.0),
+        "a hover does nothing after it to dwell before"
+    );
+    fn crosses_then_presses(p: &mut Play<'_>) -> PlayResult {
+        crosses(p)?;
+        p.press("Escape")
+    }
+    assert_eq!(
+        glided("presses-dwelling", crosses_then_presses, 0.2),
+        glided("presses", crosses_then_presses, 0.0),
+        "a key pressed by a gesture of its own is no act of the hover's"
+    );
+}
+
+#[test]
+fn a_pointer_glides_neither_in_from_nowhere_nor_through_a_drag() {
+    fn appears_then_drags(p: &mut Play<'_>) -> PlayResult {
+        p.hover("Right")?;
+        p.drag("Right", [-300.0, 0.0])
+    }
+    let glide = crate::render::Glide {
+        easing: Some(crate::render::Easing::Linear),
+        ..crate::render::Glide::default()
+    };
+    let (_, report) = recorded_crossing("glide-held", appears_then_drags, glide);
+    assert_eq!(
+        report["videos"][0]["glided"], 0,
+        "the first pointer comes where it is put, and a drag moves it itself: {}",
+        report["videos"][0]
+    );
+}
+
+/// How many frames a recording runs, every written frame's delay added up.
+fn recorded_frames(video: &Utf8Path) -> u64 {
+    let (_, shown) = crate::video::decode(video);
+    shown.iter().map(|frame| u64::from(frame.delay.0)).sum()
+}
+
+#[test]
+fn a_recorded_play_holds_every_frame_the_play_drew() {
+    let (video, report) = recorded_play("flip", flip, Trace::Always, Some(0.0));
+    let shot = &report["shots"][0];
+    let played = shot["play"]["frames"].as_u64().expect("the play's frames");
+    assert_eq!(shot["videos"][0]["frames"].as_u64(), Some(played));
+    assert_eq!(shot["videos"][0]["held"].as_u64(), Some(0));
+    assert_eq!(
+        recorded_frames(&video),
+        played,
+        "with no hold, the recording lasts the play, frame for frame"
+    );
+    let (_, shown) = crate::video::decode(&video);
+    assert!(shown.len() >= 2, "the label's change is in it");
+}
+
+#[test]
+fn a_recorded_play_pauses_at_each_steps_end() {
+    let (video, report) = recorded_play("flip-held", flip, Trace::Always, None);
+    let shot = &report["shots"][0];
+    let played = shot["play"]["frames"].as_u64().expect("the play's frames");
+    assert_eq!(
+        shot["videos"][0]["held"].as_u64(),
+        Some(30),
+        "two steps, each held half a second at 30 fps"
+    );
+    assert_eq!(shot["videos"][0]["frames"].as_u64(), Some(played));
+    assert_eq!(recorded_frames(&video), played + 30);
+}
+
+#[test]
+fn a_step_ending_with_the_one_around_it_pauses_once() {
+    let (video, report) = recorded_play("nested-held", nested, Trace::Always, None);
+    let shot = &report["shots"][0];
+    let played = shot["play"]["frames"].as_u64().expect("the play's frames");
+    assert_eq!(shot["videos"][0]["held"].as_u64(), Some(15));
+    assert_eq!(recorded_frames(&video), played + 15);
+}
+
+#[test]
+fn a_passing_play_drops_a_recording_kept_only_on_failure() {
+    let (video, report) = recorded_play("flip-kept-on-failure", flip, Trace::Failing, None);
+    assert!(!video.exists(), "the play passed, so `{video}` is gone");
+    assert!(report["shots"][0].get("videos").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_passing_play_drops_the_link_to_a_recording_and_not_the_file() {
+    let (manifest, plays) = catalog(switch, &[("flip", flip)]);
+    let dir = scratch("flip-linked");
+    std::fs::create_dir_all(&dir).expect("made");
+    let (link, file) = (dir.join("shot.mp4"), dir.join("linked.mp4"));
+    std::fs::write(&file, "").expect("written");
+    std::os::unix::fs::symlink(&file, &link).expect("linked");
+    let mut linked = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "flip",
+        Trace::Failing,
+    );
+    linked.record = Some(crate::render::Record {
+        keep: Trace::Failing,
+        ..pointing_record(VideoFormat::Mp4, None)
+    });
+    capture(&manifest, &plays, linked, None).unwrap_or_else(|failure| panic!("{failure:?}"));
+    assert!(link.symlink_metadata().is_err());
+    assert!(file.exists());
+}
+
+#[test]
+fn a_failing_play_keeps_its_recording_and_the_report_points_at_it() {
+    let (video, report) = recorded_play("fail-recorded", flip_then_fail, Trace::Failing, None);
+    assert!(video.exists(), "the play failed, so `{video}` stays");
+    let failed = &report["failed_shots"][0];
+    assert!(
+        failed["videos"][0]
+            .as_str()
+            .is_some_and(|path| path.ends_with("shot.apng")),
+        "{failed}"
+    );
+}
+
+#[test]
+fn a_mistyped_key_fails_its_press_saying_what_was_meant_and_where() {
+    fn ready(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.label("ready");
+    }
+    fn mistyped(p: &mut Play<'_>) -> PlayResult {
+        p.press("Cmd+Entr")
+    }
+    let (manifest, plays) = catalog(ready, &[("mistyped-key", mistyped)]);
+    let dir = scratch("mistyped-key");
+    let panel = capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "mistyped-key",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .expect_err("the play fails")
+    .plain();
+    for line in [
+        "failed at step `press Cmd+Entr`",
+        "`Entr` is no key; did you mean `Enter`?",
+        r#"p.press("Cmd+Entr")"#,
+    ] {
+        assert!(panel.contains(line), "`{line}` in:\n{panel}");
+    }
+}

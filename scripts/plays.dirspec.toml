@@ -1,0 +1,27 @@
+# What the capture of `just demo::plays` leaves in .tmp/plays/: an image of each passing play, none of a failing one,
+# and the step screenshots of those that fail or keep them.
+version = 1
+strict = true
+
+[paths]
+"report.json" = { type = "file", min_size = 1 }
+
+"form-saved.png" = { type = "file", min_size = 1 }
+"keyboard-tabs.png" = { type = "file", min_size = 1 }
+"tasks-cleared.png" = { type = "file", min_size = 1 }
+"tasks-filtered.png" = { type = "file", min_size = 1 }
+"tasks-not-compared.png" = { type = "file", min_size = 1 }
+"tasks-priority.png" = { type = "file", min_size = 1 }
+"tasks-scrolled.png" = { type = "file", min_size = 1 }
+"tasks-sorted.png" = { type = "file", min_size = 1 }
+"fails-*.png" = { count = 0 }
+
+"tasks-filtered.steps/*.png" = { type = "file", count = 7 }
+"tasks-scrolled.steps/*.png" = { type = "file", count = 2 }
+
+"fails-ambiguous-label.steps/*.png" = { type = "file", count = 5 }
+"fails-never-saved.steps/*.png" = { type = "file", count = 3 }
+"fails-out-of-sight.steps/*.png" = { type = "file", count = 1 }
+"fails-wrong-action.steps/*.png" = { type = "file", count = 2 }
+"fails-wrong-count.steps/*.png" = { type = "file", count = 6 }
+"fails-wrong-order.steps/*.png" = { type = "file", count = 7 }

@@ -1,45 +1,5 @@
 # TODO
 
-## Publishing to crates.io (deferred)
-
-Not required while the repo is source-only — each consumer's Cargo fetches the crates themselves. Do this only before an
-actual `cargo publish`. Research: crates.io Trusted Publishing (RFC 3691), Cargo publishing reference.
-
-### Manifests
-
-- [ ] Flip `publish` in `[workspace.package]`, which all three inherit — one line, not three. `repository` is inherited
-  from there too (it is the repo a Trusted Publisher binds to), and
-  `license`/`description`/`readme`/`keywords`/`categories` are already set per crate.
-
-### Publish order (path-dep rule)
-
-- [ ] crates.io forbids publishing a crate with a path-only dependency, so publish `gallery-macros` + `gallery-build`
-  first, then `gallery` (it path-depends on `gallery-macros`). `release-plz` / `cargo-release` handle this ordering.
-
-### Template
-
-- [ ] `template/` depends on `gallery = { git = … }`; add a registry-dep variant (`gallery = "0.1"`) for post-publish
-  consumers, or keep git while pre-release.
-
-### Trusted Publishing (the only provenance mechanism crates.io has)
-
-- [ ] Register a Trusted Publisher per crate on crates.io: owner `kubijo`, repo `rs-gallery`, workflow `release.yml`,
-  environment `release`.
-- [ ] Add `.github/workflows/release.yml`: tag-triggered, `permissions: id-token: write`,
-  `rust-lang/crates-io-auth-action` → `cargo publish`. No long-lived `CRATES_IO_TOKEN` secret.
-- [ ] crates.io account needs a verified email.
-- Artifact provenance / sigstore attestation is explicitly out of scope on crates.io (RFC 3691) — nothing to set up
-  there.
-
-### Tagging
-
-Settled: a single `v<version>` tag while the three crates version in lockstep, and the CHANGELOG section it belongs to
-is headed `## [<version>] - <date>` — the shape `--check-updates` reads. Per-crate `<pkg>-v<version>` tags only become
-necessary if they ever diverge. Date-based versions were weighed and dropped: semver's three segments are numeric and
-its dash suffix is a *pre*-release, so a same-day re-cut had nowhere to go that both git and cargo would order alike.
-
-- [ ] Consider `release-plz` — release PR from the Keep-a-Changelog `CHANGELOG.md` → tag → publish.
-
 ## Perf: honest measurement, profiling, scene snapshots
 
 The shape to aim for, borrowed from a wasm runtime's own harness: samply CPU sampling plus per-frame and per-section
@@ -60,9 +20,9 @@ reactive; idle → it holds the last real frame's numbers.
 
 ### Tier 2 — per-scene profiling with automatic gallery-vs-their-code attribution
 
-`just profile <scene>`: a fixed-frame headless pump of one scene at default knobs, under samply, with an A/B ledger. The
-framework-vs-component attribution the profile must make obvious comes from stacking four layers, three of them
-automatic:
+`just dev::profile <scene>`: a fixed-frame headless pump of one scene at default knobs, under samply, with an A/B
+ledger. The framework-vs-component attribution the profile must make obvious comes from stacking four layers, three of
+them automatic:
 
 - [ ] **Crate attribution (free):** samply symbolication → per-crate breakdown (`gallery` / component crate / egui /
   epaint / wgpu). An analyse + compare pair needs only samply's Firefox-Profiler format, so both port cleanly, as does
@@ -83,20 +43,14 @@ automatic:
 Rendering a scene headlessly and diffing it against a committed reference both landed. What is left is the shape needed
 past a handful of images, and a structural target beside the pixel one.
 
-- [ ] Only this crate's own tests compare images; a consumer capturing their components wants the same thing. It needs a
-  way to say so — `--capture --verify`, against references beside the recipe — and once it exists the differ moves from
-  a dev-dependency to an optional feature, so only those who ask for it link it (and inherit its MPL-2.0 corner; see
-  `deny.toml`).
 - [ ] It scales to a handful of images, not hundreds. Past that, the shape that works is a persistent differ fed image
   pairs over a pipe (`odiff --server`) rather than a process per image, and an HTML report putting before/after/diff
   side by side — reviewing a wall of failures in a browser beats opening `*.diff.png` by hand. Worth porting when the
   reference count justifies it, not before.
-- [ ] Structural snapshots as the other target: serialize the scene's AccessKit tree / `Shape` list — jest-style,
-  text-diffable in a PR, no GPU or antialiasing to pin at all. A `snapshot!` API would pick per use.
+- [ ] Structural snapshots of a scene's `Shape` list, beside the AccessKit tree plays compare
+  (`to_match_accesskit_snapshot`): what is drawn, text-diffable in a PR, with no GPU or antialiasing to pin.
 - [ ] The wgpu path has no equivalent pin, so only glow captures are reference-tested. Lavapipe via `VK_ICD_FILENAMES`
   would give wgpu a deterministic rasteriser too, if a wgpu-rendered reference is ever wanted.
-- [ ] Design a record-replay layer for pointer interactions, informed by jest snapshot ergonomics. Knob state no longer
-  needs it; hover, drag and focus still do.
 - [ ] Storage location: default to **co-located with the file of origin**, derived by the `snapshot!` macro itself from
   `file!()` + `module_path!()` + its label, so a path is never written by hand. Overriding the *root* is then the only
   config needed, and it should be strongly-typed Rust in the snapshot harness — the harness is a test binary, so its
@@ -115,6 +69,17 @@ past a handful of images, and a structural target beside the pixel one.
   you are looking at the terminal when you launch, and the blocking build stays anyway for headless runs and for
   `--scene`, which resolves against the manifest before the window opens. Revisit for a gallery launched from an
   editor's task runner, where no terminal is visible.
+
 - [ ] Auto-re-sync an instance's scaffolded files (`justfile` / `build.rs` / `main.rs`) from upstream as the template
   evolves. Hard to do safely — it must not clobber consumer edits — so `just update`'s "you're behind, here's what
   changed" is the lightweight stand-in for now.
+
+- [ ] A panic in gallery's own host code under a dylib play, e.g. inside egui_kittest's `step`, aborts the process after
+  printing its message. A panic is only catchable by the `std` that raised it, and catching on the host would also catch
+  the scene's panics, raised by the dylib's `std`, and abort on those instead.
+
+- [ ] A play's pointer gesture aims at a widget covered by a window or popup over it as at one in plain sight, and lands
+  on whatever covers it. Catching it needs a hit test against the layers above the widget's.
+
+- [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one
+  run reports every check that failed. The log already keeps every check; what is missing is a play that outlives one.

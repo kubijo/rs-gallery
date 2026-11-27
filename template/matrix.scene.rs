@@ -28,12 +28,16 @@ fn sizes() -> Vec<egui::Vec2> {
 /// shows up without resizing anything.
 #[scene(default)]
 fn breakpoints(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
-    let title = ctx.text("title", "Firmware update");
-    let body = ctx.text(
-        "body",
-        "Version 4.2.1 is ready to install. The device restarts once and keeps its settings.",
-    );
-    let tint = ctx.color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
+    let title = ctx.text("title", "Firmware update").get();
+    let body = ctx
+        .text(
+            "body",
+            "Version 4.2.1 is ready to install. The device restarts once and keeps its settings.",
+        )
+        .get();
+    let tint = ctx
+        .color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8))
+        .get();
 
     let sizes = sizes();
     ctx.matrix_with(ui, &sizes, |ctx, ui, at| {
@@ -74,7 +78,7 @@ fn copy_length(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
     let lengths = COPY.map(|(length, _)| length);
     ctx.matrix_with(ui, &sizes, |ctx, ui, at| {
         let (name, ..) = BREAKPOINTS[at];
-        let chosen = ctx.buttons(&format!("{name} copy"), &lengths, 0);
+        let chosen = ctx.buttons(&format!("{name} copy"), &lengths, 0).get();
         ctx.stage(ui, globals.stage(sizes[at]), |ui| {
             ui.label(egui::RichText::new(name).small());
             ui.label(egui::RichText::new("Firmware update").size(16.0).strong());
@@ -86,7 +90,9 @@ fn copy_length(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
 /// The same breakpoints stacked, for comparison — one scroll each.
 #[scene("stacked")]
 fn stacked(ctx: &mut SceneCtx, ui: &mut Ui, globals: &Globals) {
-    let tint = ctx.color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8));
+    let tint = ctx
+        .color("tint", egui::Color32::from_rgb(0x6C, 0x9C, 0xD8))
+        .get();
     for (name, width, height) in BREAKPOINTS {
         ctx.stage(ui, globals.stage((width, height)), |ui| {
             ui.label(egui::RichText::new(name).color(tint).small());

@@ -1,4 +1,4 @@
-# The recipe behind `tests/snapshots/`, run by the capture test in `src/render.rs`. No `out`: the test
+# The recipe behind `tests/snapshots/`, run by the capture test in `src/render/tests/reference.rs`. No `out`: the test
 # supplies one, since these PNGs are scratch and only the references are committed.
 #
 # Sizes are roomy because the canvas scrolls, and an image cut off at the edge hides the layout change
@@ -54,3 +54,10 @@ size = "120x120"
 name = "offscreen-cached-again"
 scene = "offscreen-cached"
 size = "120x120"
+
+# Where a play leaves off: the pointer resting on the button, which no knob can set.
+[[shot]]
+name = "hovered-button"
+scene = "hovered-button"
+size = "200x120"
+play = "hover_it"

@@ -15,6 +15,12 @@ crate-type = ["dylib"]
 name = "gallery"
 path = "main.rs"
 
+# Every scene drawn and every play run, as `cargo test` trials; `gallery::test_main!` brings its own harness.
+[[test]]
+name = "scenes"
+path = "tests/scenes.rs"
+harness = false
+
 [dependencies]
 gallery = { git = "{{gallery_git}}" }
 serde = { version = "1", features = ["derive"] }
@@ -26,3 +32,12 @@ gallery-build = { git = "{{gallery_git}}", package = "gallery-build" }
 
 # Keep the generated app outside any enclosing Cargo workspace.
 [workspace]
+
+# What reads back and encodes every frame of a test's video.
+# By name, so that your own crates rebuild and debug as before.
+[profile.dev.package]
+egui_kittest = { opt-level = 2 }
+fdeflate = { opt-level = 2 }
+openh264 = { opt-level = 2 }
+openh264-sys2 = { opt-level = 2 }
+png = { opt-level = 2 }

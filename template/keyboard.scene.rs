@@ -139,3 +139,23 @@ fn keyboard(ctx: &mut SceneCtx, ui: &mut Ui) {
     .labelled_by(label.id);
     ui.data_mut(|data| data.insert_temp(state_id, (counts, first, second, code, last_key)));
 }
+
+/// A play drives the scene as a person would, finding widgets by accessible label.
+/// `just play keyboard tab_counts_while_focused out.png` captures where it leaves off.
+#[play(keyboard)]
+fn tab_counts_while_focused(p: &mut Play) -> PlayResult {
+    p.click("Key capture")?;
+    p.press("Tab")?;
+    p.press("Shift+Tab")?;
+    p.press("Escape")?;
+    p.expect(By::new().label_contains("Tab:"))
+        .because("each key is counted once")
+        .to_have_label("Tab: 1   Shift+Tab: 1   Escape: 1")?;
+    p.expect_action("Key pressed: Tab")
+}
+
+#[play(keyboard)]
+fn typing_fills_a_field(p: &mut Play) -> PlayResult {
+    p.fill("First text field", "hello")?;
+    p.expect("First text field").to_have_value("hello")
+}

@@ -43,9 +43,9 @@ def test_release_runs_every_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     cli.run_release_checks(tmp_path)
 
     assert calls == [
-        (("just", "validate"), tmp_path),
-        (("just", "audit"), tmp_path),
-        (("just", "outdated"), tmp_path),
+        (("just", "dev::validate"), tmp_path),
+        (("just", "dev::audit"), tmp_path),
+        (("just", "dev::outdated"), tmp_path),
     ]
 
 

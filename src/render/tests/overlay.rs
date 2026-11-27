@@ -1,0 +1,171 @@
+use egui::{Event, Key, Modifiers, PointerButton, pos2};
+
+use crate::render::overlay::{InputLog, composite};
+
+fn key(key: Key, pressed: bool, modifiers: Modifiers) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers,
+    }
+}
+
+fn click(pressed: bool) -> Event {
+    Event::PointerButton {
+        pos: pos2(40.0, 30.0),
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+#[test]
+fn a_key_lists_its_chord_and_typed_text_its_quoted_run() {
+    let mut log = InputLog::new(10);
+    log.frame(&[key(Key::Tab, true, Modifiers::SHIFT)]);
+    log.frame(&[key(Key::Tab, false, Modifiers::SHIFT)]);
+    log.frame(&[Event::Text("hi".to_owned())]);
+    assert_eq!(
+        log.shown(1.0).keys,
+        ["Shift+Tab", "\"hi\""],
+        "a release lists nothing"
+    );
+}
+
+#[test]
+fn text_typed_a_character_at_a_time_lists_as_one_run_until_a_key_ends_it() {
+    let mut log = InputLog::new(10);
+    for typed in ["h", "i"] {
+        log.frame(&[Event::Text(typed.to_owned())]);
+        log.frame(&[]);
+    }
+    assert_eq!(log.shown(1.0).keys, ["\"hi\""]);
+    log.frame(&[key(Key::Enter, true, Modifiers::NONE)]);
+    log.frame(&[Event::Text("!".to_owned())]);
+    assert_eq!(log.shown(1.0).keys, ["\"hi\"", "Enter", "\"!\""]);
+}
+
+#[test]
+fn a_click_ends_the_typed_run() {
+    let mut log = InputLog::new(10);
+    log.frame(&[Event::Text("ab".to_owned())]);
+    log.frame(&[click(true)]);
+    log.frame(&[click(false)]);
+    log.frame(&[Event::Text("cd".to_owned())]);
+    assert_eq!(log.shown(1.0).keys, ["\"ab\"", "\"cd\""]);
+}
+
+#[test]
+fn text_typed_after_a_run_has_gone_starts_a_new_one() {
+    let mut log = InputLog::new(10);
+    log.frame(&[Event::Text("hi".to_owned())]);
+    for _ in 0..20 {
+        log.frame(&[]);
+    }
+    assert!(log.shown(1.0).keys.is_empty(), "the run's time is up");
+    log.frame(&[Event::Text("!".to_owned())]);
+    assert_eq!(log.shown(1.0).keys, ["\"!\""]);
+}
+
+#[test]
+fn a_key_leaves_the_list_on_time_through_a_glide() {
+    let mut log = InputLog::new(10);
+    log.frame(&[key(Key::Enter, true, Modifiers::NONE)]);
+    for x in 0..30 {
+        log.glide(pos2(x as f32, 0.0));
+    }
+    assert!(
+        log.shown(1.0).keys.is_empty(),
+        "3 s of glide, past a key's 1.5 s"
+    );
+}
+
+#[test]
+fn the_pointer_is_shown_where_a_zoomed_frame_has_it() {
+    let mut log = InputLog::new(10);
+    log.frame(&[Event::PointerMoved(egui::pos2(40.0, 28.0))]);
+    assert_eq!(log.shown(0.5).pointer, Some(egui::pos2(20.0, 14.0)));
+}
+
+#[test]
+fn a_key_leaves_the_list_once_its_time_is_up() {
+    let mut log = InputLog::new(10);
+    log.frame(&[key(Key::A, true, Modifiers::NONE)]);
+    for _ in 1..15 {
+        log.frame(&[]);
+    }
+    assert_eq!(log.shown(1.0).keys, ["A"], "listed for 1.5 s at 10 fps");
+    log.frame(&[]);
+    assert!(log.shown(1.0).keys.is_empty());
+}
+
+#[test]
+fn only_the_newest_keys_stay_listed() {
+    let mut log = InputLog::new(10);
+    for letter in [
+        Key::A,
+        Key::B,
+        Key::C,
+        Key::D,
+        Key::E,
+        Key::F,
+        Key::G,
+        Key::H,
+    ] {
+        log.frame(&[key(letter, true, Modifiers::NONE)]);
+    }
+    assert_eq!(log.shown(1.0).keys, ["C", "D", "E", "F", "G", "H"]);
+}
+
+#[test]
+fn a_click_stays_lit_past_its_release_long_enough_to_see() {
+    let mut log = InputLog::new(10);
+    log.frame(&[click(true)]);
+    log.frame(&[click(false)]);
+    let shown = log.shown(1.0);
+    assert_eq!(
+        shown.buttons,
+        [true, false, false],
+        "lit a frame after release"
+    );
+    assert_eq!(shown.pointer, Some(pos2(40.0, 30.0)));
+    log.frame(&[]);
+    log.frame(&[]);
+    assert_eq!(
+        log.shown(1.0).buttons,
+        [false; 3],
+        "dark 0.3 s after the press"
+    );
+}
+
+#[test]
+fn a_pause_counts_toward_a_keys_time() {
+    let mut log = InputLog::new(10);
+    log.frame(&[key(Key::Escape, true, Modifiers::NONE)]);
+    log.hold(20);
+    log.frame(&[]);
+    assert!(
+        log.shown(1.0).keys.is_empty(),
+        "two seconds passed in the pause"
+    );
+}
+
+#[test]
+fn an_overlay_pixel_is_laid_on_by_its_premultiplied_alpha() {
+    let mut frame = image::RgbaImage::from_pixel(2, 1, image::Rgba([200, 100, 0, 255]));
+    let mut over = image::RgbaImage::new(2, 1);
+    over.put_pixel(0, 0, image::Rgba([128, 128, 128, 128]));
+    composite(&mut frame, &over);
+    assert_eq!(
+        frame.get_pixel(0, 0).0,
+        [227, 177, 128, 255],
+        "half white over the frame"
+    );
+    assert_eq!(
+        frame.get_pixel(1, 0).0,
+        [200, 100, 0, 255],
+        "a clear pixel leaves it be"
+    );
+}

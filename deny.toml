@@ -1,5 +1,5 @@
 # cargo-deny dependency policy — https://embarkstudios.github.io/cargo-deny/
-# `just audit` (and the CI `report (audit)` job) runs advisories + bans + licenses + sources.
+# `just dev::audit` (and the CI `report (audit)` job) runs advisories + bans + licenses + sources.
 
 [graph]
 all-features = true
@@ -7,33 +7,15 @@ all-features = true
 [advisories]
 version = 2
 unused-ignored-advisory = "deny"
-
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0370"
-reason = """
-The native AccessKit/AT-SPI stack requires zvariant through accesskit_atspi_common,
-atspi-common and zbus. No compatible migration preserves accessibility yet.
-Remove this exception when that stack adopts zbus 6's wire types.
-Upstream: https://github.com/z-galaxy/zbus/issues/2043
-"""
-
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0371"
-reason = """
-AT-SPI and zbus require zbus_names. Its standalone releases are all unmaintained,
-and the compatible accessibility stack has not migrated to zbus 6's names module.
-Remove this exception when the AccessKit/AT-SPI dependency chain has migrated.
-Upstream: https://github.com/z-galaxy/zbus/issues/2043
-"""
-
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0372"
-reason = """
-The accessibility stack's zvariant dependency requires zvariant_derive. Updating
-the standalone derive crate cannot resolve this unmaintained-package advisory.
-Remove this exception with the AccessKit/AT-SPI migration to zbus 6's derives.
-Upstream: https://github.com/z-galaxy/zbus/issues/2043
-"""
+# Stated rather than left to the default, which cargo-deny 0.22 narrowed: the dev shell's and a newer one agree.
+unmaintained = "all"
+# Unmaintained only: merged into zbus 6. egui 0.36's AT-SPI stack (accesskit_unix → atspi → zbus 5) pins them,
+# and they go with the egui upgrade `outdated.toml` defers, at which point these entries stop matching and fail.
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zvariant, through egui 0.36's accesskit_unix; goes with the egui upgrade" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names, through egui 0.36's accesskit_unix; goes with the egui upgrade" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, through egui 0.36's accesskit_unix; goes with the egui upgrade" },
+]
 
 [licenses]
 version = 2
@@ -61,8 +43,8 @@ allow = [
     "Unlicense",
 ]
 # MPL-2.0 is copyleft per *file*, so an unmodified crate carries nothing outward — per crate, though,
-# not blanket. `colored` arrives under the reference tests' image differ. Should comparison ever ship
-# to consumers it lands in their binaries too, which is worth re-examining rather than inheriting.
+# not blanket. `colored` arrives under dify, the image differ, and so lands in every consumer's binary:
+# plays compare screenshots with no feature to turn off.
 exceptions = [{ allow = ["MPL-2.0"], crate = "colored" }]
 private = { ignore = true }
 

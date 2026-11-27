@@ -11,6 +11,9 @@ use std::{collections::HashSet, env, fmt::Write as _, fs};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+/// What the directory of the references plays' snapshots are compared with is called.
+pub const SNAPSHOTS: &str = "__snapshots__";
+
 /// A `gallery.toml`, canonicalised and resolved — the reading both the launcher
 /// and a scenes `build.rs` go through.
 pub struct Config {
@@ -22,6 +25,416 @@ pub struct Config {
     pub globs: Vec<String>,
     /// Extra hot-reload paths.
     pub hot_watch_paths: Vec<Utf8PathBuf>,
+    pub snapshots: Snapshots,
+    pub tests: Tests,
+    pub record: Record,
+    pub render: Render,
+    pub plays: Plays,
+}
+
+/// `[render]`: how every shot is drawn,
+/// unless a recipe, a shot or a flag says otherwise.
+#[derive(Clone, Default, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Render {
+    /// `WxH`, as `--size` takes it.
+    pub size: Option<String>,
+    pub scale: Option<f32>,
+    pub trim: Option<bool>,
+    /// Frames a headless shot draws before it is taken; never a window's.
+    pub frames: Option<u32>,
+}
+
+/// `[plays]`: how plays report as they run,
+/// unless a recipe or a flag says otherwise.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Plays {
+    /// Keep each play's whole log,
+    /// not one line for a play that passed.
+    pub steps: Option<bool>,
+    pub log: Option<Log>,
+}
+
+/// How a run shows its plays as they go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Log {
+    Live,
+    Linear,
+    Off,
+}
+
+/// `[record]`: how every recording of the catalog
+/// is made, unless a shot or a flag says otherwise.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Record {
+    /// One format, or several recorded from
+    /// the same frames; unset leaves it to gallery.
+    pub format: Option<Vec<Format>>,
+    /// Seconds a play's recording pauses
+    /// at each step's end; unset leaves it to gallery.
+    pub hold: Option<f32>,
+    /// The keys and mouse panel.
+    pub input: Input,
+    /// The catalog's own, else gallery's.
+    pub cursor: Option<Cursor>,
+    pub glide: Glide,
+}
+
+/// How a play's recording moves the pointer to each gesture.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Glide {
+    /// `None` leaves the pointer to jump.
+    pub easing: Option<Easing>,
+    /// Points a second.
+    pub speed: f32,
+    /// The fewest and most seconds
+    /// one takes, whatever the distance.
+    pub time: [f32; 2],
+    /// Seconds the pointer rests after a glide before it acts.
+    pub dwell: f32,
+}
+
+impl Default for Glide {
+    fn default() -> Self {
+        Self {
+            easing: None,
+            speed: 1200.0,
+            time: [0.15, 0.6],
+            dwell: 0.2,
+        }
+    }
+}
+
+/// The most seconds `glide_time` and `glide_dwell` take.
+const LONGEST_GLIDE: f32 = 5.0;
+
+/// How a glide speeds up and slows down along its way.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Easing {
+    Linear,
+    #[default]
+    CubicInOut,
+    CubicOut,
+}
+
+impl Easing {
+    /// # Errors
+    /// When `name` is none of them, listing those there are.
+    pub fn named(name: &str) -> Result<Self, String> {
+        match name {
+            "linear" => Ok(Self::Linear),
+            "cubic-in-out" => Ok(Self::CubicInOut),
+            "cubic-out" => Ok(Self::CubicOut),
+            _ => Err(format!(
+                "`{name}` is no easing: `linear`, `cubic-in-out` or `cubic-out`"
+            )),
+        }
+    }
+
+    /// The easing `name`d, or `None` for `off`.
+    ///
+    /// # Errors
+    /// When `name` is neither, listing what it can be.
+    pub fn or_off(name: &str) -> Result<Option<Self>, String> {
+        match name {
+            "off" => Ok(None),
+            _ => Self::named(name)
+                .map(Some)
+                .map_err(|e| format!("{e}, or `off`")),
+        }
+    }
+}
+
+/// What a recording is written as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Format {
+    Mp4,
+    Apng,
+    Gif,
+}
+
+impl Format {
+    fn named(name: &str) -> Result<Self, String> {
+        match name {
+            "mp4" => Ok(Self::Mp4),
+            "apng" => Ok(Self::Apng),
+            "gif" => Ok(Self::Gif),
+            _ => Err(format!(
+                "[record] `{name}` is no format: `mp4`, `apng`, `gif`, or a list of them"
+            )),
+        }
+    }
+}
+
+/// Whether a recording shows the keys and mouse, and in which corner.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Input {
+    Off,
+    In(Corner),
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        Self::In(Corner::default())
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Corner {
+    #[default]
+    BottomLeft,
+    BottomRight,
+    TopLeft,
+    TopRight,
+}
+
+impl Corner {
+    fn named(name: &str) -> Result<Self, String> {
+        match name {
+            "bottom-left" => Ok(Self::BottomLeft),
+            "bottom-right" => Ok(Self::BottomRight),
+            "top-left" => Ok(Self::TopLeft),
+            "top-right" => Ok(Self::TopRight),
+            _ => Err(format!(
+                "[record] `{name}` is no corner: `bottom-left`, `bottom-right`, `top-left` or \
+                 `top-right`, or `false`"
+            )),
+        }
+    }
+}
+
+// Names read as strings and matched by hand, so a misspelt one is told the names there are,
+// which serde's untagged enums would not say.
+
+/// `input` as written: on or off, or the corner's name.
+#[derive(serde::Deserialize)]
+#[serde(untagged, expecting = "a corner such as `bottom-left`, or `false`")]
+enum DeclaredInput {
+    On(bool),
+    In(String),
+}
+
+/// `glide` as written, in `[record]`, a recipe's shot or `--record-glide`:
+/// on or off, or the easing's name.
+#[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(untagged, expecting = "an easing such as `cubic-in-out`, or `false`")]
+pub enum GlideSetting {
+    On(bool),
+    Eased(String),
+}
+
+impl GlideSetting {
+    /// Its easing, `None` for off; on is `catalog`'s, else [`Easing::default`].
+    ///
+    /// # Errors
+    /// For a name that is no easing.
+    pub fn easing(&self, catalog: Option<Easing>) -> Result<Option<Easing>, String> {
+        match self {
+            Self::On(on) => Ok(on.then(|| catalog.unwrap_or_default())),
+            Self::Eased(name) => Easing::or_off(name),
+        }
+    }
+}
+
+/// `format` as written: one name, or a list.
+#[derive(serde::Deserialize)]
+#[serde(untagged, expecting = "`mp4`, `apng`, `gif`, or a list of them")]
+enum DeclaredFormat {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// A pointer drawn from SVGs, which scale to any recording.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Cursor {
+    /// Absolute, as the one below; read only when a play is recorded.
+    pub image: Utf8PathBuf,
+    /// While a mouse button is held.
+    pub pressed: Utf8PathBuf,
+    /// The point of both that sits on the pointer, in their own units.
+    pub hotspot: [f32; 2],
+}
+
+/// `[record]` as written.
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclaredRecord {
+    format: Option<DeclaredFormat>,
+    hold: Option<f32>,
+    input: Option<DeclaredInput>,
+    cursor_default: Option<Utf8PathBuf>,
+    cursor_pressed: Option<Utf8PathBuf>,
+    cursor_hotspot: Option<[f32; 2]>,
+    glide: Option<GlideSetting>,
+    glide_speed: Option<f32>,
+    glide_time: Option<[f32; 2]>,
+    glide_dwell: Option<f32>,
+}
+
+impl DeclaredRecord {
+    fn glide(&self) -> Result<Glide, String> {
+        let unset = Glide::default();
+        let easing = match &self.glide {
+            None => None,
+            Some(glide) => glide.easing(None).map_err(|e| format!("[record] {e}"))?,
+        };
+        let speed = self.glide_speed.unwrap_or(unset.speed);
+        if !speed.is_finite() || speed <= 0.0 {
+            return Err(format!(
+                "[record] glide_speed is {speed}; it is points a second, more than 0"
+            ));
+        }
+        let time = self.glide_time.unwrap_or(unset.time);
+        let [fewest, most] = time;
+        if !(0.0 <= fewest && fewest <= most && most <= LONGEST_GLIDE) {
+            return Err(format!(
+                "[record] glide_time is {time:?}; it is the fewest and most seconds, \
+                 0 to {LONGEST_GLIDE}"
+            ));
+        }
+        let dwell = self.glide_dwell.unwrap_or(unset.dwell);
+        if !(0.0..=LONGEST_GLIDE).contains(&dwell) {
+            return Err(format!(
+                "[record] glide_dwell is {dwell}; it is seconds, 0 to {LONGEST_GLIDE}"
+            ));
+        }
+        Ok(Glide {
+            easing,
+            speed,
+            time,
+            dwell,
+        })
+    }
+
+    fn resolve(self, dir: &Utf8Path) -> Result<Record, String> {
+        let glide = self.glide()?;
+        let cursor = match (self.cursor_default, self.cursor_pressed) {
+            (Some(image), Some(pressed)) => Some(Cursor {
+                image: dir.join(image),
+                pressed: dir.join(pressed),
+                hotspot: self.cursor_hotspot.unwrap_or_default(),
+            }),
+            (None, None) if self.cursor_hotspot.is_some() => {
+                return Err("[record] `cursor_hotspot` is of a cursor, and none is set".to_owned());
+            }
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "[record] `cursor_default` and `cursor_pressed` go together: set both or neither"
+                        .to_owned(),
+                );
+            }
+        };
+        if let Some(hotspot) = self
+            .cursor_hotspot
+            .filter(|hotspot| !hotspot.iter().all(|at| at.is_finite()))
+        {
+            return Err(format!(
+                "[record] cursor_hotspot is {hotspot:?}; it is a point in the cursor's units"
+            ));
+        }
+        if let Some(hold) = self.hold.filter(|hold| !hold.is_finite() || *hold < 0.0) {
+            return Err(format!("[record] hold is {hold}; it is seconds, 0 or more"));
+        }
+        let names = self.format.map(|format| match format {
+            DeclaredFormat::One(one) => vec![one],
+            DeclaredFormat::Many(many) => many,
+        });
+        if names.as_ref().is_some_and(Vec::is_empty) {
+            return Err("[record] format names none; give `mp4`, `apng`, or both".to_owned());
+        }
+        let format = names
+            .map(|names| names.iter().map(|name| Format::named(name)).collect())
+            .transpose()?;
+        Ok(Record {
+            glide,
+            format,
+            hold: self.hold,
+            input: match self.input {
+                None | Some(DeclaredInput::On(true)) => Input::default(),
+                Some(DeclaredInput::On(false)) => Input::Off,
+                Some(DeclaredInput::In(name)) => Input::In(Corner::named(&name)?),
+            },
+            cursor,
+        })
+    }
+}
+
+/// `[tests]`: what a catalog's tests leave to look at.
+#[derive(Clone, Default, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tests {
+    #[serde(default)]
+    pub video: Video,
+    /// Where it goes, absolute;
+    /// unset leaves it to `gallery/` in cargo's target directory.
+    pub output: Option<Utf8PathBuf>,
+}
+
+/// Which plays' videos a catalog's tests keep.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Video {
+    /// None: no play is recorded.
+    Off,
+    /// Those of the plays that fail.
+    #[default]
+    Failing,
+    Always,
+}
+
+/// `[snapshots]`: how far a screenshot check lets a frame stray
+/// from its reference, with a table per renderer over the catalog's own.
+#[derive(Clone, Copy, Default, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshots {
+    pub threshold: Option<f32>,
+    pub tolerance: Option<u32>,
+    #[serde(default)]
+    pub wgpu: Budget,
+    #[serde(default)]
+    pub glow: Budget,
+}
+
+/// What a screenshot check lets through; unset leaves it to the table above.
+#[derive(Clone, Copy, Default, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Budget {
+    /// How far apart two pixels' colours may be
+    /// and still count as alike, from 0 to 1.
+    pub threshold: Option<f32>,
+    /// How many pixels may differ.
+    pub tolerance: Option<u32>,
+}
+
+impl Snapshots {
+    /// The catalog's own budget, under any renderer's.
+    #[must_use]
+    pub fn budget(&self) -> Budget {
+        Budget {
+            threshold: self.threshold,
+            tolerance: self.tolerance,
+        }
+    }
+
+    fn check(&self) -> Result<(), String> {
+        for (table, budget) in [
+            ("[snapshots]", self.budget()),
+            ("[snapshots.wgpu]", self.wgpu),
+            ("[snapshots.glow]", self.glow),
+        ] {
+            if let Some(threshold) = budget.threshold
+                && !(0.0..=1.0).contains(&threshold)
+            {
+                return Err(format!(
+                    "{table} threshold is {threshold}; it is a colour distance from 0 to 1"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The file's own shape, before the paths in it mean anything.
@@ -32,6 +445,16 @@ struct Declared {
     hot_watch_paths: Vec<Utf8PathBuf>,
     #[serde(default = "default_title")]
     title: String,
+    #[serde(default)]
+    snapshots: Snapshots,
+    #[serde(default)]
+    tests: Tests,
+    #[serde(default)]
+    record: DeclaredRecord,
+    #[serde(default)]
+    render: Render,
+    #[serde(default)]
+    plays: Plays,
 }
 
 fn default_title() -> String {
@@ -66,13 +489,44 @@ impl Config {
             .collect::<Result<Vec<_>, _>>()?;
         hot_watch_paths.sort();
         hot_watch_paths.dedup();
+        declared
+            .snapshots
+            .check()
+            .map_err(|e| format!("`{path}`: {e}"))?;
+        let tests = Tests {
+            output: declared
+                .tests
+                .output
+                .map(|output| canonical(&dir.join(output))),
+            ..declared.tests
+        };
+        let record = declared
+            .record
+            .resolve(dir)
+            .map_err(|e| format!("`{path}`: {e}"))?;
         Ok(Self {
-            path,
             title: declared.title,
             globs,
             hot_watch_paths,
+            snapshots: declared.snapshots,
+            tests,
+            record,
+            render: declared.render,
+            plays: declared.plays,
+            path,
         })
     }
+}
+
+/// `path` as far as it is there canonicalised, and the rest as it is.
+fn canonical(path: &Utf8Path) -> Utf8PathBuf {
+    let found = path.ancestors().find_map(|there| {
+        let rest = path.strip_prefix(there).ok()?;
+        let mut whole = there.canonicalize_utf8().ok()?;
+        whole.extend(rest);
+        Some(whole)
+    });
+    found.unwrap_or_else(|| path.to_owned())
 }
 
 /// Resolve a config-relative glob to an absolute one.
@@ -96,7 +550,9 @@ fn resolve_glob(config_dir: &Utf8Path, glob: &str) -> String {
 pub fn discover_from_env() {
     println!("cargo:rerun-if-env-changed=GALLERY_CONFIG");
     println!("cargo:rerun-if-env-changed=GALLERY_SCENE_GLOBS");
-    discover(env_globs());
+    let config = Config::read(&config_path()).ok();
+    let output = config.and_then(|config| config.tests.output);
+    discover_beside(output.as_deref(), env_globs());
     warn_on_shared_rlibs();
 }
 
@@ -264,10 +720,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    discover_beside(None, globs)
+}
+
+/// [`discover`], where tests write to `tests_output`.
+fn discover_beside<I, S>(tests_output: Option<&Utf8Path>, globs: I) -> Utf8PathBuf
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let out_dir = env::var("OUT_DIR").expect("discover() must run from a build script");
     let out_dir = Utf8PathBuf::from(out_dir);
     let generated = out_dir.join("gallery_scenes.rs");
-    let modules = includes(globs, &out_dir);
+    let written = tests_output.into_iter().chain([out_dir.as_path()]);
+    let modules = includes(globs, &written.collect::<Vec<_>>());
     // Left alone when it would say the same thing: the crate `include!`s this file,
     // so a fresh mtime recompiles it even where not a byte moved.
     if fs::read_to_string(&generated).is_ok_and(|current| current == modules) {
@@ -279,12 +745,12 @@ where
 
 /// The `#[path] mod …;` line for every scene file the globs match,
 /// and the `rerun-if-changed` directives that go with them.
-fn includes<I, S>(globs: I, out: &Utf8Path) -> String
+fn includes<I, S>(globs: I, written: &[&Utf8Path]) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let found = scan(globs, Some(out));
+    let found = scan(globs, written);
     for path in &found.watch {
         println!("cargo:rerun-if-changed={path}");
     }
@@ -304,9 +770,10 @@ struct Discovered {
 /// so the build dirties any directory it writes into.
 /// A glob's static prefix is a repo root where scenes sit beside their components,
 /// `target/` and `.git` under it, so a `git status` between two builds rebuilt the dylib.
-/// A scene's own directory is not that — unless `out` sits beneath it, as the scaffold's does.
+/// A scene's own directory is not that — unless what is `written` sits beneath it, as the scaffold's
+/// build does, or [a run writes there](is_written_into).
 /// Skipping that one costs notice of a scene *added* there; the files are watched either way.
-fn scan<I, S>(globs: I, out: Option<&Utf8Path>) -> Discovered
+fn scan<I, S>(globs: I, written: &[&Utf8Path]) -> Discovered
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -314,7 +781,7 @@ where
     let mut modules = String::new();
     let mut used = HashSet::new();
     let mut watch = Vec::new();
-    let mut watched = HashSet::new();
+    let mut seen = HashSet::new();
     for pattern in globs {
         let pattern = pattern.as_ref();
         let matches =
@@ -332,8 +799,9 @@ where
             }
             let abs = path.canonicalize_utf8().unwrap_or(path);
             if let Some(dir) = abs.parent()
-                && !out.is_some_and(|out| out.starts_with(dir))
-                && watched.insert(dir.to_owned())
+                && seen.insert(dir.to_owned())
+                && !written.iter().any(|written| written.starts_with(dir))
+                && !is_written_into(dir)
             {
                 watch.push(dir.to_owned());
             }
@@ -344,6 +812,16 @@ where
         }
     }
     Discovered { modules, watch }
+}
+
+/// Whether a run writes beneath `dir`: to a tagged cache,
+/// or what a failed snapshot check saw beside its reference.
+fn is_written_into(dir: &Utf8Path) -> bool {
+    let dir = glob::Pattern::escape(dir.as_str());
+    ["CACHEDIR.TAG", SNAPSHOTS].iter().any(|name| {
+        let found = glob::glob(&format!("{dir}/**/{name}"));
+        found.is_ok_and(|mut found| found.any(|path| path.is_ok()))
+    })
 }
 
 /// Whether a path came out of a build directory rather than a source tree.
@@ -421,7 +899,7 @@ mod tests {
                 "target/debug/stale.scene.rs",
             ],
         );
-        let modules = scan([format!("{root}/**/*.scene.rs")], None).modules;
+        let modules = scan([format!("{root}/**/*.scene.rs")], &[]).modules;
         assert!(modules.contains("mod good;"), "the source scene: {modules}");
         assert!(
             !modules.contains("stale"),
@@ -437,7 +915,7 @@ mod tests {
             "named",
             &["crates/targets/dial.scene.rs", "target/mine.scene.rs"],
         );
-        let modules = scan([format!("{root}/**/*.scene.rs")], None).modules;
+        let modules = scan([format!("{root}/**/*.scene.rs")], &[]).modules;
         assert!(modules.contains("mod dial;"), "under `targets/`: {modules}");
         assert!(modules.contains("mod mine;"), "under `target/`: {modules}");
     }
@@ -463,7 +941,7 @@ mod tests {
                 ".git/HEAD",
             ],
         );
-        let found = scan([format!("{root}/**/*.scene.rs")], None);
+        let found = scan([format!("{root}/**/*.scene.rs")], &[]);
 
         assert!(
             found.watch.contains(&root.join("components")),
@@ -492,7 +970,7 @@ mod tests {
         let root = tree("writes-into", &["loose.scene.rs", "target/CACHEDIR.TAG"]);
         let out = root.join("target/debug/build/app-gallery-1234/out");
 
-        let found = scan([format!("{root}/**/*.scene.rs")], Some(&out));
+        let found = scan([format!("{root}/**/*.scene.rs")], &[&out]);
 
         assert!(
             !found.watch.contains(&root),
@@ -504,6 +982,96 @@ mod tests {
             "the scene is still watched, so editing it still rebuilds: {:?}",
             found.watch
         );
+    }
+
+    /// With cargo's `build-dir` set apart `out` is elsewhere,
+    /// and the dylib still lands in the target directory.
+    #[test]
+    fn a_scene_directory_with_a_cache_beneath_it_is_not_watched() {
+        let root = tree(
+            "cache-beneath",
+            &[
+                "crate/loose.scene.rs",
+                "crate/target/CACHEDIR.TAG",
+                "deep/loose.scene.rs",
+                "deep/down/cache/CACHEDIR.TAG",
+                "elsewhere/dial.scene.rs",
+                "elsewhere/target/plain.rs",
+            ],
+        );
+        let found = scan([format!("{root}/**/*.scene.rs")], &[]);
+        let watched = |path: &str| found.watch.contains(&root.join(path));
+        assert!(!watched("crate") && !watched("deep"), "{:?}", found.watch);
+        assert!(watched("crate/loose.scene.rs"), "{:?}", found.watch);
+        assert!(watched("elsewhere"), "its `target` is a source directory");
+    }
+
+    /// A check that fails leaves what it saw beside the reference.
+    #[test]
+    fn a_scene_directory_with_snapshots_beneath_it_is_not_watched() {
+        let root = tree(
+            "snapshots-beneath",
+            &[
+                "played/form.scene.rs",
+                "played/__snapshots__/form/saves/saved.wgpu.png",
+                "deep/loose.scene.rs",
+                "deep/down/form.scene.rs",
+                "deep/down/__snapshots__/form/saves/saved.wgpu.png",
+                "[odd]/loose.scene.rs",
+                "[odd]/__snapshots__/form/saves/saved.wgpu.png",
+                "drawn/dial.scene.rs",
+            ],
+        );
+        let found = scan([format!("{root}/**/*.scene.rs")], &[]);
+        let watched = |path: &str| found.watch.contains(&root.join(path));
+        for dir in ["played", "deep", "deep/down", "[odd]"] {
+            assert!(!watched(dir), "{dir}: {:?}", found.watch);
+        }
+        assert!(watched("played/form.scene.rs"), "{:?}", found.watch);
+        assert!(watched("drawn"), "{:?}", found.watch);
+    }
+
+    /// Under nextest every test is a process that builds the scenes,
+    /// and every test writes to the tests' output.
+    #[test]
+    fn a_scene_directory_the_tests_write_into_is_not_watched() {
+        let root = tree(
+            "tests-write-into",
+            &["crate/loose.scene.rs", "elsewhere/dial.scene.rs"],
+        );
+        let globs = [format!("{root}/**/*.scene.rs")];
+        let watches = |output: &Utf8Path, dir: &str| {
+            let out = Utf8Path::new("/build/out");
+            let found = scan(&globs, &[out, output]);
+            assert!(found.watch.contains(&root.join("crate/loose.scene.rs")));
+            found.watch.contains(&root.join(dir))
+        };
+        for inside in ["crate", "crate/target/tests"] {
+            assert!(!watches(&root.join(inside), "crate"), "{inside}");
+            assert!(watches(&root.join(inside), "elsewhere"), "{inside}");
+        }
+        assert!(watches(&root.join("crate-tests"), "crate"));
+    }
+
+    #[test]
+    fn the_tests_output_is_one_path_however_it_is_spelled() {
+        let root = tree("output-spelled", &["crate/gallery.toml", "out/kept"]);
+        let output = |declared: &str| {
+            let path = root.join("crate/gallery.toml");
+            let toml = format!("scene_globs = []\n[tests]\noutput = \"{declared}\"\n");
+            fs::write(&path, toml).expect("write the config");
+            let config = Config::read(&path).expect("a config");
+            config.tests.output.expect("an output")
+        };
+        for (declared, resolved) in [
+            ("target/tests", "crate/target/tests"),
+            ("../out/kept", "out/kept"),
+            ("../out/new/tests", "out/new/tests"),
+            ("../new", "new"),
+            ("../crate/./tests", "crate/tests"),
+        ] {
+            assert_eq!(output(declared), root.join(resolved), "{declared}");
+        }
     }
 
     /// A bare `cargo build` has no environment from the launcher, and has to find the same scenes
@@ -530,7 +1098,7 @@ mod tests {
             config.title, "Gallery",
             "an omitted title has a useful default"
         );
-        let modules = scan(&config.globs, None).modules;
+        let modules = scan(&config.globs, &[]).modules;
         assert!(modules.contains("mod dial;"), "under a subdir: {modules}");
         assert!(modules.contains("mod loose;"), "beside it: {modules}");
         assert!(
@@ -567,6 +1135,440 @@ mod tests {
                 root.join("shared/assets/palette.json")
             ],
             "both directories and files are retained, with duplicate spellings collapsed"
+        );
+    }
+
+    /// The config `toml` reads as, in a fresh tree of its own.
+    fn read_config(name: &str, toml: &str) -> Result<Config, String> {
+        let root = tree(name, &["scene.rs"]);
+        fs::write(root.join("gallery.toml"), toml).expect("write the config");
+        Config::read(&root.join("gallery.toml"))
+    }
+
+    /// The config of a tree holding `scene.rs` and `files`,
+    /// globbing that scene, with `tables` beside it.
+    fn config_with(name: &str, files: &[&str], tables: toml::Table) -> Result<Config, String> {
+        let mut toml = toml::toml! { scene_globs = ["scene.rs"] };
+        toml.extend(tables);
+        let root = tree(name, &[&["scene.rs"], files].concat());
+        let text = toml::to_string(&toml).expect("BUG: a table writes as TOML");
+        fs::write(root.join("gallery.toml"), text).expect("write the config");
+        Config::read(&root.join("gallery.toml"))
+    }
+
+    /// `record` as a config's `[record]`.
+    fn with_record(record: toml::Table) -> toml::Table {
+        toml::Table::from_iter([("record".to_owned(), record.into())])
+    }
+
+    /// [`config_with`] no more files than the scene, `record` its `[record]`.
+    fn record_config(name: &str, record: toml::Table) -> Result<Config, String> {
+        config_with(name, &[], with_record(record))
+    }
+
+    #[test]
+    fn a_snapshots_table_sets_the_budget_and_one_per_renderer_over_it() {
+        let config = read_config(
+            "snapshots",
+            indoc::indoc! {r#"
+                scene_globs = ["scene.rs"]
+
+                [snapshots]
+                threshold = 0.2
+                tolerance = 10
+
+                [snapshots.wgpu]
+                tolerance = 400
+            "#},
+        )
+        .expect("a readable config");
+        assert_eq!(
+            config.snapshots,
+            Snapshots {
+                threshold: Some(0.2),
+                tolerance: Some(10),
+                wgpu: Budget {
+                    threshold: None,
+                    tolerance: Some(400),
+                },
+                glow: Budget::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_misspelt_snapshots_key_is_refused() {
+        let error = read_config(
+            "snapshots-misspelt",
+            indoc::indoc! {r#"
+                scene_globs = ["scene.rs"]
+
+                [snapshots]
+                tolerence = 10
+            "#},
+        )
+        .err()
+        .expect("an unknown key is an error");
+        assert!(error.contains("tolerence"), "{error}");
+    }
+
+    #[test]
+    fn a_tests_table_says_which_videos_to_keep_and_where() {
+        let unset = config_with("tests-unset", &[], toml::Table::new())
+            .expect("a readable config")
+            .tests;
+        assert_eq!((unset.video, unset.output), (Video::Failing, None));
+
+        let config = config_with(
+            "tests-set",
+            &[],
+            toml::toml! {
+                [tests]
+                video = "always"
+                output = "out/tests"
+            },
+        )
+        .expect("a readable config");
+        assert_eq!(config.tests.video, Video::Always);
+        let dir = config.path.parent().expect("a directory");
+        assert_eq!(config.tests.output, Some(dir.join("out/tests")));
+
+        let error = config_with(
+            "tests-misspelt",
+            &[],
+            toml::toml! {
+                [tests]
+                video = "on"
+            },
+        )
+        .err()
+        .expect("an unknown value is an error");
+        assert!(error.contains("`off`, `failing`, `always`"), "{error}");
+    }
+
+    #[test]
+    fn a_record_table_names_both_cursors_and_where_they_point() {
+        let read = |name, record| {
+            config_with(
+                name,
+                &["art/cursor.svg", "art/pressed.svg"],
+                with_record(record),
+            )
+        };
+        let unset = read("record-unset", toml::Table::new()).expect("a readable config");
+        assert_eq!(unset.record.cursor, None);
+
+        let config = read(
+            "record-set",
+            toml::toml! {
+                cursor_default = "art/cursor.svg"
+                cursor_pressed = "art/pressed.svg"
+                cursor_hotspot = [1, 2.5]
+            },
+        )
+        .expect("a readable config");
+        let dir = config.path.parent().expect("a directory");
+        assert_eq!(
+            config.record.cursor,
+            Some(Cursor {
+                image: dir.join("art/cursor.svg"),
+                pressed: dir.join("art/pressed.svg"),
+                hotspot: [1.0, 2.5],
+            })
+        );
+
+        let gone = read(
+            "record-gone",
+            toml::toml! {
+                cursor_default = "art/gone.svg"
+                cursor_pressed = "art/pressed.svg"
+            },
+        )
+        .expect("a missing cursor fails the recording that draws it, not the config");
+        let dir = gone.path.parent().expect("a directory");
+        assert_eq!(
+            gone.record.cursor.map(|cursor| cursor.image),
+            Some(dir.join("art/gone.svg"))
+        );
+
+        for (name, record, says) in [
+            (
+                "record-half",
+                toml::toml! { cursor_default = "art/cursor.svg" },
+                "`cursor_default` and `cursor_pressed` go together",
+            ),
+            (
+                "record-hotspot-nan",
+                toml::toml! {
+                    cursor_default = "art/cursor.svg"
+                    cursor_pressed = "art/pressed.svg"
+                    // toml 1.2's `nan` expands to the deprecated `std::f64::NAN`.
+                    cursor_hotspot = [(f64::NAN), 1]
+                },
+                "[record] cursor_hotspot is [NaN, 1.0]",
+            ),
+            (
+                "record-hotspot-alone",
+                toml::toml! { cursor_hotspot = [1, 1] },
+                "`cursor_hotspot` is of a cursor",
+            ),
+            (
+                "record-unrenamed",
+                toml::toml! { cursor = "art/cursor.svg" },
+                "unknown field `cursor`",
+            ),
+        ] {
+            let error = read(name, record).err().expect("an error");
+            assert!(error.contains(says), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_record_table_sets_how_every_recording_is_made() {
+        let read = |name, record| {
+            record_config(name, record)
+                .map(|config| config.record)
+                .expect("a readable config")
+        };
+        let unset = read("record-defaults", toml::Table::new());
+        assert_eq!(
+            (unset.format, unset.hold, unset.input),
+            (None, None, Input::In(Corner::BottomLeft))
+        );
+
+        let set = read(
+            "record-settings",
+            toml::toml! {
+                format = ["apng", "mp4"]
+                hold = 0.25
+                input = "top-right"
+            },
+        );
+        assert_eq!(set.format, Some(vec![Format::Apng, Format::Mp4]));
+        assert_eq!(set.hold, Some(0.25));
+        assert_eq!(set.input, Input::In(Corner::TopRight));
+
+        let one = read(
+            "record-one-format",
+            toml::toml! {
+                format = "apng"
+                input = false
+            },
+        );
+        assert_eq!(
+            (one.format, one.input),
+            (Some(vec![Format::Apng]), Input::Off)
+        );
+        let on = read("record-input-on", toml::toml! { input = true });
+        assert_eq!(on.input, Input::In(Corner::BottomLeft));
+
+        for (name, record, says) in [
+            (
+                "record-hold-negative",
+                toml::toml! { hold = -1 },
+                "[record] hold is -1",
+            ),
+            (
+                "record-corner",
+                toml::toml! { input = "middle" },
+                "`middle` is no corner: `bottom-left`, `bottom-right`, `top-left` or `top-right`, or `false`",
+            ),
+            (
+                "record-format-both",
+                toml::toml! { format = "both" },
+                "`both` is no format: `mp4`, `apng`, `gif`, or a list of them",
+            ),
+            (
+                "record-format-unknown-in-list",
+                toml::toml! { format = ["mp4", "webm"] },
+                "`webm` is no format: `mp4`, `apng`, `gif`, or a list of them",
+            ),
+            (
+                "record-no-format",
+                toml::toml! { format = [] },
+                "[record] format names none",
+            ),
+            (
+                "record-format-number",
+                toml::toml! { format = 4 },
+                "`mp4`, `apng`, `gif`, or a list of them",
+            ),
+            (
+                "record-input-number",
+                toml::toml! { input = 4 },
+                "a corner such as `bottom-left`, or `false`",
+            ),
+        ] {
+            let error = record_config(name, record).err().expect("an error");
+            assert!(error.contains(says), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_record_table_sets_how_the_pointer_glides() {
+        let read = |name, record| record_config(name, record).map(|config| config.record.glide);
+        let unset = read("glide-unset", toml::Table::new()).expect("a readable config");
+        assert_eq!(
+            unset,
+            Glide {
+                easing: None,
+                speed: 1200.0,
+                time: [0.15, 0.6],
+                dwell: 0.2,
+            },
+            "off unless set, and how it would go"
+        );
+        for (name, record, easing) in [
+            (
+                "glide-on",
+                toml::toml! { glide = true },
+                Some(Easing::CubicInOut),
+            ),
+            ("glide-off", toml::toml! { glide = false }, None),
+            ("glide-off-named", toml::toml! { glide = "off" }, None),
+            (
+                "glide-linear",
+                toml::toml! { glide = "linear" },
+                Some(Easing::Linear),
+            ),
+            (
+                "glide-cubic-out",
+                toml::toml! { glide = "cubic-out" },
+                Some(Easing::CubicOut),
+            ),
+        ] {
+            let read = read(name, record).expect("a readable config");
+            assert_eq!(read.easing, easing, "{name}");
+        }
+        let paced = read(
+            "glide-paced",
+            toml::toml! {
+                glide_speed = 600
+                glide_time = [0.1, 0.4]
+                glide_dwell = 0
+            },
+        )
+        .expect("a readable config");
+        assert_eq!(
+            (paced.speed, paced.time, paced.dwell),
+            (600.0, [0.1, 0.4], 0.0)
+        );
+
+        for (name, record, says) in [
+            (
+                "glide-unknown",
+                toml::toml! { glide = "bounce" },
+                "[record] `bounce` is no easing: `linear`, `cubic-in-out` or `cubic-out`, or `off`",
+            ),
+            (
+                "glide-number",
+                toml::toml! { glide = 3 },
+                "an easing such as `cubic-in-out`, or `false`",
+            ),
+            (
+                "glide-still",
+                toml::toml! { glide_speed = 0 },
+                "[record] glide_speed is 0; it is points a second, more than 0",
+            ),
+            (
+                "glide-backwards",
+                toml::toml! { glide_time = [0.5, 0.1] },
+                "[record] glide_time is [0.5, 0.1]; it is the fewest and most seconds, 0 to 5",
+            ),
+            (
+                "glide-endless",
+                toml::toml! { glide_time = [1e9, 1e9] },
+                "0 to 5",
+            ),
+            (
+                "glide-dwelling-for-ever",
+                toml::toml! { glide_dwell = 60 },
+                "[record] glide_dwell is 60; it is seconds, 0 to 5",
+            ),
+            (
+                "glide-negative",
+                toml::toml! { glide_time = [-1, 1] },
+                "[record] glide_time is [-1.0, 1.0]",
+            ),
+        ] {
+            let error = read(name, record).expect_err("an error");
+            assert!(error.contains(says), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn render_and_plays_tables_set_how_shots_are_drawn_and_plays_report() {
+        let unset =
+            config_with("render-unset", &[], toml::Table::new()).expect("a readable config");
+        assert_eq!(
+            (unset.render, unset.plays),
+            (Render::default(), Plays::default())
+        );
+        let set = config_with(
+            "render-set",
+            &[],
+            toml::toml! {
+                [render]
+                size = "640x360"
+                scale = 2
+                trim = false
+                frames = 3
+
+                [plays]
+                steps = true
+                log = "linear"
+            },
+        )
+        .expect("a readable config");
+        assert_eq!(
+            set.render,
+            Render {
+                size: Some("640x360".to_owned()),
+                scale: Some(2.0),
+                trim: Some(false),
+                frames: Some(3),
+            }
+        );
+        assert_eq!(
+            set.plays,
+            Plays {
+                steps: Some(true),
+                log: Some(Log::Linear),
+            }
+        );
+        for (name, tables, says) in [
+            (
+                "render-unknown",
+                toml::toml! { [render] sizes = "1x1" },
+                "unknown field `sizes`",
+            ),
+            (
+                "plays-unknown-log",
+                toml::toml! { [plays] log = "loud" },
+                "unknown variant `loud`",
+            ),
+        ] {
+            let error = config_with(name, &[], tables).err().expect("an error");
+            assert!(error.contains(says), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_threshold_past_one_names_its_table() {
+        let error = read_config(
+            "snapshots-threshold",
+            indoc::indoc! {r#"
+                scene_globs = ["scene.rs"]
+
+                [snapshots.glow]
+                threshold = 1.5
+            "#},
+        )
+        .err()
+        .expect("a threshold past 1 is an error");
+        assert!(
+            error.contains("[snapshots.glow] threshold is 1.5"),
+            "{error}"
         );
     }
 
@@ -623,7 +1625,7 @@ mod tests {
         // Caught rather than left to unwind: not panicking is the whole property, and the directory
         // has to be readable again either way or every later run trips over it instead.
         let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan([format!("{root}/**/*.scene.rs")], None).modules
+            scan([format!("{root}/**/*.scene.rs")], &[]).modules
         }));
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock the dir");
 

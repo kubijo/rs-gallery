@@ -1,0 +1,26 @@
+{% if unfinished %}
+    <p>It began and did not finish: it ended its process, was stopped, or is still running.</p>
+{% endif %}
+{% for warning in warnings %}<p class="warning">{{ warning }}</p>{% endfor %}
+{% if let Some(video) = video %}
+    <video controls muted playsinline preload="none" src="{{ video }}">
+    </video>
+{% endif %}
+{% if !lines.is_empty() %}
+    <ol class="log">
+        {% for line in lines %}
+            {% include "line.html" %}
+        {% endfor %}
+    </ol>
+{% endif %}
+{% if let Some(failure) = failure %}
+    <pre class="failure">
+    {%- for piece in failure -%}
+        {%- if let Some(class) = piece.class -%}
+            <span class="{{ class }}">{{ piece.text }}</span>
+        {%- else -%}
+            {{ piece.text }}
+        {%- endif -%}
+    {%- endfor -%}
+</pre>
+{% endif %}
