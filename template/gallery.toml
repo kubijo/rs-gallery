@@ -5,6 +5,18 @@ scene_globs = ["{{scene_globs}}"]
 # hot_watch_paths = ["../shared/assets"] # more to hot-reload on
 title = "{{title}}"
 
+# How shots are drawn, unless a recipe or a flag says otherwise.
+# [render]
+# size = "1280x720"
+# scale = 1 # device pixels to the point
+# trim = true # crop to what the scene drew
+# frames = 4 # drawn before a headless shot is taken, 2 or more
+
+# How plays report as they run.
+# [plays]
+# steps = false # each play's whole log, not one line for a pass
+# log = "live" # or "linear", "off"; GALLERY_LOG outranks it
+
 # How far a play's screenshot may stray from its reference.
 # [snapshots]
 # threshold = 0.1 # colour distance, 0 to 1

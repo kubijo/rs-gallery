@@ -61,7 +61,9 @@ mod tests;
 pub(crate) use gallery_build::{Easing, Glide, GlideSetting};
 
 pub(crate) use self::cursor::use_cursor;
-pub(crate) use self::defaults::RecordDefaults;
+#[cfg(test)]
+pub(crate) use self::defaults::RenderDefaults;
+pub(crate) use self::defaults::{Defaults, RecordDefaults};
 use self::film::Film;
 pub(crate) use self::film::{Filmed, Films, create_output, place_at, play_dir_in};
 pub(crate) use self::log_view::LogMode;

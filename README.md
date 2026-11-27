@@ -351,6 +351,17 @@ frames = 40 # an animated scene draws a different frame each time; pick one
 knobs = { dots = 96, accent = "#6C9CD8" }
 ```
 
+`size`, `scale`, `trim` and `frames` go shot, recipe, then `gallery.toml`'s `[render]` for every shot of the catalog;
+`--render` takes the flags, then `[render]`. A window never exits on `[render] frames`, only on `--frames`.
+
+```toml
+[render]
+size = "1280x720"
+scale = 1
+trim = true # crop to what the scene drew; `--no-trim`
+frames = 4 # drawn before a shot is taken, 2 or more
+```
+
 The CLI accepts repeatable `--knob LABEL=VALUE` for `--render` and `--global LABEL=VALUE` for both `--render` and
 `--capture`; capture knobs belong to the recipe because each shot can differ:
 
@@ -491,8 +502,9 @@ While a capture runs, each play's log — its steps, gestures and checks, with t
 a terminal the running play's tree is redrawn in place, and a play that passed folds to one line; through a pipe, in CI,
 on a dumb terminal or under an agent's harness each play is printed once it is over, the same lines without redrawing.
 `--steps` keeps a passing play's whole tree, as a single `--play` always does; `--log live|linear|off`, or
-`GALLERY_LOG`, overrides the choice for a harness that pretends to be a terminal. `GALLERY_LOG_PACE=300` holds each live
-redraw for 300 ms, slow enough to follow a run or record it.
+`GALLERY_LOG`, overrides the choice for a harness that pretends to be a terminal. `gallery.toml`'s `[plays]` sets both
+for every run, below the flags and `GALLERY_LOG`: `steps = true`, `log = "linear"`. `GALLERY_LOG_PACE=300` holds each
+live redraw for 300 ms, slow enough to follow a run or record it.
 
 A play that fails does not stop the run: the other shots still run, the summary marks each shot passed or failed, and
 each failure follows in a panel that names the step and shows the play's own failing line. A failed play keeps a

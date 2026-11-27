@@ -33,19 +33,32 @@ impl std::str::FromStr for LogMode {
     }
 }
 
+impl From<gallery_build::Log> for LogMode {
+    fn from(log: gallery_build::Log) -> Self {
+        match log {
+            gallery_build::Log::Live => Self::Live,
+            gallery_build::Log::Linear => Self::Linear,
+            gallery_build::Log::Off => Self::Off,
+        }
+    }
+}
+
 impl LogMode {
-    /// `asked` when given, else `GALLERY_LOG`, else live
+    /// `asked` when given, else `GALLERY_LOG`, else `configured`, else live
     /// only where a terminal can redraw: stderr a terminal,
     /// `TERM` not `dumb`, and no `CI` set.
     ///
     /// # Errors
     /// When `GALLERY_LOG` names no mode.
-    pub(crate) fn detect(asked: Option<Self>) -> Result<Self, String> {
+    pub(crate) fn detect(asked: Option<Self>, configured: Option<Self>) -> Result<Self, String> {
         if let Some(asked) = asked {
             return Ok(asked);
         }
         if let Ok(raw) = std::env::var("GALLERY_LOG") {
             return raw.parse().map_err(|e| format!("GALLERY_LOG: {e}"));
+        }
+        if let Some(configured) = configured {
+            return Ok(configured);
         }
         Ok(Self::auto(
             std::io::stderr().is_terminal(),

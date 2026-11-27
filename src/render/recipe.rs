@@ -82,6 +82,8 @@ pub(super) struct Recipe {
     out: Option<Utf8PathBuf>,
     /// Canvas size for any shot that doesn't state its own.
     size: Option<String>,
+    /// Frames each shot draws before it is taken, unless it states its own.
+    frames: Option<u32>,
     /// Device pixels to the point for any shot that doesn't state its own.
     /// One for one unless asked otherwise.
     scale: Option<f32>,
@@ -157,8 +159,10 @@ struct RecipeRecord {
 pub(crate) fn read_recipe(
     path: &Utf8Path,
     out: Option<&Utf8Path>,
-    defaults: &RecordDefaults,
+    catalog: &Defaults,
 ) -> Result<Capture, Diagnostic> {
+    let defaults = &catalog.record;
+    let render = &catalog.render;
     let text = std::fs::read_to_string(path).map_err(|e| format!("read `{path}`: {e}"))?;
     let recipe: Recipe = toml::from_str(&text).map_err(|e| format!("parse `{path}`: {e}"))?;
     if recipe.shots.is_empty() {
@@ -191,20 +195,29 @@ pub(crate) fn read_recipe(
                     clash.name
                 ));
             }
-            let size = shot.size.as_ref().or(recipe.size.as_ref()).ok_or_else(|| {
-                format!(
-                    "shot `{}` has no `size`, and the recipe sets no default",
-                    shot.name
-                )
-            })?;
-            check_frames(shot.frames).map_err(|e| format!("shot `{}`: {e}", shot.name))?;
+            let size = match shot.size.as_ref().or(recipe.size.as_ref()) {
+                Some(size) => parse_size(size).map_err(|e| format!("shot `{}`: {e}", shot.name))?,
+                None => render.size.ok_or_else(|| {
+                    format!(
+                        "shot `{}` has no `size`, and neither the recipe \
+                         nor gallery.toml's `[render]` sets one",
+                        shot.name
+                    )
+                })?,
+            };
+            let frames = shot.frames.or(recipe.frames).or(render.frames);
+            check_frames(frames).map_err(|e| format!("shot `{}`: {e}", shot.name))?;
             if shot.trace.is_some() && shot.play.is_none() {
                 return Err(format!(
                     "shot `{}` sets `trace`, which keeps a play's step screenshots, but runs no `play`",
                     shot.name
                 ));
             }
-            let scale = shot.scale.or(recipe.scale).unwrap_or(DEFAULT_SCALE);
+            let scale = shot
+                .scale
+                .or(recipe.scale)
+                .or(render.scale)
+                .unwrap_or(DEFAULT_SCALE);
             check_scale(scale).map_err(|e| format!("shot `{}`: {e}", shot.name))?;
             if shot.video.is_some() && shot.record.is_none() {
                 return Err(format!(
@@ -240,7 +253,7 @@ pub(crate) fn read_recipe(
             Ok(Shot {
                 scene: shot.scene.clone(),
                 out: Some(base.join(format!("{}.png", shot.name))),
-                size: parse_size(size).map_err(|e| format!("shot `{}`: {e}", shot.name))?,
+                size,
                 scale,
                 knobs: shot
                     .knobs
@@ -264,8 +277,8 @@ pub(crate) fn read_recipe(
                         })
                     })
                     .collect::<Result<_, String>>()?,
-                frames: shot.frames,
-                trim: shot.trim.or(recipe.trim).unwrap_or(true),
+                frames,
+                trim: shot.trim.or(recipe.trim).or(render.trim).unwrap_or(true),
                 settle: shot.settle.or(recipe.settle).unwrap_or(false),
                 list: false,
                 template: false,

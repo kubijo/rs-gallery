@@ -63,10 +63,6 @@ past a handful of images, and a structural target beside the pixel one.
 
 ## Later
 
-- [ ] Every setting should be writable in the config, a flag only a shortcut over it, as `[record]` is. `--size`,
-  `--scale`, `--no-trim` and `--frames` have recipe keys but no `gallery.toml` default; `--log` and `--steps` have
-  neither.
-
 - [ ] The first build of a `--hot` run reports only to the terminal — `build_lib` blocks before the window exists, so
   the compile you wait longest for has nowhere to show. Little stands in the way: the loader tolerates a missing dylib
   and the header draws with no scenes, so the window could open first and the watcher's first build fill it. Against it:

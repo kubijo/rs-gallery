@@ -28,6 +28,41 @@ pub struct Config {
     pub snapshots: Snapshots,
     pub tests: Tests,
     pub record: Record,
+    pub render: Render,
+    pub plays: Plays,
+}
+
+/// `[render]`: how every shot is drawn,
+/// unless a recipe, a shot or a flag says otherwise.
+#[derive(Clone, Default, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Render {
+    /// `WxH`, as `--size` takes it.
+    pub size: Option<String>,
+    pub scale: Option<f32>,
+    pub trim: Option<bool>,
+    /// Frames a headless shot draws before it is taken; never a window's.
+    pub frames: Option<u32>,
+}
+
+/// `[plays]`: how plays report as they run,
+/// unless a recipe or a flag says otherwise.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Plays {
+    /// Keep each play's whole log,
+    /// not one line for a play that passed.
+    pub steps: Option<bool>,
+    pub log: Option<Log>,
+}
+
+/// How a run shows its plays as they go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Log {
+    Live,
+    Linear,
+    Off,
 }
 
 /// `[record]`: how every recording of the catalog
@@ -416,6 +451,10 @@ struct Declared {
     tests: Tests,
     #[serde(default)]
     record: DeclaredRecord,
+    #[serde(default)]
+    render: Render,
+    #[serde(default)]
+    plays: Plays,
 }
 
 fn default_title() -> String {
@@ -472,6 +511,8 @@ impl Config {
             snapshots: declared.snapshots,
             tests,
             record,
+            render: declared.render,
+            plays: declared.plays,
             path,
         })
     }
@@ -1451,6 +1492,63 @@ mod tests {
             ),
         ] {
             let error = read(name, record).expect_err("an error");
+            assert!(error.contains(says), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn render_and_plays_tables_set_how_shots_are_drawn_and_plays_report() {
+        let unset =
+            config_with("render-unset", &[], toml::Table::new()).expect("a readable config");
+        assert_eq!(
+            (unset.render, unset.plays),
+            (Render::default(), Plays::default())
+        );
+        let set = config_with(
+            "render-set",
+            &[],
+            toml::toml! {
+                [render]
+                size = "640x360"
+                scale = 2
+                trim = false
+                frames = 3
+
+                [plays]
+                steps = true
+                log = "linear"
+            },
+        )
+        .expect("a readable config");
+        assert_eq!(
+            set.render,
+            Render {
+                size: Some("640x360".to_owned()),
+                scale: Some(2.0),
+                trim: Some(false),
+                frames: Some(3),
+            }
+        );
+        assert_eq!(
+            set.plays,
+            Plays {
+                steps: Some(true),
+                log: Some(Log::Linear),
+            }
+        );
+        for (name, tables, says) in [
+            (
+                "render-unknown",
+                toml::toml! { [render] sizes = "1x1" },
+                "unknown field `sizes`",
+            ),
+            (
+                "plays-unknown-log",
+                toml::toml! { [plays] log = "loud" },
+                "unknown variant `loud`",
+            ),
+        ] {
+            let error = config_with(name, &[], tables).err().expect("an error");
             assert!(error.contains(says), "{name}: {error}");
         }
     }

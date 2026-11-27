@@ -112,6 +112,10 @@ so a minor release may carry a breaking change.
   `just demo::wgpu`, `femtovg`, `plays` and `shell-scenes`; `just tag` and `just release-check` are `just release::tag`
   and `just release::check`.
 
+- **Catalog defaults.** `gallery.toml`'s `[render]` sets `size`, `scale`, `trim` and `frames` for every shot, below a
+  recipe, its shots and the flags; `[plays]` sets `steps` and `log`, below the flags and `GALLERY_LOG`. A recipe takes a
+  root `frames` too.
+
 - **Recordings.** A shot's `record = { fps, seconds }`, or `--record FPS:SECONDS`, writes what it draws beside its PNG,
   frame *n* at exactly *n* / fps. A play shot's `record = { fps }` records the whole play (`video = "failing"` keeps it
   only on failure), pausing `hold` seconds at each step's end, with the keys, mouse and pointer drawn over it but never

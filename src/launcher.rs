@@ -92,8 +92,8 @@ pub fn launch(
 
     // Everything above is how scenes get here at all, so a headless run branches only where the window
     // would have opened — before any watcher, which nothing would be left to shut down.
-    let recording = render::RecordDefaults::from(&config.record);
-    if let Some(capture) = shots(&cli, &config.path, &recording) {
+    let defaults = render::Defaults::of(&config).unwrap_or_else(|reason| fail(&reason.into()));
+    if let Some(capture) = shots(&cli, &config.path, &defaults) {
         return match render::render_with_globals(
             &manifest,
             globals,
@@ -101,7 +101,8 @@ pub fn launch(
             settings.renderer,
             &setup,
             &capture,
-            render::LogMode::detect(cli.log).unwrap_or_else(|reason| fail(&reason.into())),
+            render::LogMode::detect(cli.log, defaults.log)
+                .unwrap_or_else(|reason| fail(&reason.into())),
         ) {
             Ok(()) => Ok(()),
             Err(reason) => fail(&reason),
@@ -198,25 +199,22 @@ fn headless(cli: &Cli) -> bool {
 /// The shots this invocation asks for, or `None` when it wants the window.
 ///
 /// A recipe describes its own. The single-scene flags describe one shot between them,
-/// so asking for several at once stays coherent — a listing or a generated recipe
-/// then says what the image beside it was set to.
-fn shots(
-    cli: &Cli,
-    config: &Utf8Path,
-    recording: &render::RecordDefaults,
-) -> Option<render::Capture> {
+/// so asking for several at once stays coherent — a listing
+/// or a generated recipe then says what the image beside it was set to.
+fn shots(cli: &Cli, config: &Utf8Path, defaults: &render::Defaults) -> Option<render::Capture> {
     if !headless(cli) {
         return None;
     }
     if let Some(recipe) = &cli.capture {
-        // Relative to the config, like the scene globs: both describe the instance, not the shell.
+        // Relative to the config, like the scene globs:
+        // both describe the instance, not the shell.
         let recipe = config.parent().unwrap_or(Utf8Path::new(".")).join(recipe);
-        let mut capture = render::read_recipe(&recipe, cli.out.as_deref(), recording)
+        let mut capture = render::read_recipe(&recipe, cli.out.as_deref(), defaults)
             .unwrap_or_else(|reason| fail(&reason));
         for shot in &mut capture.shots {
             shot.globals.extend(cli.global.iter().cloned());
             if let Some(play) = &mut shot.play {
-                play.steps = cli.steps;
+                play.steps = cli.steps || defaults.steps.unwrap_or(false);
             }
         }
         return Some(capture);
@@ -225,22 +223,23 @@ fn shots(
     // `--frames` also drives a windowed profiling run, where any count is meaningful,
     // so it is checked here rather than by clap.
     render::check_frames(cli.frames).unwrap_or_else(|reason| fail(&reason.into()));
-    let scale = cli.scale.unwrap_or(render::DEFAULT_SCALE);
+    let render = &defaults.render;
+    let scale = cli.scale.or(render.scale).unwrap_or(render::DEFAULT_SCALE);
     render::check_scale(scale).unwrap_or_else(|reason| fail(&reason.into()));
+    let size = match &cli.size {
+        Some(size) => render::parse_size(size).unwrap_or_else(|reason| fail(&reason.into())),
+        None => render.size.unwrap_or(render::DEFAULT_SIZE),
+    };
     Some(render::Capture {
         shots: vec![render::Shot {
             scene,
             out: cli.render.clone(),
-            size: cli
-                .size
-                .as_deref()
-                .map_or(Ok(render::DEFAULT_SIZE), render::parse_size)
-                .unwrap_or_else(|reason| fail(&reason.into())),
+            size,
             scale,
             knobs: cli.knob.iter().cloned().collect(),
             globals: cli.global.iter().cloned().collect(),
-            frames: cli.frames,
-            trim: !cli.no_trim,
+            frames: cli.frames.or(render.frames),
+            trim: !cli.no_trim && render.trim.unwrap_or(true),
             // A recipe option: one shot on the command line is drawn as asked.
             settle: false,
             list: cli.list_knobs,
@@ -251,7 +250,7 @@ fn shots(
                 steps: true,
             }),
             record: cli.record.map(|record| {
-                rendered_record(record, cli, recording)
+                rendered_record(record, cli, &defaults.record)
                     .unwrap_or_else(|reason| fail(&reason.into()))
             }),
         }],
@@ -1183,6 +1182,38 @@ Language = "English"
             shot.size,
             egui::vec2(800.0, 600.0),
             "--size replaces the default"
+        );
+    }
+
+    #[test]
+    fn a_rendered_shot_takes_the_catalogs_render_table_and_each_flag_outranks_it() {
+        let catalog = render::Defaults {
+            render: render::RenderDefaults {
+                size: Some(egui::vec2(320.0, 200.0)),
+                scale: Some(2.0),
+                trim: Some(false),
+                frames: Some(4),
+            },
+            ..render::Defaults::default()
+        };
+        let shot = |flags: &[&str]| {
+            let args = [&["gallery", "--scene", "s", "--render", "s.png"][..], flags].concat();
+            shots(&cli(&args), Utf8Path::new("gallery.toml"), &catalog)
+                .expect("a headless run")
+                .shots
+                .remove(0)
+        };
+        let caught = shot(&[]);
+        assert_eq!(
+            (caught.size, caught.scale, caught.trim, caught.frames),
+            (egui::vec2(320.0, 200.0), 2.0, false, Some(4)),
+            "the catalog's"
+        );
+        let flagged = shot(&["--size", "100x100", "--scale", "1", "--frames", "6"]);
+        assert_eq!(
+            (flagged.size, flagged.scale, flagged.frames),
+            (egui::vec2(100.0, 100.0), 1.0, Some(6)),
+            "the flags'"
         );
     }
 

@@ -132,7 +132,7 @@ fn a_generated_recipe_reads_back_as_the_state_it_was_generated_from() {
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let path = dir.join("capture.toml");
     std::fs::write(&path, &generated).expect("write recipe");
-    let shots = read_recipe(&path, None, &RecordDefaults::default())
+    let shots = read_recipe(&path, None, &Defaults::default())
         .expect("the generated recipe parses")
         .shots;
 
@@ -199,7 +199,7 @@ fn recipe_globals_inherit_from_the_root_and_a_shot_wins() {
     )
     .expect("write recipe");
 
-    let shot = read_recipe(&path, None, &RecordDefaults::default())
+    let shot = read_recipe(&path, None, &Defaults::default())
         .expect("global recipe parses")
         .shots
         .into_iter()
@@ -293,10 +293,15 @@ fn recipe_with(
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let path = dir.join("capture.toml");
     std::fs::write(&path, text).expect("write recipe");
-    read_recipe(&path, out.map(Utf8Path::new), defaults)
+    let catalog = Defaults {
+        record: *defaults,
+        ..Defaults::default()
+    };
+    read_recipe(&path, out.map(Utf8Path::new), &catalog)
 }
 
-/// [`recipe_with`] of one shot, `a` of scene `s` into `r` at 10×10, `shot` the rest of its table.
+/// [`recipe_with`] of one shot, `a` of scene `s`
+/// into `r` at 10×10, `shot` the rest of its table.
 fn one_shot(
     name: &str,
     shot: toml::Table,
@@ -359,8 +364,8 @@ fn a_catalogs_hold_pauses_a_plays_recording_and_leaves_one_without_a_play_be() {
 #[test]
 fn the_scaffolded_recipe_still_parses() {
     let shipped = Utf8Path::new("template/capture.toml");
-    let capture = read_recipe(shipped, None, &RecordDefaults::default())
-        .expect("the scaffold's own recipe parses");
+    let capture =
+        read_recipe(shipped, None, &Defaults::default()).expect("the scaffold's own recipe parses");
     assert!(
         !capture.shots.is_empty(),
         "and describes the shots it documents"
@@ -369,6 +374,88 @@ fn the_scaffolded_recipe_still_parses() {
         capture.report.is_some() && capture.sheet.is_some(),
         "including the options it exists to demonstrate"
     );
+}
+
+#[test]
+fn a_catalogs_render_table_fills_what_neither_recipe_nor_shot_sets() {
+    let catalog = Defaults {
+        render: RenderDefaults {
+            size: Some(egui::vec2(320.0, 200.0)),
+            scale: Some(2.0),
+            trim: Some(false),
+            frames: Some(4),
+        },
+        ..Defaults::default()
+    };
+    // One shot `a` of `s`, `root` and `own` the rest
+    // of the recipe and the shot, read in `defaults`.
+    let read = |name: &str, root: toml::Table, own: toml::Table, defaults: &Defaults| {
+        let mut shot = toml::toml! {
+            name = "a"
+            scene = "s"
+        };
+        shot.extend(own);
+        let mut recipe = toml::toml! { out = "r" };
+        recipe.extend(root);
+        recipe.insert("shot".to_owned(), vec![toml::Value::from(shot)].into());
+        let dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .expect("a UTF-8 temp dir")
+            .join(format!("gallery-recipe-{name}"));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("capture.toml");
+        std::fs::write(&path, toml::to_string(&recipe).expect("TOML")).expect("written");
+        read_recipe(&path, None, defaults)
+    };
+    let shot = |name: &str, root, own| {
+        read(name, root, own, &catalog)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.summary()))
+            .shots
+            .remove(0)
+    };
+    let caught = shot("render-catalog", toml::Table::new(), toml::Table::new());
+    assert_eq!(
+        (caught.size, caught.scale, caught.trim, caught.frames),
+        (egui::vec2(320.0, 200.0), 2.0, false, Some(4)),
+        "the catalog's, where the recipe is silent"
+    );
+    let rooted = shot(
+        "render-root",
+        toml::toml! {
+            size = "100x100"
+            scale = 1
+            trim = true
+            frames = 5
+        },
+        toml::Table::new(),
+    );
+    assert_eq!(
+        (rooted.size, rooted.scale, rooted.trim, rooted.frames),
+        (egui::vec2(100.0, 100.0), 1.0, true, Some(5)),
+        "the recipe's root outranks the catalog"
+    );
+    let own = shot(
+        "render-own",
+        toml::toml! { size = "100x100" },
+        toml::toml! {
+            size = "50x50"
+            frames = 6
+        },
+    );
+    assert_eq!(
+        (own.size, own.frames),
+        (egui::vec2(50.0, 50.0), Some(6)),
+        "and the shot outranks its recipe"
+    );
+    let error = read(
+        "render-sizeless",
+        toml::Table::new(),
+        toml::Table::new(),
+        &Defaults::default(),
+    )
+    .err()
+    .expect("no size anywhere")
+    .summary();
+    assert!(error.contains("gallery.toml's `[render]`"), "{error}");
 }
 
 #[test]

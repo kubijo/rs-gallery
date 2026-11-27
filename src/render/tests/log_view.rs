@@ -196,6 +196,20 @@ fn a_terminal_redraws_and_anything_else_reads_a_line_at_a_time() {
 }
 
 #[test]
+fn the_flag_outranks_gallery_log_which_outranks_the_catalog() {
+    let configured = Some(LogMode::Off);
+    assert_eq!(
+        LogMode::detect(Some(LogMode::Linear), configured),
+        Ok(LogMode::Linear)
+    );
+    let unflagged = LogMode::detect(None, configured);
+    match std::env::var("GALLERY_LOG") {
+        Ok(raw) => assert_eq!(unflagged, raw.parse(), "GALLERY_LOG is set here"),
+        Err(_) => assert_eq!(unflagged, Ok(LogMode::Off), "the catalog's"),
+    }
+}
+
+#[test]
 fn pacing_takes_milliseconds_and_shrugs_off_anything_else() {
     use std::time::Duration;
 

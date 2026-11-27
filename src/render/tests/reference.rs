@@ -18,7 +18,7 @@ fn the_reference_images_match_what_the_recipe_renders() {
         .join("gallery-reference");
     let recipe = Utf8Path::new("tests/reference.toml");
     let capture =
-        read_recipe(recipe, Some(&out), &RecordDefaults::default()).expect("the reference recipe");
+        read_recipe(recipe, Some(&out), &Defaults::default()).expect("the reference recipe");
     render_with_globals(
         &reference_scenes(),
         None,
