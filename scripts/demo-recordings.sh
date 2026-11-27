@@ -23,7 +23,7 @@ for backend in wgpu femtovg; do
     for tour in studio-tour checks-tour; do
         played=$(jq --arg name "$tour" '.shots[] | select(.name == $name) | .play.frames' \
             "$out/report.json")
-        for format in apng mp4; do
+        for format in apng mp4 gif; do
             video="$out/$tour.$format"
             read -r recorded held < <(jq -r --arg name "$tour" --arg format "$format" \
                 '.shots[] | select(.name == $name) | .videos[] | select(.format == $format)
@@ -32,6 +32,9 @@ for backend in wgpu femtovg; do
                 problems+=("$backend: $video holds ${recorded:-no} frames of the ${played:-?} its play drew")
             elif [ "${held:-0}" -eq 0 ]; then
                 problems+=("$backend: $video never paused at a step's end")
+            fi
+            if [ "$format" = gif ] && [ "$(head -c 6 "$video" 2>/dev/null)" != GIF89a ]; then
+                problems+=("$backend: $video is no GIF")
             fi
         done
     done

@@ -94,6 +94,9 @@ pub(super) struct Recording {
     /// Whether a frame came since the last hold, so a step that ends
     /// with the one around it, or before any frame, adds no second pause.
     drew_since_hold: bool,
+    glide: Glide,
+    /// Whether the pointer came by a glide and has done nothing since, so it dwells first.
+    dwelling: bool,
     input: Option<InputOverlay>,
     draw: Duration,
     capture: Duration,
@@ -171,6 +174,19 @@ impl Recording {
 
     /// Add `image` to every file.
     fn push(&mut self, image: image::RgbaImage) {
+        self.push_with(image, Recorder::frame);
+    }
+
+    /// Add `image`, a frame of a glide, to every file.
+    fn push_glide(&mut self, image: image::RgbaImage) {
+        self.push_with(image, Recorder::glide_frame);
+    }
+
+    fn push_with(
+        &mut self,
+        image: image::RgbaImage,
+        hand: fn(&mut Recorder, image::RgbaImage) -> Result<(), String>,
+    ) {
         let mut left = self.sinks.len();
         let mut image = Some(image);
         self.each(|recorder| {
@@ -180,13 +196,18 @@ impl Recording {
             } else {
                 image.clone()
             };
-            recorder.frame(image.expect("BUG: taken for the last file"))
+            hand(recorder, image.expect("BUG: taken for the last file"))
         });
     }
 
     /// Show the last frame for `frames` frames more.
     fn repeat(&mut self, frames: u32) {
         self.each(|recorder| recorder.hold(frames));
+    }
+
+    /// Show the last frame for `frames` frames more of a glide.
+    fn repeat_glide(&mut self, frames: u32) {
+        self.each(|recorder| recorder.glide_hold(frames));
     }
 
     /// `hand` every file something, losing those that fail at it.
@@ -270,12 +291,15 @@ pub(super) struct VideoOutcome {
     pub(super) frames: u32,
     /// Frames added by pausing at a play's step ends.
     pub(super) held: u32,
+    /// Frames added by gliding the pointer between a play's gestures.
+    pub(super) glided: u32,
     /// Frames the file holds, a repeat having
     /// lengthened the frame before it instead.
     pub(super) written: u32,
     /// Drawing the scene, all frames together; shared by every format's file.
     pub(super) draw: Duration,
-    /// Rendering each frame and reading it back; shared by every format's file.
+    /// Rendering each frame and reading it back, and making each glide's;
+    /// shared by every format's file.
     pub(super) capture: Duration,
     pub(super) encode: Duration,
     pub(super) deepest_queue: usize,
@@ -361,6 +385,8 @@ fn begun(size: (u32, u32), out: &Utf8Path, record: Record) -> Result<Recording, 
         fps: record.fps,
         hold: record.hold_frames(),
         drew_since_hold: false,
+        glide: record.glide,
+        dwelling: false,
         input: None,
         draw: Duration::ZERO,
         capture: Duration::ZERO,
@@ -391,7 +417,7 @@ fn begun(size: (u32, u32), out: &Utf8Path, record: Record) -> Result<Recording, 
     Ok(recording)
 }
 
-/// Record into `out` at `fps`, pausing `hold` seconds at each step's end,
+/// Record into `out` at `fps`, pausing and gliding as `hold` and `glide` say,
 /// only watching: an APNG that grows with the canvas.
 /// It begins with the frame there is, as a play can fail before it draws one.
 ///
@@ -402,6 +428,7 @@ pub(super) fn watch(
     out: &Utf8Path,
     fps: u16,
     hold: Option<f32>,
+    glide: Glide,
 ) -> Result<(), String> {
     let record = Record {
         fps,
@@ -410,6 +437,7 @@ pub(super) fn watch(
         formats: VideoFormat::Apng.into(),
         hold,
         input: None,
+        glide,
     };
     harness.ctx.add_plugin(Textures::default());
     harness.state_mut().recording = Some(Recording {
@@ -423,6 +451,8 @@ pub(super) fn watch(
         fps,
         hold: record.hold_frames(),
         drew_since_hold: false,
+        glide,
+        dwelling: false,
         input: None,
         draw: Duration::ZERO,
         capture: Duration::ZERO,
@@ -438,6 +468,20 @@ pub(super) fn watch(
         harness.state_mut().recording = None;
     }
     first
+}
+
+/// A play's gesture began: its typing starts a new run, and an earlier glide no longer dwells.
+pub(super) fn gesture_began(harness: &mut egui_kittest::Harness<'static, Canvas>) {
+    let Some(recording) = harness.state_mut().recording.as_mut() else {
+        return;
+    };
+    recording.dwelling = false;
+    if let Some(input) = recording.input.as_mut() {
+        input.end_run();
+    }
+    if let Some(watched) = &mut recording.watched {
+        watched.log.end_run();
+    }
 }
 
 /// Pause on the frame last drawn, at a play's step end, when recording.
@@ -461,6 +505,152 @@ pub(super) fn hold(harness: &mut egui_kittest::Harness<'static, Canvas>) {
             .extend(std::iter::repeat_n(last, hold as usize));
         watched.log.hold(hold);
     }
+}
+
+/// The pointer's place on each frame of a glide `from` `to`, short of `to`:
+/// the gesture's own frame lands there, as the glide's last.
+/// Its time follows the distance on the canvas, within `glide.time`.
+pub(super) fn glide_path(
+    glide: Glide,
+    fps: u16,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    zoom: f32,
+) -> Vec<egui::Pos2> {
+    let Some(easing) = glide.easing else {
+        return Vec::new();
+    };
+    if from == to {
+        return Vec::new();
+    }
+    let ease: fn(f32) -> f32 = match easing {
+        Easing::Linear => egui::emath::easing::linear,
+        Easing::CubicInOut => egui::emath::easing::cubic_in_out,
+        Easing::CubicOut => egui::emath::easing::cubic_out,
+    };
+    let [fewest, most] = glide.time;
+    let seconds = (from.distance(to) * zoom / glide.speed).clamp(fewest, most);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "`glide_time` keeps it within 0 to 5 seconds"
+    )]
+    let frames = (seconds * f32::from(fps)).round() as u32;
+    let way = to - from;
+    let bow = way.rot90().normalized() * (way.length() * BOW).min(MOST_BOW);
+    #[expect(clippy::cast_precision_loss, reason = "a few frames")]
+    (1..frames)
+        .map(|frame| {
+            let along = ease(frame as f32 / frames as f32);
+            from.lerp(to, along) + bow * (along * std::f32::consts::PI).sin()
+        })
+        .collect()
+}
+
+/// How far a glide bows off the straight line at its middle, as a share of its length.
+const BOW: f32 = 0.08;
+
+/// The most points a glide bows off the straight line, however long it is.
+const MOST_BOW: f32 = 40.0;
+
+/// Glide the pointer to where this frame's events put it,
+/// over the scene as it stands.
+///
+/// A drag, or a pointer not yet shown, doesn't glide.
+///
+/// # Errors
+/// When the scene or a glide frame cannot be rendered.
+fn glide(harness: &mut egui_kittest::Harness<'static, Canvas>) -> Result<(), String> {
+    let Some(recording) = harness.state().recording.as_ref() else {
+        return Ok(());
+    };
+    let log = match (&recording.input, &recording.watched) {
+        (Some(input), _) => input.log(),
+        (None, Some(watched)) => &watched.log,
+        (None, None) => return Ok(()),
+    };
+    let Some(from) = log.free_pointer() else {
+        return Ok(());
+    };
+    let to = harness.input().events.iter().find_map(|event| match event {
+        egui::Event::PointerMoved(at) | egui::Event::PointerButton { pos: at, .. } => Some(*at),
+        _ => None,
+    });
+    let Some(to) = to else {
+        return Ok(());
+    };
+    let zoom = harness.ctx.zoom_factor();
+    let path = glide_path(recording.glide, recording.fps, from, to, zoom);
+    if path.is_empty() {
+        return Ok(());
+    }
+    let started = Instant::now();
+    let scene = match recording.watched {
+        Some(_) => None,
+        None => Some(rendered("render the scene a pointer glides over", harness)?),
+    };
+    let recording = harness
+        .state_mut()
+        .recording
+        .as_mut()
+        .ok_or("BUG: a glide with no recording open")?;
+    if let Some(watched) = &mut recording.watched {
+        for at in &path {
+            watched.log.glide(*at);
+            watched.shown.push(watched.log.shown(zoom));
+        }
+        recording.repeat_glide(u32::try_from(path.len()).unwrap_or(u32::MAX));
+    } else if let (Some(mut input), Some(scene)) = (recording.input.take(), scene) {
+        let glided = path.into_iter().try_for_each(|at| {
+            recording.push_glide(input.glide_over(at, zoom, &scene)?);
+            Ok::<_, String>(())
+        });
+        recording.input = Some(input);
+        glided?;
+    }
+    recording.dwelling = true;
+    recording.capture += started.elapsed();
+    Ok(())
+}
+
+/// Rest the pointer a glide brought, on the frame it arrived on,
+/// before this frame's press, key or wheel.
+fn dwell(harness: &mut egui_kittest::Harness<'static, Canvas>) {
+    let acts = harness.input().events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::PointerButton { pressed: true, .. }
+                | egui::Event::Key { pressed: true, .. }
+                | egui::Event::Text(_)
+                | egui::Event::MouseWheel { .. }
+        )
+    });
+    let Some(recording) = harness.state_mut().recording.as_mut() else {
+        return;
+    };
+    if !(acts && std::mem::take(&mut recording.dwelling)) {
+        return;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "`glide_dwell` keeps it within 0 to 5 seconds"
+    )]
+    let frames = (recording.glide.dwell * f32::from(recording.fps)).round() as u32;
+    // Frozen whole, panel and lit pointer too, as at a step's end.
+    if let Some(input) = recording.input.as_mut() {
+        input.hold(frames);
+    }
+    if let Some(watched) = &mut recording.watched {
+        let Some(last) = watched.shown.last().cloned() else {
+            return;
+        };
+        watched
+            .shown
+            .extend(std::iter::repeat_n(last, frames as usize));
+        watched.log.hold(frames);
+    }
+    recording.repeat_glide(frames);
 }
 
 /// Give up the recording, if one is open, of a shot that failed for `why`:
@@ -503,6 +693,7 @@ fn finished(recording: Recording) -> (Vec<VideoOutcome>, Vec<String>) {
                 fps: recording.fps,
                 frames: encoded.frames,
                 held: encoded.held,
+                glided: encoded.glided,
                 written: encoded.written,
                 draw: recording.draw,
                 capture: recording.capture,
@@ -523,6 +714,15 @@ fn finished(recording: Recording) -> (Vec<VideoOutcome>, Vec<String>) {
 pub(super) fn step(harness: &mut egui_kittest::Harness<'static, Canvas>) -> Result<(), String> {
     if let Some(time) = harness.state_mut().clock.as_mut().map(Clock::next) {
         harness.input_mut().time = Some(time);
+    }
+    if is_recording(harness)
+        && let Err(why) = glide(harness)
+        && let Some(recording) = &mut harness.state_mut().recording
+    {
+        recording.stop(why);
+    }
+    if is_recording(harness) {
+        dwell(harness);
     }
     // Taken before the frame consumes them.
     let shows_input = harness.state().recording.as_ref().is_some_and(|recording| {
@@ -646,6 +846,82 @@ pub(super) fn record_frames(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_glide_takes_its_time_from_the_distance_within_its_bounds_and_stops_short_of_the_target() {
+        let eased = |easing| Glide {
+            easing: Some(easing),
+            ..Glide::default()
+        };
+        let linear = eased(Easing::Linear);
+        let (from, at) = (egui::Pos2::ZERO, |x: f32| egui::pos2(x, 0.0));
+        let xs = |path: Vec<egui::Pos2>| path.iter().map(|at| at.x).collect::<Vec<_>>();
+
+        assert!(glide_path(Glide::default(), 20, from, at(120.0), 1.0).is_empty());
+        assert!(glide_path(linear, 20, from, from, 1.0).is_empty());
+        assert_eq!(
+            xs(glide_path(linear, 20, from, at(120.0), 1.0)),
+            [40.0, 80.0],
+            "0.1 s at 1200 points a second, held to the fewest 0.15 s: \
+             3 frames at 20 fps, the gesture's own the last"
+        );
+        assert_eq!(
+            glide_path(linear, 20, from, at(2400.0), 1.0).len(),
+            11,
+            "2 s, cut to the most 0.6 s"
+        );
+        assert_eq!(glide_path(linear, 20, from, at(360.0), 1.0).len(), 5);
+        assert_eq!(
+            glide_path(linear, 20, from, at(360.0), 2.0).len(),
+            11,
+            "zoomed in twice, it goes twice as far on the canvas"
+        );
+        let instant = Glide {
+            time: [0.0, 0.6],
+            ..linear
+        };
+        assert!(
+            glide_path(instant, 20, from, at(12.0), 1.0).is_empty(),
+            "a hop too short for a frame of its own is the gesture's alone"
+        );
+
+        let cubic = xs(glide_path(
+            eased(Easing::CubicInOut),
+            20,
+            from,
+            at(360.0),
+            1.0,
+        ));
+        assert!(cubic[0] < 60.0, "it sets off slowly: {cubic:?}");
+        assert!(
+            (cubic[2] - 180.0).abs() < 0.01,
+            "and is halfway at half time: {cubic:?}"
+        );
+        assert!(
+            cubic.last().is_some_and(|&x| x > 340.0 && x < 360.0),
+            "and stops short: {cubic:?}"
+        );
+        let bowed: Vec<f32> = glide_path(linear, 20, from, at(360.0), 1.0)
+            .iter()
+            .map(|at| at.y.abs())
+            .collect();
+        assert!(
+            (bowed[2] - 360.0 * BOW).abs() < 0.01,
+            "it bows off the line most at its middle: {bowed:?}"
+        );
+        assert!(
+            bowed[0] < bowed[2] && bowed[4] < bowed[2],
+            "and least at its ends: {bowed:?}"
+        );
+        let out = xs(glide_path(
+            eased(Easing::CubicOut),
+            20,
+            from,
+            at(360.0),
+            1.0,
+        ));
+        assert!(out[0] > 60.0, "cubic-out sets off fast: {out:?}");
+    }
+
     /// A recording in both formats into `dir`, of a canvas of 64×64 pixels.
     fn both(dir: &tempfile::TempDir) -> Result<Recording, String> {
         both_of((64, 64), dir)
@@ -660,6 +936,7 @@ mod tests {
             formats: VideoFormats::of([VideoFormat::Apng, VideoFormat::Mp4]).expect("two"),
             hold: None,
             input: None,
+            glide: Glide::default(),
         };
         begun(size, &dir.join("shot.png"), record)
     }

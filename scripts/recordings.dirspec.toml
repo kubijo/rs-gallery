@@ -4,5 +4,5 @@ strict = true
 
 [paths]
 "report.json" = { type = "file", min_size = 1 }
-"checks-tour.{png,apng,mp4}" = { type = "file", count = 3, min_size = 1 }
-"studio-tour.{png,apng,mp4}" = { type = "file", count = 3, min_size = 1 }
+"checks-tour.{png,apng,mp4,gif}" = { type = "file", count = 4, min_size = 1 }
+"studio-tour.{png,apng,mp4,gif}" = { type = "file", count = 4, min_size = 1 }

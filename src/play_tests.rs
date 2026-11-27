@@ -1213,6 +1213,182 @@ fn reading(p: &Play<'_>, prefix: &str) -> f32 {
 }
 
 #[test]
+fn a_plays_pace_sets_how_many_frames_its_drags_scrolls_and_typing_take() {
+    fn pad_and_field(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let (_, response) = ui.allocate_exact_size(egui::vec2(200.0, 60.0), egui::Sense::drag());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "pad"));
+        let id = ui.make_persistent_id("typed");
+        let mut typed: String =
+            ui.data_mut(|data| data.get_temp_mut_or_default::<String>(id).clone());
+        let label = ui.label("Field");
+        if ui
+            .text_edit_singleline(&mut typed)
+            .labelled_by(label.id)
+            .changed()
+        {
+            crate::action(format!("field {typed}"));
+        }
+        ui.data_mut(|data| data.insert_temp(id, typed));
+    }
+    fn gestures(p: &mut Play<'_>) -> PlayResult {
+        p.drag("pad", [100.0, 0.0])?;
+        p.scroll("pad", [0.0, -50.0])?;
+        p.click("Field")?;
+        p.type_text("abc")?;
+        p.expect("Field").to_have_value("abc")?;
+        p.type_text("")?;
+        p.fill("Field", "xyz")?;
+        p.expect("Field").to_have_value("xyz")
+    }
+    fn paced(p: &mut Play<'_>) -> PlayResult {
+        p.set_pace(crate::play::Pace {
+            drag_frames: 30,
+            scroll_frames: 12,
+            frames_per_char: 2,
+            off_centre: false,
+        });
+        gestures(p)?;
+        p.expect_action("field a")?;
+        p.expect_action("field ab")
+    }
+    // How many frames each gesture of `run` took, by its label.
+    let spans = |name: &'static str, run: PlayFn| {
+        let (manifest, plays) = catalog(pad_and_field, &[(name, run)]);
+        let dir = scratch(name);
+        let report = dir.join("capture.json");
+        capture(
+            &manifest,
+            &plays,
+            shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
+            Some(report.clone()),
+        )
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+        let log = json["shots"][0]["play"]["log"]
+            .as_array()
+            .expect("a log")
+            .clone();
+        let span = |label: &str| {
+            let entry = log
+                .iter()
+                .find(|entry| entry["label"] == label)
+                .unwrap_or_else(|| panic!("no `{label}` in {log:#?}"));
+            entry["frames"][1].as_u64().expect("an end")
+                - entry["frames"][0].as_u64().expect("a start")
+        };
+        [
+            span("drag \"pad\""),
+            span("scroll \"pad\""),
+            span("type \"abc\""),
+            span("type \"\""),
+            span("fill \"Field\""),
+        ]
+    };
+    assert_eq!(
+        spans("unpaced", gestures),
+        [14, 7, 2, 1, 5],
+        "by default: 10 moves, 5 wheel steps and the text at once, each with its frames around"
+    );
+    assert_eq!(
+        spans("paced", paced),
+        [34, 14, 7, 1, 10],
+        "paced: 30 moves, 12 wheel steps and 2 frames a character, typed or filled; \
+         no text, no frames of it"
+    );
+}
+
+#[test]
+fn an_off_centre_aim_is_the_point_its_labels_crc_32_picks_on_every_machine() {
+    let wide = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 40.0));
+    let at = crate::play::off_centre(wide.center(), wide, "Wide");
+    // zlib's CRC-32 of "Wide" is 0x0cd123dc: its low half picks x, its high half y.
+    let picked = egui::pos2(100.0 - 0.719_844_4 * 16.0, 20.0 - 0.899_870_3 * 4.0);
+    assert!(at.distance(picked) < 0.001, "{at:?}, not {picked:?}");
+}
+
+#[test]
+fn an_off_centre_pace_presses_near_the_middle_at_the_same_point_each_run() {
+    static PRESSED: std::sync::Mutex<Option<(egui::Pos2, egui::Rect)>> =
+        std::sync::Mutex::new(None);
+    fn wide(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let button = ui.add_sized([200.0, 40.0], egui::Button::new("Wide"));
+        if let Some(at) = ui.input(|input| input.pointer.press_origin()) {
+            *PRESSED.lock().expect("the press") = Some((at, button.rect));
+        }
+    }
+    fn clicks(p: &mut Play<'_>) -> PlayResult {
+        p.set_pace(crate::play::Pace {
+            off_centre: true,
+            ..crate::play::Pace::default()
+        });
+        p.click("Wide")
+    }
+    let pressed = |name: &'static str| {
+        let (manifest, plays) = catalog(wide, &[(name, clicks)]);
+        let dir = scratch(name);
+        capture(
+            &manifest,
+            &plays,
+            shot("plays::scene", &dir.join("shot.png"), name, Trace::Failing),
+            None,
+        )
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+        PRESSED.lock().expect("the press").take().expect("pressed")
+    };
+    let (at, rect) = pressed("off-centre");
+    let off = at - rect.center();
+    assert!(off.length() > 1.0, "off the middle: {at:?} in {rect:?}");
+    assert!(
+        off.x.abs() <= 16.0 && off.y.abs() <= 4.0 && rect.contains(at),
+        "near it, within the button: {at:?} in {rect:?}"
+    );
+    assert_eq!(pressed("off-centre-again").0, at, "the same point each run");
+}
+
+#[test]
+fn a_drag_eases_into_its_move_and_out_of_it() {
+    static HELD_AT: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
+    fn pad(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        let (_, response) = ui.allocate_exact_size(egui::vec2(200.0, 60.0), egui::Sense::drag());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "pad"));
+        if let Some(at) = ui.input(|input| {
+            input
+                .pointer
+                .primary_down()
+                .then(|| input.pointer.latest_pos())
+                .flatten()
+        }) {
+            HELD_AT.lock().expect("the places").push(at.x);
+        }
+    }
+    fn drags(p: &mut Play<'_>) -> PlayResult {
+        p.drag("pad", [100.0, 0.0])
+    }
+    let (manifest, plays) = catalog(pad, &[("eases", drags)]);
+    let dir = scratch("drag-eases");
+    capture(
+        &manifest,
+        &plays,
+        shot(
+            "plays::scene",
+            &dir.join("shot.png"),
+            "eases",
+            Trace::Failing,
+        ),
+        None,
+    )
+    .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let held = HELD_AT.lock().expect("the places").clone();
+    let steps: Vec<f32> = held.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let middle = steps.len() / 2;
+    assert!(
+        steps[1] < steps[middle] && steps[steps.len() - 1] < steps[middle],
+        "slow, fast, slow: {steps:?}"
+    );
+}
+
+#[test]
 fn a_drag_moves_the_pointer_across_the_widget_while_held() {
     fn pad(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
         let id = ui.make_persistent_id("dragged");
@@ -1399,6 +1575,7 @@ fn a_plays_input_shows_on_its_recording_and_nowhere_else() {
         formats: crate::render::VideoFormat::Apng.into(),
         hold: None,
         input,
+        glide: crate::render::Glide::default(),
     };
     let (plain, _) = record_play("input-off", tab_then_hover, Trace::Always, record(None));
     let (shown, _) = record_play(
@@ -1669,6 +1846,7 @@ fn pointing_record(
         formats: format.into(),
         hold: None,
         input,
+        glide: crate::render::Glide::default(),
     }
 }
 
@@ -1762,6 +1940,39 @@ fn a_shot_has_no_cursor_where_the_pointer_hovers() {
     );
 }
 
+/// A field labelled `Field`, to type into.
+fn field(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    let id = ui.make_persistent_id("typed");
+    let mut typed: String = ui.data_mut(|data| data.get_temp_mut_or_default::<String>(id).clone());
+    let label = ui.label("Field");
+    ui.text_edit_singleline(&mut typed).labelled_by(label.id);
+    ui.data_mut(|data| data.insert_temp(id, typed));
+}
+
+/// Clicks `Field`, then types into it twice in one step.
+fn types_twice(p: &mut Play<'_>) -> PlayResult {
+    p.click("Field")?;
+    p.step("type", |p| {
+        p.type_text("ab")?;
+        p.type_text("cd")
+    })
+}
+
+#[test]
+fn text_typed_by_two_gestures_shows_as_two_runs_on_the_recording() {
+    let (_, outcome) = record_pointing(
+        "typed-twice",
+        field,
+        types_twice,
+        1.0,
+        VideoFormat::Apng,
+        Some(crate::render::Corner::BottomLeft),
+    );
+    outcome.unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let laid = crate::render::KEYS_LAID.with_borrow(Clone::clone);
+    assert_eq!(laid, ["\"ab\"", "\"cd\""]);
+}
+
 #[test]
 fn a_recording_draws_gallerys_cursor_on_the_pointer_and_its_pressed_one_on_a_press() {
     static HELLO: std::sync::Mutex<egui::Pos2> = std::sync::Mutex::new(egui::Pos2::ZERO);
@@ -1853,6 +2064,7 @@ fn one_play_records_in_every_format_asked_for_from_the_same_frames() {
         formats,
         hold: None,
         input: None,
+        glide: crate::render::Glide::default(),
     };
     let both = crate::render::VideoFormats::of([
         crate::render::VideoFormat::Apng,
@@ -1908,6 +2120,7 @@ fn recorded_play(
             formats: crate::render::VideoFormat::Apng.into(),
             hold,
             input: None,
+            glide: crate::render::Glide::default(),
         },
     )
 }
@@ -1928,6 +2141,180 @@ fn record_play(
     _ = capture(&manifest, &plays, recorded, Some(report.clone()));
     let json = serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
     (dir.join("shot.apng"), json)
+}
+
+fn far_apart(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label("Left");
+        ui.add_space(400.0);
+        ui.label("Right");
+    });
+}
+
+fn crosses(p: &mut Play<'_>) -> PlayResult {
+    p.hover("Left")?;
+    p.hover("Right")
+}
+
+/// `run` on `far_apart`, recorded as `glide` says:
+/// its written frames, and the shot's report.
+fn recorded_crossing(
+    name: &str,
+    run: PlayFn,
+    glide: crate::render::Glide,
+) -> (Vec<image::RgbaImage>, serde_json::Value) {
+    let (manifest, plays) = catalog(far_apart, &[("crosses", run)]);
+    let dir = scratch(name);
+    let report = dir.join("capture.json");
+    let mut recorded = shot(
+        "plays::scene",
+        &dir.join("shot.png"),
+        "crosses",
+        Trace::Always,
+    );
+    recorded.size = egui::vec2(640.0, 120.0);
+    recorded.record = Some(crate::render::Record {
+        hold: Some(0.0),
+        glide,
+        ..pointing_record(VideoFormat::Apng, None)
+    });
+    capture(&manifest, &plays, recorded, Some(report.clone()))
+        .unwrap_or_else(|failure| panic!("{}", failure.plain()));
+    let (_, frames) = crate::video::decode(&dir.join("shot.apng"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).expect("the report")).expect("JSON");
+    (
+        frames.into_iter().map(|frame| frame.image).collect(),
+        json["shots"][0].clone(),
+    )
+}
+
+/// `crosses` recorded with `glide`:
+/// the pointer's middle on each frame showing one, and the shot's report.
+/// Hovered labels look the same, so only the pointer stands out.
+fn crossing(name: &str, glide: crate::render::Glide) -> (Vec<f32>, serde_json::Value) {
+    let (still, _) = recorded_crossing(&format!("{name}-still"), waits, glide);
+    let scene = still.last().expect("a frame");
+    let (frames, report) = recorded_crossing(name, crosses, glide);
+    let middles = frames
+        .iter()
+        .filter_map(|frame| {
+            let xs: Vec<u32> = frame
+                .enumerate_pixels()
+                .filter(|(x, y, pixel)| {
+                    let was = scene.get_pixel(*x, *y);
+                    // Past the shade a hovered canvas tints its scroll track by.
+                    pixel.0.iter().zip(was.0).any(|(a, b)| a.abs_diff(b) > 16)
+                })
+                .map(|(x, _, _)| x)
+                .collect();
+            let (&low, &high) = (xs.iter().min()?, xs.iter().max()?);
+            #[expect(clippy::cast_precision_loss, reason = "a few hundred pixels")]
+            let middle = xs.iter().sum::<u32>() as f32 / xs.len() as f32;
+            // Wider than a pointer is the scene still laying out.
+            (high - low < 40).then_some(middle)
+        })
+        .collect();
+    (middles, report)
+}
+
+#[test]
+fn a_gliding_recording_moves_the_pointer_between_gestures_and_the_play_draws_no_more() {
+    let (placed, jumped) = crossing("glide-off", crate::render::Glide::default());
+    let (left, right) = (placed[0], placed[placed.len() - 1]);
+    assert!(
+        right - left > 300.0,
+        "it goes from Left to Right: {placed:?}"
+    );
+    let between = |x: &f32| left + 20.0 < *x && *x < right - 20.0;
+    assert!(
+        !placed.iter().any(between),
+        "without a glide it jumps: {placed:?}"
+    );
+
+    let glide = crate::render::Glide {
+        easing: Some(crate::render::Easing::Linear),
+        ..crate::render::Glide::default()
+    };
+    let (glides, glided) = crossing("glide-on", glide);
+    let way: Vec<f32> = glides.into_iter().filter(between).collect();
+    assert!(way.len() >= 5, "it passes through on its way: {way:?}");
+    assert!(
+        way.windows(2).all(|pair| pair[0] < pair[1]),
+        "from Left to Right: {way:?}"
+    );
+    let drawn = &jumped["play"]["frames"];
+    assert_eq!(
+        &glided["play"]["frames"], drawn,
+        "the play draws the same frames"
+    );
+    let video = &glided["videos"][0];
+    assert_eq!(
+        &video["frames"], drawn,
+        "the video counts the play's frames as drawn"
+    );
+    let added = video["glided"].as_u64().expect("the glide's frames");
+    assert!(
+        added >= way.len() as u64,
+        "the glide's frames are counted apart: {video}"
+    );
+    assert_eq!(jumped["videos"][0]["glided"], 0, "{}", jumped["videos"][0]);
+}
+
+#[test]
+fn a_glided_pointer_dwells_before_it_presses_and_only_then() {
+    fn clicks_right(p: &mut Play<'_>) -> PlayResult {
+        p.hover("Left")?;
+        p.click("Right")
+    }
+    let glided = |name: &str, run: PlayFn, dwell: f32| {
+        let glide = crate::render::Glide {
+            easing: Some(crate::render::Easing::Linear),
+            dwell,
+            ..crate::render::Glide::default()
+        };
+        let (_, report) = recorded_crossing(name, run, glide);
+        report["videos"][0]["glided"]
+            .as_u64()
+            .expect("the glide's frames")
+    };
+    assert_eq!(
+        glided("dwells", clicks_right, 0.2) - glided("dwells-not", clicks_right, 0.0),
+        6,
+        "0.2 s at 30 fps before the press"
+    );
+    assert_eq!(
+        glided("hovers-dwelling", crosses, 0.2),
+        glided("hovers", crosses, 0.0),
+        "a hover does nothing after it to dwell before"
+    );
+    fn crosses_then_presses(p: &mut Play<'_>) -> PlayResult {
+        crosses(p)?;
+        p.press("Escape")
+    }
+    assert_eq!(
+        glided("presses-dwelling", crosses_then_presses, 0.2),
+        glided("presses", crosses_then_presses, 0.0),
+        "a key pressed by a gesture of its own is no act of the hover's"
+    );
+}
+
+#[test]
+fn a_pointer_glides_neither_in_from_nowhere_nor_through_a_drag() {
+    fn appears_then_drags(p: &mut Play<'_>) -> PlayResult {
+        p.hover("Right")?;
+        p.drag("Right", [-300.0, 0.0])
+    }
+    let glide = crate::render::Glide {
+        easing: Some(crate::render::Easing::Linear),
+        ..crate::render::Glide::default()
+    };
+    let (_, report) = recorded_crossing("glide-held", appears_then_drags, glide);
+    assert_eq!(
+        report["videos"][0]["glided"], 0,
+        "the first pointer comes where it is put, and a drag moves it itself: {}",
+        report["videos"][0]
+    );
 }
 
 /// How many frames a recording runs, every written frame's delay added up.

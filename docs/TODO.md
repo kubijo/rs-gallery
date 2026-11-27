@@ -87,13 +87,3 @@ past a handful of images, and a structural target beside the pixel one.
 
 - [ ] Soft checks, Playwright's `expect.soft`: a failed check that lets the play go on and fails it at its end, so one
   run reports every check that failed. The log already keeps every check; what is missing is a play that outlives one.
-
-- [ ] A recording's pointer jumps from widget to widget, since a gesture moves it in one frame. A glide only in the
-  file, as `hold` pauses only there: `--record-cursor [EASING]`, off by default, adds frames between the pointer's last
-  place and the gesture's target while the scene's frame stays still, then the gesture runs as before. The play draws
-  the same frames either way, so tests, traces and frame budgets are untouched; widgets passed on the way are not
-  hovered.
-
-  - Easing names map onto a few of `emath::easing`'s: `linear`, `cubic-in-out` (the default), `cubic-out`, `back-out`.
-  - Travel time follows the distance, clamped to about 0.15–0.6 s, counted in frames so the file stays byte-identical.
-  - The overlay draws the pointer, so the glide moves that cursor alone.

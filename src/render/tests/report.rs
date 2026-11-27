@@ -102,15 +102,16 @@ fn a_summary_has_no_empty_column_and_says_how_long_a_recording_is() {
         fps: 30,
         frames: 45,
         held: 30,
-        written: 75,
+        glided: 15,
+        written: 90,
         draw: std::time::Duration::ZERO,
         capture: std::time::Duration::ZERO,
         encode: std::time::Duration::ZERO,
         deepest_queue: 0,
     }])]);
     assert!(
-        recorded.contains("recording") && recorded.contains("45 frames · 2.5 s"),
-        "with its pauses: {recorded}"
+        recorded.contains("recording") && recorded.contains("45 frames · 3.0 s"),
+        "the frames drawn, lasting with its pauses and glides: {recorded}"
     );
 }
 

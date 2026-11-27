@@ -29,6 +29,10 @@ render SCENE OUT SIZE="1280x720":
 play SCENE PLAY OUT SIZE="1280x720":
     cargo run --quiet -- --scene {{ SCENE }} --play {{ PLAY }} --render {{ OUT }} --size {{ SIZE }}
 
+# Record the tasks board's tour to OUT, with an MP4 and a GIF to share beside it, the pointer gliding between gestures.
+showcase OUT="showcase.png":
+    cargo run --quiet -- --scene tasks --play tours_the_board --render {{ OUT }} --size 960x540 --record 60 --record-format gif,mp4 --record-glide
+
 # Render every shot in a capture recipe (render with knobs set).
 capture FILE="capture.toml" OUT="":
     cargo run --quiet -- --capture {{ FILE }} {{ if OUT == "" { "" } else { "--out " + OUT } }}

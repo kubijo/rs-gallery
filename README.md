@@ -433,10 +433,13 @@ name it most likely meant. The prelude brings `Key`, `Modifiers` and `Role` for 
 frame at a time, for exactly one widget to match, and fails naming what was on screen if none does. A pointer gesture
 aims at the middle of what shows of its widget, and fails at once if none of it does, scrolled away or past the canvas's
 edge; scroll it into view first. Each gesture is a fixed sequence of frames — a click is a move, a press, a release and
-a frame to settle — so a play draws the same frames on any machine. `step` names part of the script and takes the blame
-for any panic in it, and `set_knob` holds a knob over whatever the recipe set. A held scene knob, the recipe's or the
-play's, refuses the scene's own `set`; a `set_knob` value that never lands fails the play. A scene can have several
-plays, each known by its function's name.
+a frame to settle — so a play draws the same frames on any machine. Drags ease in and out. `set_pace` sets how many
+frames drags, scrolls and typing take, and whether gestures aim off-centre: quick and dead centre by default,
+`Pace::showcase()` for a recording someone watches (at 60 fps, a drag in ¾ s, 20 characters a second, each gesture near
+its widget's middle at a point its label fixes). `step` names part of the script and takes the blame for any panic in
+it, and `set_knob` holds a knob over whatever the recipe set. A held scene knob, the recipe's or the play's, refuses the
+scene's own `set`; a `set_knob` value that never lands fails the play. A scene can have several plays, each known by its
+function's name.
 
 ### What a play expects
 
@@ -602,7 +605,7 @@ it and fails.
 
 ## Recording
 
-A shot can record what it draws beside its PNG, as `saved.mp4` or `saved.apng`:
+A shot can record what it draws beside its PNG, as `saved.mp4`, `saved.apng` or `saved.gif`:
 
 ```toml
 [[shot]]
@@ -617,6 +620,7 @@ play = "saves_after_a_moment"
 record = { fps = 30 } # a play shot records the whole play, so it takes no `seconds`
 video = "failing" # optional; "always" unless set
 # `hold = 0.5`: seconds the recording pauses at each step's end, 0 for none; `gallery.toml`'s unless set
+# `glide = "cubic-out"`: glide the pointer to each gesture; `true` for `gallery.toml`'s easing, `false` for none
 ```
 
 What a shot leaves unset, `gallery.toml`'s `[record]` sets for every recording of the catalog, and all but `format` for
@@ -624,9 +628,13 @@ its tests' videos, which are MP4; for `--render --record`, a flag overrides it f
 
 ```toml
 [record]
-format = "mp4" # or "apng", or both: ["apng", "mp4"]; `--record-format`
+format = "mp4" # or "apng", "gif", or several: ["apng", "gif"]; `--record-format`
 hold = 0.5 # `--record-hold`
 input = "bottom-left" # the keys and mouse panel: a corner, or false for none
+glide = false # or true (cubic-in-out), "linear", "cubic-in-out", "cubic-out", "off"; `--record-glide [EASING|off]`
+glide_speed = 1200 # points a second
+glide_time = [0.15, 0.6] # fewest and most seconds a glide takes, up to 5
+glide_dwell = 0.2 # seconds resting after a glide before acting, up to 5
 ```
 
 ```bash
@@ -639,12 +647,18 @@ machine renders. egui's own animations and the text cursor's blink, off for stil
 A play clicks in a couple of frames, too fast to follow, so its recording pauses on each step's last frame for `hold`
 seconds (`--record-hold`). The pause is only in the file: the play draws the same frames whether it records or not.
 
+A gesture moves the pointer in one frame, so it jumps between widgets. With `glide` on, the recording first glides it
+there along a slight arc, over the scene as it stands, taking time by distance (`glide_speed`, within `glide_time`),
+then rests `glide_dwell` seconds before it presses, types or scrolls. Drags and the first pointer don't glide. Only the
+file has it; the play draws the same frames.
+
 A play's recording draws the pointer where it is, lit while a button is held and for 0.3 s after a press so a click can
 be seen. It shows the input as a tutorial's screencast would: the keys pressed in the last moment and a mouse with its
 pressed button lit, in a panel in the corner `input` names. Both are laid over the recorded frames only; the shot's PNG,
 step screenshots and screenshot checks have no pointer, as a real screenshot has none.
 [`studio.scene.rs`](template/studio.scene.rs) is a scene to watch it on: a play that clicks, types, presses shortcuts,
-drags and scrolls across a scene filling its stage.
+drags and scrolls across a scene filling its stage. [`tasks.scene.rs`](template/tasks.scene.rs), a task board toured at
+`Pace::showcase()`, is the showcase; `just showcase` records it, gliding, as an MP4 and a GIF.
 
 The pointer is gallery's own unless `gallery.toml` names one, for a showcase in a product's own look. It takes an SVG,
 so it is sharp at any scale, and a second one for while a button is held. Each is drawn at its `width` and `height` in
@@ -666,6 +680,14 @@ cursor_hotspot = [1, 1]
   compiler.
 - **APNG**: lossless and byte-identical between runs, so a recording can itself be compared, but few players can pause
   or seek it. A frame that repeats lengthens the one before it, and only the rectangle that changed is written.
+- **GIF**: shows anywhere an image does (chat, issues, READMEs), byte-identical between runs. Its limits:
+  - *256 colours per recording.* Up to 256 come out exact; past that, one palette serves every frame, undithered, so
+    close shades merge and gradients band.
+  - *No transparency*, as in an MP4.
+  - *At most 50 fps*: delays are whole hundredths, and browsers slow anything under 2. Up to 50 fps a frame lasts its
+    time to the hundredth (10, 20, 25 and 50 fps are even, 30 mixes 3 and 4); faster, frames snap to 1/50 s slots and
+    one landing on a taken slot is dropped, unless it is the last.
+  - *Larger and slower than an MP4*: it records into a temporary APNG and reads it twice at the end.
 
 Several formats (`--record-format apng,mp4`) are written from one run of the shot, every file from the same frames.
 
@@ -675,8 +697,8 @@ as it is recorded fails every format, since a recording's frames are all of one 
 report points at the other, and a play shot's `lost_videos` say why. A recording that cannot be written where it goes
 ends the run, and a file there that cannot be written over stays as it is.
 
-The report's `videos` has an entry per format: its path, the frames drawn, held and written, and what a frame cost on
-average: drawing the scene, rendering and reading it back, and encoding it.
+The report's `videos` has an entry per format: its path, frames drawn, held, glided and written, and the average cost of
+a frame to draw, render and read back, and encode.
 
 ## Testing a catalog
 

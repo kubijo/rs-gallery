@@ -1,7 +1,8 @@
-//! Recordings: a run of frames written as an animated PNG, or as an MP4.
+//! Recordings: a run of frames written as an animated PNG, an MP4 or a GIF.
 //!
 //! Frame *n* shows at exactly *n* / fps, whatever the format,
-//! so how fast a frame renders or encodes cannot move it.
+//! so how fast a frame renders or encodes cannot move it;
+//! a GIF can only come as close as its 50 frames a second allow.
 
 use std::{
     fs::File,
@@ -28,15 +29,19 @@ pub(crate) enum VideoFormat {
     /// H.264: small, lossy, and seekable in any player.
     #[default]
     Mp4,
+    /// Plays wherever an image shows, as in a chat or an issue:
+    /// 256 colours for the whole recording, at most 50 frames a second.
+    Gif,
 }
 
 impl VideoFormat {
-    const ALL: [Self; 2] = [Self::Apng, Self::Mp4];
+    const ALL: [Self; 3] = [Self::Apng, Self::Mp4, Self::Gif];
 
     pub(crate) fn extension(self) -> &'static str {
         match self {
             Self::Apng => "apng",
             Self::Mp4 => "mp4",
+            Self::Gif => "gif",
         }
     }
 
@@ -51,6 +56,7 @@ impl VideoFormat {
         match self {
             Self::Apng => Ok(Box::new(Apng::start(file, first, fps, grows)?)),
             Self::Mp4 => Ok(Box::new(Mp4::start(file, first, fps)?)),
+            Self::Gif => Ok(Box::new(Gif::start(file, first, fps)?)),
         }
     }
 }
@@ -62,8 +68,9 @@ impl std::str::FromStr for VideoFormat {
         match raw {
             "apng" => Ok(Self::Apng),
             "mp4" => Ok(Self::Mp4),
+            "gif" => Ok(Self::Gif),
             _ => Err(format!(
-                "`{raw}` is not a recording format: `apng` or `mp4`"
+                "`{raw}` is not a recording format: `apng`, `mp4` or `gif`"
             )),
         }
     }
@@ -170,6 +177,8 @@ pub(crate) struct Encoded {
     pub(crate) frames: u32,
     /// Frames added by holding the last one, beyond `frames`.
     pub(crate) held: u32,
+    /// Frames added by a glide, beyond `frames` and `held`.
+    pub(crate) glided: u32,
     /// Frames the file holds, a repeat having lengthened
     /// the frame before it instead.
     pub(crate) written: u32,
@@ -196,6 +205,7 @@ pub(crate) struct Recorder {
     deepest_queue: usize,
     count: u32,
     held: u32,
+    glided: u32,
     /// Why the encoder stopped, once that is known.
     failed: Option<String>,
 }
@@ -253,6 +263,7 @@ impl Recorder {
             deepest_queue: 0,
             count: 0,
             held: 0,
+            glided: 0,
             failed: None,
         })
     }
@@ -294,6 +305,31 @@ impl Recorder {
         Ok(())
     }
 
+    /// Hand over a frame of a glide: written as [`frame`](Self::frame)
+    /// writes one, counted apart from the frames drawn.
+    ///
+    /// # Errors
+    /// As [`frame`](Self::frame).
+    pub(crate) fn glide_frame(&mut self, image: RgbaImage) -> Result<(), String> {
+        self.send(Message::Frame(image))?;
+        self.glided += 1;
+        Ok(())
+    }
+
+    /// Show the last frame for `frames` frames more of a glide,
+    /// as [`hold`](Self::hold) does, counted apart from a pause.
+    ///
+    /// # Errors
+    /// As [`hold`](Self::hold).
+    pub(crate) fn glide_hold(&mut self, frames: u32) -> Result<(), String> {
+        if frames == 0 {
+            return Ok(());
+        }
+        self.send(Message::Hold(frames))?;
+        self.glided += frames;
+        Ok(())
+    }
+
     fn send(&mut self, message: Message) -> Result<(), String> {
         let Some(frames) = &self.frames else {
             return Err(self.failure());
@@ -323,6 +359,7 @@ impl Recorder {
         Ok(Encoded {
             frames: self.count,
             held: self.held,
+            glided: self.glided,
             deepest_queue: self.deepest_queue,
             ..encoded
         })
@@ -386,6 +423,7 @@ fn encode(
                 return Ok(Encoded {
                     frames: 0,
                     held: 0,
+                    glided: 0,
                     written,
                     encode: spent + started.elapsed(),
                     deepest_queue: 0,
@@ -712,6 +750,341 @@ impl Stream for Mp4 {
         let mut writer = mp4.muxer.into_writer();
         writer.flush().map_err(|e| e.to_string())?;
         Ok(mp4.written)
+    }
+}
+
+/// A GIF, recorded losslessly into a temporary APNG first:
+/// its one palette is of every frame, so it is only written once all are in.
+struct Gif {
+    apng: Apng,
+    /// Removed when dropped, however the recording ends.
+    scratch: tempfile::NamedTempFile,
+    file: File,
+    fps: u16,
+}
+
+/// Every temporary APNG a GIF was recorded into, the encoder thread's own.
+#[cfg(test)]
+static GIF_SCRATCHES: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// The most frames a second a GIF plays as written:
+/// browsers slow a delay under 2 hundredths of a second to 10.
+const GIF_FPS: u16 = 50;
+
+impl Gif {
+    fn start(file: File, first: RgbaImage, fps: u16) -> Result<Self, String> {
+        let scratch = tempfile::Builder::new()
+            .prefix("gallery-gif-")
+            .suffix(".apng")
+            .tempfile()
+            .map_err(|e| format!("create a temporary APNG to record the GIF into: {e}"))?;
+        let apng = scratch
+            .as_file()
+            .try_clone()
+            .map_err(|e| format!("open the temporary APNG: {e}"))?;
+        #[cfg(test)]
+        GIF_SCRATCHES
+            .lock()
+            .expect("the scratch list")
+            .push(scratch.path().to_owned());
+        Ok(Self {
+            apng: Apng::start(apng, first, fps, false)?,
+            scratch,
+            file,
+            fps,
+        })
+    }
+}
+
+impl Stream for Gif {
+    fn push(&mut self, image: RgbaImage) -> Result<(), String> {
+        self.apng.push(image)
+    }
+
+    fn hold(&mut self, frames: u32) -> Result<(), String> {
+        self.apng.hold(frames)
+    }
+
+    fn finish(self: Box<Self>) -> Result<u32, String> {
+        let Self {
+            apng,
+            scratch,
+            file,
+            fps,
+        } = *self;
+        Box::new(apng).finish()?;
+        let path = Utf8Path::from_path(scratch.path()).ok_or_else(|| {
+            format!(
+                "the temporary {} is no UTF-8 path",
+                scratch.path().display()
+            )
+        })?;
+        let written = write_gif(path, file, fps)?;
+        scratch
+            .close()
+            .map_err(|e| format!("remove the temporary APNG: {e}"))?;
+        Ok(written)
+    }
+}
+
+/// Write the APNG at `apng`, of `fps`, into `gif`, each frame as what changed of it;
+/// how many frames it holds.
+///
+/// Up to [`GIF_FPS`], frames last their time to the hundredth.
+/// Faster, they take 1/[`GIF_FPS`] s slots, and one on a taken slot is dropped unless it is the last.
+fn write_gif(apng: &Utf8Path, gif: File, fps: u16) -> Result<u32, String> {
+    let palette = GifPalette::of(apng)?;
+    let slots_a_second = if fps <= GIF_FPS {
+        100
+    } else {
+        u64::from(GIF_FPS)
+    };
+    let slot = |frame: u64| (frame * slots_a_second + u64::from(fps) / 2) / u64::from(fps);
+    let hundredths = |slots: u64| u16::try_from(slots * 100 / slots_a_second).unwrap_or(u16::MAX);
+    let mut out = GifOut {
+        file: Some(gif),
+        encoder: None,
+        written: None,
+        frames: 0,
+    };
+    let mut pending: Option<(RgbaImage, u64)> = None;
+    let mut at = 0;
+    each_shown(apng, |canvas, (shows, _)| {
+        let slots = slot(at + u64::from(shows)) - slot(at);
+        at += u64::from(shows);
+        match &mut pending {
+            Some((was, length)) if was == canvas => *length += slots,
+            Some((was, length)) if *length == 0 => {
+                was.clone_from(canvas);
+                *length = slots;
+            }
+            Some((was, length)) => {
+                out.write(&palette, was, hundredths(*length))?;
+                was.clone_from(canvas);
+                *length = slots;
+            }
+            None => pending = Some((canvas.clone(), slots)),
+        }
+        Ok(())
+    })?;
+    let (last, length) = pending.ok_or_else(|| "the recording has no frame".to_owned())?;
+    out.write(&palette, &last, hundredths(length.max(1)))?;
+    out.finish()
+}
+
+/// A GIF as its frames are written: the encoder, started with the first,
+/// and the canvas a viewer shows after the last.
+struct GifOut {
+    file: Option<File>,
+    encoder: Option<gif::Encoder<BufWriter<File>>>,
+    written: Option<RgbaImage>,
+    frames: u32,
+}
+
+impl GifOut {
+    /// Show `canvas` for `delay` hundredths of a second, as what changed of it.
+    fn write(
+        &mut self,
+        palette: &GifPalette,
+        canvas: &RgbaImage,
+        delay: u16,
+    ) -> Result<(), String> {
+        let error = |e: gif::EncodingError| format!("write the GIF: {e}");
+        let encoder = match &mut self.encoder {
+            Some(encoder) => encoder,
+            None => {
+                let (width, height) = gif_size(canvas)?;
+                let file = self.file.take().ok_or("BUG: a GIF started twice")?;
+                let mut started =
+                    gif::Encoder::new(BufWriter::new(file), width, height, &palette.colours)
+                        .map_err(error)?;
+                started.set_repeat(gif::Repeat::Infinite).map_err(error)?;
+                self.encoder.insert(started)
+            }
+        };
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: canvas.width(),
+            height: canvas.height(),
+        };
+        // A canvas the same as the one shown still needs a frame to last its time: one pixel.
+        let area = match &self.written {
+            Some(was) => changed(was, canvas).unwrap_or(Rect {
+                width: 1,
+                height: 1,
+                ..whole
+            }),
+            None => whole,
+        };
+        encoder
+            .write_frame(&palette.frame(canvas, area, delay)?)
+            .map_err(error)?;
+        self.frames += 1;
+        match &mut self.written {
+            Some(was) => was.clone_from(canvas),
+            None => self.written = Some(canvas.clone()),
+        }
+        Ok(())
+    }
+
+    /// Close the file, returning how many frames it holds.
+    fn finish(self) -> Result<u32, String> {
+        let encoder = self
+            .encoder
+            .ok_or("BUG: a GIF finished before its first frame")?;
+        // Dropped, a `BufWriter` would lose the error of the flush it makes.
+        encoder
+            .into_inner()
+            .map_err(|e| format!("write the GIF: {e}"))?
+            .flush()
+            .map_err(|e| format!("write the GIF: {e}"))?;
+        Ok(self.frames)
+    }
+}
+
+/// A frame's size as a GIF holds it, up to 65535 either way.
+fn gif_size(frame: &RgbaImage) -> Result<(u16, u16), String> {
+    let side = |side: u32| u16::try_from(side).ok();
+    side(frame.width())
+        .zip(side(frame.height()))
+        .ok_or_else(|| {
+            format!(
+                "{}×{} is past the 65535 a GIF can be",
+                frame.width(),
+                frame.height()
+            )
+        })
+}
+
+/// How long each colour of the APNG at `path` shows, in pixel-frames, in a fixed order:
+/// its first frame counted whole, and after it only what changed.
+fn colour_counts(path: &Utf8Path) -> Result<std::collections::BTreeMap<[u8; 3], u64>, String> {
+    let rgb = |pixel: &image::Rgba<u8>| [pixel.0[0], pixel.0[1], pixel.0[2]];
+    let mut on_screen = std::collections::HashMap::<[u8; 3], u64>::new();
+    let mut shown: Option<RgbaImage> = None;
+    let mut counts = std::collections::BTreeMap::<[u8; 3], u64>::new();
+    each_shown(path, |canvas, (shows, _)| {
+        match &shown {
+            None => {
+                for pixel in canvas.pixels() {
+                    *on_screen.entry(rgb(pixel)).or_default() += 1;
+                }
+            }
+            Some(was) => {
+                if let Some(area) = changed(was, canvas) {
+                    for y in area.y..area.y + area.height {
+                        for x in area.x..area.x + area.width {
+                            let gone = rgb(was.get_pixel(x, y));
+                            if let Some(left) = on_screen.get_mut(&gone) {
+                                *left -= 1;
+                                if *left == 0 {
+                                    on_screen.remove(&gone);
+                                }
+                            }
+                            *on_screen.entry(rgb(canvas.get_pixel(x, y))).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        for (&colour, &pixels) in &on_screen {
+            *counts.entry(colour).or_default() += pixels * u64::from(shows);
+        }
+        shown = Some(canvas.clone());
+        Ok(())
+    })?;
+    Ok(counts)
+}
+
+/// A recording's one GIF palette, of up to 256 colours,
+/// and the index into it of each colour the recording shows.
+struct GifPalette {
+    /// Red, green and blue of each, in turn.
+    colours: Vec<u8>,
+    index: std::collections::HashMap<[u8; 3], u8>,
+}
+
+impl GifPalette {
+    /// The palette of the APNG at `path`, in the same order on every run:
+    /// its own colours when it shows no more than 256,
+    /// else Wu's quantizer, in Oklab, over them all, each counted as often as it shows.
+    fn of(path: &Utf8Path) -> Result<Self, String> {
+        use quantette::{
+            PaletteCounts, PaletteSize,
+            color_map::{IndexedColorMap as _, NearestNeighborColorMap},
+            color_space::{oklab_to_srgb8, srgb8_to_oklab},
+            deps::palette::Srgb,
+            wu::{BinnerF32x3, WuF32x3},
+        };
+        let counts = colour_counts(path)?;
+        if counts.len() <= 256 {
+            let colours = counts.keys().flatten().copied().collect();
+            let index = counts
+                .keys()
+                .zip(0..=u8::MAX)
+                .map(|(&colour, at)| (colour, at))
+                .collect();
+            return Ok(Self { colours, index });
+        }
+        let total: u64 = counts.values().sum();
+        // `PaletteCounts::new` refuses counts adding up past a u32;
+        // half of one leaves room for the colours each rounded up to 1.
+        let scale = total / u64::from(u32::MAX / 2) + 1;
+        let (seen, weights): (Vec<Srgb<u8>>, Vec<u32>) = counts
+            .iter()
+            .map(|(&[r, g, b], &count)| {
+                let weight = u32::try_from((count / scale).max(1)).unwrap_or(u32::MAX);
+                (Srgb::new(r, g, b), weight)
+            })
+            .unzip();
+        let seen_oklab = srgb8_to_oklab(&seen);
+        let counted = PaletteCounts::new(seen_oklab.clone(), weights)
+            .map_err(|_| "BUG: colour counts past a u32".to_owned())?;
+        let palette = WuF32x3::run_palette_counts(&counted, BinnerF32x3::oklab_from_srgb8())
+            .ok_or("a recording with no colour")?
+            .palette(PaletteSize::MAX);
+        let colours = oklab_to_srgb8(&palette)
+            .into_iter()
+            .flat_map(|colour| [colour.red, colour.green, colour.blue])
+            .collect();
+        let nearest = NearestNeighborColorMap::new(palette);
+        let index = seen
+            .iter()
+            .zip(&seen_oklab)
+            .map(|(rgb, oklab)| ([rgb.red, rgb.green, rgb.blue], nearest.palette_index(oklab)))
+            .collect();
+        Ok(Self { colours, index })
+    }
+
+    /// `area` of `canvas` as a GIF frame of `delay` hundredths of a second, over the ones before.
+    fn frame(
+        &self,
+        canvas: &RgbaImage,
+        area: Rect,
+        delay: u16,
+    ) -> Result<gif::Frame<'static>, String> {
+        let indices = (area.y..area.y + area.height)
+            .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let [r, g, b, _] = canvas.get_pixel(x, y).0;
+                self.index
+                    .get(&[r, g, b])
+                    .copied()
+                    .ok_or("BUG: a colour the palette never saw")
+            })
+            .collect::<Result<Vec<u8>, _>>()?;
+        let side = |side: u32| u16::try_from(side).map_err(|_| "BUG: a GIF frame past 65535");
+        Ok(gif::Frame {
+            delay,
+            dispose: gif::DisposalMethod::Keep,
+            left: side(area.x)?,
+            top: side(area.y)?,
+            width: side(area.width)?,
+            height: side(area.height)?,
+            buffer: indices.into(),
+            ..gif::Frame::default()
+        })
     }
 }
 
@@ -1438,5 +1811,151 @@ mod tests {
         let sink = Recorder::create(&scratch("empty"), 10, VideoFormat::Apng).expect("a recording");
         let error = sink.finish().expect_err("no frames");
         assert!(error.contains("at least one frame"), "{error}");
+    }
+
+    fn record_gif(name: &str, fps: u16, frames: &[RgbaImage]) -> (Utf8PathBuf, Encoded) {
+        let path = scratch(name).with_extension("gif");
+        let mut sink = Recorder::create(&path, fps, VideoFormat::Gif).expect("a recording");
+        for frame in frames {
+            sink.frame(frame.clone())
+                .expect("the encoder takes the frame");
+        }
+        (path, sink.finish().expect("the recording closes"))
+    }
+
+    /// Each frame of a GIF: its place and size, its delay, and its pixels.
+    fn gif_frames(path: &Utf8Path) -> Vec<([u16; 4], u16, Vec<u8>)> {
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let file = File::open(path).expect("the GIF");
+        let mut decoder = options.read_info(file).expect("a GIF");
+        let mut frames = Vec::new();
+        while let Some(frame) = decoder.read_next_frame().expect("a frame") {
+            let place = [frame.left, frame.top, frame.width, frame.height];
+            frames.push((place, frame.delay, frame.buffer.to_vec()));
+        }
+        frames
+    }
+
+    #[test]
+    fn a_gif_writes_what_changed_of_each_frame_for_its_time_in_its_colours() {
+        let base = solid(20, 10, 3);
+        let dot = dotted(&base, 1, 1);
+        let frames = [base.clone(), dot.clone(), dot, dotted(&base, 18, 9)];
+        let (path, encoded) = record_gif("gif-changed", 10, &frames);
+        let written = gif_frames(&path);
+        let places: Vec<([u16; 4], u16)> = written
+            .iter()
+            .map(|(place, delay, _)| (*place, *delay))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                ([0, 0, 20, 10], 10),
+                ([1, 1, 1, 1], 20),
+                ([1, 1, 18, 9], 10)
+            ],
+            "the whole first frame, then only what changed, a repeat lengthening its frame"
+        );
+        assert_eq!(encoded.written, 3);
+        assert_eq!(written[0].2[..4], [3, 3, 3, 255], "the shade, exactly");
+        assert_eq!(written[1].2, [255, 0, 0, 255], "the dot, exactly");
+    }
+
+    /// `count` frames, each another, as a GIF at `fps`: its frames' delays, and the last one's pixels.
+    fn gif_delays(count: u32, fps: u16) -> (Vec<u16>, Vec<u8>) {
+        let base = solid(8, 2, 0);
+        let frames: Vec<RgbaImage> = (0..count).map(|x| dotted(&base, x, 0)).collect();
+        let (path, _) = record_gif(&format!("gif-{count}-at-{fps}"), fps, &frames);
+        let written = gif_frames(&path);
+        let last = written.last().expect("a frame").2.clone();
+        (
+            written.into_iter().map(|(_, delay, _)| delay).collect(),
+            last,
+        )
+    }
+
+    #[test]
+    fn a_gif_shows_each_frame_for_its_time_to_the_hundredth_up_to_50_fps() {
+        assert_eq!(gif_delays(6, 25).0, [4; 6]);
+        assert_eq!(gif_delays(6, 20).0, [5; 6]);
+        assert_eq!(
+            gif_delays(6, 30).0,
+            [3, 4, 3, 3, 4, 3],
+            "each frame from its time to the next, rounded"
+        );
+    }
+
+    #[test]
+    fn a_faster_gif_takes_50_fps_slots_and_ends_on_its_last_frame() {
+        assert_eq!(
+            gif_delays(6, 60).0,
+            [2; 5],
+            "the frame landing on a slot already taken is dropped, and 0.1 s kept"
+        );
+        let (delays, last) = gif_delays(4, 60);
+        assert_eq!(
+            delays, [2; 4],
+            "a last frame on a taken slot shows all the same"
+        );
+        assert_eq!(
+            last,
+            [0, 0, 0, 255, 255, 0, 0, 255],
+            "the dot moved from where the frame before put it to where the last did"
+        );
+        assert_eq!(
+            gif_delays(1, 120).0,
+            [2],
+            "a lone frame too quick for a slot gets one"
+        );
+    }
+
+    #[test]
+    fn a_gif_holds_a_frame_and_leaves_no_temporary_apng() {
+        let path = scratch("gif-held").with_extension("gif");
+        let mut sink = Recorder::create(&path, 10, VideoFormat::Gif).expect("a recording");
+        sink.frame(solid(4, 4, 0)).expect("a frame");
+        sink.frame(solid(4, 4, 9)).expect("a frame");
+        sink.hold(5).expect("held");
+        sink.finish().expect("the recording closes");
+        let delays: Vec<u16> = gif_frames(&path)
+            .iter()
+            .map(|(_, delay, _)| *delay)
+            .collect();
+        assert_eq!(delays, [10, 60], "the held frame shows 6 frames at 10 fps");
+        let scratches = GIF_SCRATCHES.lock().expect("the scratch list").clone();
+        assert!(!scratches.is_empty(), "it was recorded into one");
+        assert!(
+            scratches.iter().all(|scratch| !scratch.exists()),
+            "and it is gone: {scratches:?}"
+        );
+    }
+
+    #[test]
+    fn a_gif_of_no_more_than_256_colours_keeps_each_exactly() {
+        let mut stripes = solid(4, 2, 27);
+        for x in 0..4 {
+            stripes.put_pixel(x, 1, image::Rgba([32, 32, 32, 255]));
+        }
+        let (path, _) = record_gif("gif-close-shades", 10, &[stripes]);
+        let pixels = &gif_frames(&path)[0].2;
+        assert_eq!(pixels[..4], [27, 27, 27, 255]);
+        assert_eq!(
+            pixels[16..20],
+            [32, 32, 32, 255],
+            "a shade 5 apart stays its own"
+        );
+    }
+
+    #[test]
+    fn the_same_frames_write_the_same_gif() {
+        let base = solid(20, 10, 3);
+        let frames = [base.clone(), dotted(&base, 1, 1), dotted(&base, 18, 9)];
+        let (first, _) = record_gif("same-gif-a", 25, &frames);
+        let (second, _) = record_gif("same-gif-b", 25, &frames);
+        assert_eq!(
+            std::fs::read(first).expect("first"),
+            std::fs::read(second).expect("second")
+        );
     }
 }

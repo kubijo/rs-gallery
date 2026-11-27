@@ -19,9 +19,13 @@ title = "{{title}}"
 
 # Every recording's defaults.
 # [record]
-# format = "mp4" # or "apng", or ["apng", "mp4"]
+# format = "mp4" # or "apng", "gif", or ["apng", "mp4"]
 # hold = 0.5 # seconds paused at each step
 # input = "bottom-left" # keys and mouse panel corner, or false
+# glide = false # or "off", true, "linear", "cubic-in-out", "cubic-out"
+# glide_speed = 1200 # points a second
+# glide_time = [0.15, 0.6] # fewest and most seconds, up to 5
+# glide_dwell = 0.2 # seconds resting before the next action
 # cursor_default = "brand/cursor.svg" # colour-filled SVG paths only
 # cursor_pressed = "brand/cursor-pressed.svg"
 # cursor_hotspot = [1, 1]

@@ -30,17 +30,86 @@ pub struct Config {
     pub record: Record,
 }
 
-/// `[record]`: how every recording of the catalog is made, unless a shot or a flag says otherwise.
+/// `[record]`: how every recording of the catalog
+/// is made, unless a shot or a flag says otherwise.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Record {
-    /// One format, or several recorded from the same frames; unset leaves it to gallery.
+    /// One format, or several recorded from
+    /// the same frames; unset leaves it to gallery.
     pub format: Option<Vec<Format>>,
-    /// Seconds a play's recording pauses at each step's end; unset leaves it to gallery.
+    /// Seconds a play's recording pauses
+    /// at each step's end; unset leaves it to gallery.
     pub hold: Option<f32>,
     /// The keys and mouse panel.
     pub input: Input,
     /// The catalog's own, else gallery's.
     pub cursor: Option<Cursor>,
+    pub glide: Glide,
+}
+
+/// How a play's recording moves the pointer to each gesture.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Glide {
+    /// `None` leaves the pointer to jump.
+    pub easing: Option<Easing>,
+    /// Points a second.
+    pub speed: f32,
+    /// The fewest and most seconds
+    /// one takes, whatever the distance.
+    pub time: [f32; 2],
+    /// Seconds the pointer rests after a glide before it acts.
+    pub dwell: f32,
+}
+
+impl Default for Glide {
+    fn default() -> Self {
+        Self {
+            easing: None,
+            speed: 1200.0,
+            time: [0.15, 0.6],
+            dwell: 0.2,
+        }
+    }
+}
+
+/// The most seconds `glide_time` and `glide_dwell` take.
+const LONGEST_GLIDE: f32 = 5.0;
+
+/// How a glide speeds up and slows down along its way.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Easing {
+    Linear,
+    #[default]
+    CubicInOut,
+    CubicOut,
+}
+
+impl Easing {
+    /// # Errors
+    /// When `name` is none of them, listing those there are.
+    pub fn named(name: &str) -> Result<Self, String> {
+        match name {
+            "linear" => Ok(Self::Linear),
+            "cubic-in-out" => Ok(Self::CubicInOut),
+            "cubic-out" => Ok(Self::CubicOut),
+            _ => Err(format!(
+                "`{name}` is no easing: `linear`, `cubic-in-out` or `cubic-out`"
+            )),
+        }
+    }
+
+    /// The easing `name`d, or `None` for `off`.
+    ///
+    /// # Errors
+    /// When `name` is neither, listing what it can be.
+    pub fn or_off(name: &str) -> Result<Option<Self>, String> {
+        match name {
+            "off" => Ok(None),
+            _ => Self::named(name)
+                .map(Some)
+                .map_err(|e| format!("{e}, or `off`")),
+        }
+    }
 }
 
 /// What a recording is written as.
@@ -48,6 +117,7 @@ pub struct Record {
 pub enum Format {
     Mp4,
     Apng,
+    Gif,
 }
 
 impl Format {
@@ -55,8 +125,9 @@ impl Format {
         match name {
             "mp4" => Ok(Self::Mp4),
             "apng" => Ok(Self::Apng),
+            "gif" => Ok(Self::Gif),
             _ => Err(format!(
-                "[record] `{name}` is no format: `mp4`, `apng`, or a list of them"
+                "[record] `{name}` is no format: `mp4`, `apng`, `gif`, or a list of them"
             )),
         }
     }
@@ -110,9 +181,31 @@ enum DeclaredInput {
     In(String),
 }
 
+/// `glide` as written, in `[record]`, a recipe's shot or `--record-glide`:
+/// on or off, or the easing's name.
+#[derive(Clone, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(untagged, expecting = "an easing such as `cubic-in-out`, or `false`")]
+pub enum GlideSetting {
+    On(bool),
+    Eased(String),
+}
+
+impl GlideSetting {
+    /// Its easing, `None` for off; on is `catalog`'s, else [`Easing::default`].
+    ///
+    /// # Errors
+    /// For a name that is no easing.
+    pub fn easing(&self, catalog: Option<Easing>) -> Result<Option<Easing>, String> {
+        match self {
+            Self::On(on) => Ok(on.then(|| catalog.unwrap_or_default())),
+            Self::Eased(name) => Easing::or_off(name),
+        }
+    }
+}
+
 /// `format` as written: one name, or a list.
 #[derive(serde::Deserialize)]
-#[serde(untagged, expecting = "`mp4`, `apng`, or a list of them")]
+#[serde(untagged, expecting = "`mp4`, `apng`, `gif`, or a list of them")]
 enum DeclaredFormat {
     One(String),
     Many(Vec<String>),
@@ -139,10 +232,49 @@ struct DeclaredRecord {
     cursor_default: Option<Utf8PathBuf>,
     cursor_pressed: Option<Utf8PathBuf>,
     cursor_hotspot: Option<[f32; 2]>,
+    glide: Option<GlideSetting>,
+    glide_speed: Option<f32>,
+    glide_time: Option<[f32; 2]>,
+    glide_dwell: Option<f32>,
 }
 
 impl DeclaredRecord {
+    fn glide(&self) -> Result<Glide, String> {
+        let unset = Glide::default();
+        let easing = match &self.glide {
+            None => None,
+            Some(glide) => glide.easing(None).map_err(|e| format!("[record] {e}"))?,
+        };
+        let speed = self.glide_speed.unwrap_or(unset.speed);
+        if !speed.is_finite() || speed <= 0.0 {
+            return Err(format!(
+                "[record] glide_speed is {speed}; it is points a second, more than 0"
+            ));
+        }
+        let time = self.glide_time.unwrap_or(unset.time);
+        let [fewest, most] = time;
+        if !(0.0 <= fewest && fewest <= most && most <= LONGEST_GLIDE) {
+            return Err(format!(
+                "[record] glide_time is {time:?}; it is the fewest and most seconds, \
+                 0 to {LONGEST_GLIDE}"
+            ));
+        }
+        let dwell = self.glide_dwell.unwrap_or(unset.dwell);
+        if !(0.0..=LONGEST_GLIDE).contains(&dwell) {
+            return Err(format!(
+                "[record] glide_dwell is {dwell}; it is seconds, 0 to {LONGEST_GLIDE}"
+            ));
+        }
+        Ok(Glide {
+            easing,
+            speed,
+            time,
+            dwell,
+        })
+    }
+
     fn resolve(self, dir: &Utf8Path) -> Result<Record, String> {
+        let glide = self.glide()?;
         let cursor = match (self.cursor_default, self.cursor_pressed) {
             (Some(image), Some(pressed)) => Some(Cursor {
                 image: dir.join(image),
@@ -182,6 +314,7 @@ impl DeclaredRecord {
             .map(|names| names.iter().map(|name| Format::named(name)).collect())
             .transpose()?;
         Ok(Record {
+            glide,
             format,
             hold: self.hold,
             input: match self.input {
@@ -971,6 +1104,27 @@ mod tests {
         Config::read(&root.join("gallery.toml"))
     }
 
+    /// The config of a tree holding `scene.rs` and `files`,
+    /// globbing that scene, with `tables` beside it.
+    fn config_with(name: &str, files: &[&str], tables: toml::Table) -> Result<Config, String> {
+        let mut toml = toml::toml! { scene_globs = ["scene.rs"] };
+        toml.extend(tables);
+        let root = tree(name, &[&["scene.rs"], files].concat());
+        let text = toml::to_string(&toml).expect("BUG: a table writes as TOML");
+        fs::write(root.join("gallery.toml"), text).expect("write the config");
+        Config::read(&root.join("gallery.toml"))
+    }
+
+    /// `record` as a config's `[record]`.
+    fn with_record(record: toml::Table) -> toml::Table {
+        toml::Table::from_iter([("record".to_owned(), record.into())])
+    }
+
+    /// [`config_with`] no more files than the scene, `record` its `[record]`.
+    fn record_config(name: &str, record: toml::Table) -> Result<Config, String> {
+        config_with(name, &[], with_record(record))
+    }
+
     #[test]
     fn a_snapshots_table_sets_the_budget_and_one_per_renderer_over_it() {
         let config = read_config(
@@ -1019,31 +1173,32 @@ mod tests {
 
     #[test]
     fn a_tests_table_says_which_videos_to_keep_and_where() {
-        let read = |name, tests: &str| {
-            read_config(name, &format!("scene_globs = [\"scene.rs\"]\n{tests}"))
-        };
-        let unset = read("tests-unset", "").expect("a readable config").tests;
+        let unset = config_with("tests-unset", &[], toml::Table::new())
+            .expect("a readable config")
+            .tests;
         assert_eq!((unset.video, unset.output), (Video::Failing, None));
 
-        let config = read(
+        let config = config_with(
             "tests-set",
-            indoc::indoc! {r#"
+            &[],
+            toml::toml! {
                 [tests]
                 video = "always"
                 output = "out/tests"
-            "#},
+            },
         )
         .expect("a readable config");
         assert_eq!(config.tests.video, Video::Always);
         let dir = config.path.parent().expect("a directory");
         assert_eq!(config.tests.output, Some(dir.join("out/tests")));
 
-        let error = read(
+        let error = config_with(
             "tests-misspelt",
-            indoc::indoc! {r#"
+            &[],
+            toml::toml! {
                 [tests]
                 video = "on"
-            "#},
+            },
         )
         .err()
         .expect("an unknown value is an error");
@@ -1052,23 +1207,23 @@ mod tests {
 
     #[test]
     fn a_record_table_names_both_cursors_and_where_they_point() {
-        let read = |name, record: &str| {
-            let root = tree(name, &["scene.rs", "art/cursor.svg", "art/pressed.svg"]);
-            let toml = format!("scene_globs = [\"scene.rs\"]\n{record}");
-            fs::write(root.join("gallery.toml"), toml).expect("write the config");
-            Config::read(&root.join("gallery.toml"))
+        let read = |name, record| {
+            config_with(
+                name,
+                &["art/cursor.svg", "art/pressed.svg"],
+                with_record(record),
+            )
         };
-        let unset = read("record-unset", "").expect("a readable config");
+        let unset = read("record-unset", toml::Table::new()).expect("a readable config");
         assert_eq!(unset.record.cursor, None);
 
         let config = read(
             "record-set",
-            indoc::indoc! {r#"
-                [record]
+            toml::toml! {
                 cursor_default = "art/cursor.svg"
                 cursor_pressed = "art/pressed.svg"
                 cursor_hotspot = [1, 2.5]
-            "#},
+            },
         )
         .expect("a readable config");
         let dir = config.path.parent().expect("a directory");
@@ -1083,11 +1238,10 @@ mod tests {
 
         let gone = read(
             "record-gone",
-            indoc::indoc! {r#"
-                [record]
+            toml::toml! {
                 cursor_default = "art/gone.svg"
                 cursor_pressed = "art/pressed.svg"
-            "#},
+            },
         )
         .expect("a missing cursor fails the recording that draws it, not the config");
         let dir = gone.path.parent().expect("a directory");
@@ -1099,22 +1253,27 @@ mod tests {
         for (name, record, says) in [
             (
                 "record-half",
-                "[record]\ncursor_default = \"art/cursor.svg\"",
+                toml::toml! { cursor_default = "art/cursor.svg" },
                 "`cursor_default` and `cursor_pressed` go together",
             ),
             (
                 "record-hotspot-nan",
-                "[record]\ncursor_default = \"art/cursor.svg\"\ncursor_pressed = \"art/pressed.svg\"\ncursor_hotspot = [nan, 1]",
+                toml::toml! {
+                    cursor_default = "art/cursor.svg"
+                    cursor_pressed = "art/pressed.svg"
+                    // toml 1.2's `nan` expands to the deprecated `std::f64::NAN`.
+                    cursor_hotspot = [(f64::NAN), 1]
+                },
                 "[record] cursor_hotspot is [NaN, 1.0]",
             ),
             (
                 "record-hotspot-alone",
-                "[record]\ncursor_hotspot = [1, 1]",
+                toml::toml! { cursor_hotspot = [1, 1] },
                 "`cursor_hotspot` is of a cursor",
             ),
             (
                 "record-unrenamed",
-                "[record]\ncursor = \"art/cursor.svg\"",
+                toml::toml! { cursor = "art/cursor.svg" },
                 "unknown field `cursor`",
             ),
         ] {
@@ -1125,12 +1284,12 @@ mod tests {
 
     #[test]
     fn a_record_table_sets_how_every_recording_is_made() {
-        let read = |name, record: &str| {
-            read_config(name, &format!("scene_globs = [\"scene.rs\"]\n{record}"))
+        let read = |name, record| {
+            record_config(name, record)
+                .map(|config| config.record)
+                .expect("a readable config")
         };
-        let unset = read("record-defaults", "")
-            .expect("a readable config")
-            .record;
+        let unset = read("record-defaults", toml::Table::new());
         assert_eq!(
             (unset.format, unset.hold, unset.input),
             (None, None, Input::In(Corner::BottomLeft))
@@ -1138,72 +1297,160 @@ mod tests {
 
         let set = read(
             "record-settings",
-            indoc::indoc! {r#"
-                [record]
+            toml::toml! {
                 format = ["apng", "mp4"]
                 hold = 0.25
                 input = "top-right"
-            "#},
-        )
-        .expect("a readable config")
-        .record;
+            },
+        );
         assert_eq!(set.format, Some(vec![Format::Apng, Format::Mp4]));
         assert_eq!(set.hold, Some(0.25));
         assert_eq!(set.input, Input::In(Corner::TopRight));
 
         let one = read(
             "record-one-format",
-            "[record]\nformat = \"apng\"\ninput = false",
-        )
-        .expect("a readable config")
-        .record;
+            toml::toml! {
+                format = "apng"
+                input = false
+            },
+        );
         assert_eq!(
             (one.format, one.input),
             (Some(vec![Format::Apng]), Input::Off)
         );
-        let on = read("record-input-on", "[record]\ninput = true")
-            .expect("a readable config")
-            .record;
+        let on = read("record-input-on", toml::toml! { input = true });
         assert_eq!(on.input, Input::In(Corner::BottomLeft));
 
         for (name, record, says) in [
             (
                 "record-hold-negative",
-                "[record]\nhold = -1",
+                toml::toml! { hold = -1 },
                 "[record] hold is -1",
             ),
             (
                 "record-corner",
-                "[record]\ninput = \"middle\"",
+                toml::toml! { input = "middle" },
                 "`middle` is no corner: `bottom-left`, `bottom-right`, `top-left` or `top-right`, or `false`",
             ),
             (
                 "record-format-both",
-                "[record]\nformat = \"both\"",
-                "`both` is no format: `mp4`, `apng`, or a list of them",
+                toml::toml! { format = "both" },
+                "`both` is no format: `mp4`, `apng`, `gif`, or a list of them",
             ),
             (
                 "record-format-unknown-in-list",
-                "[record]\nformat = [\"mp4\", \"webm\"]",
-                "`webm` is no format: `mp4`, `apng`, or a list of them",
+                toml::toml! { format = ["mp4", "webm"] },
+                "`webm` is no format: `mp4`, `apng`, `gif`, or a list of them",
             ),
             (
                 "record-no-format",
-                "[record]\nformat = []",
+                toml::toml! { format = [] },
                 "[record] format names none",
             ),
             (
                 "record-format-number",
-                "[record]\nformat = 4",
-                "`mp4`, `apng`, or a list of them",
+                toml::toml! { format = 4 },
+                "`mp4`, `apng`, `gif`, or a list of them",
             ),
             (
                 "record-input-number",
-                "[record]\ninput = 4",
+                toml::toml! { input = 4 },
                 "a corner such as `bottom-left`, or `false`",
             ),
         ] {
-            let error = read(name, record).err().expect("an error");
+            let error = record_config(name, record).err().expect("an error");
+            assert!(error.contains(says), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_record_table_sets_how_the_pointer_glides() {
+        let read = |name, record| record_config(name, record).map(|config| config.record.glide);
+        let unset = read("glide-unset", toml::Table::new()).expect("a readable config");
+        assert_eq!(
+            unset,
+            Glide {
+                easing: None,
+                speed: 1200.0,
+                time: [0.15, 0.6],
+                dwell: 0.2,
+            },
+            "off unless set, and how it would go"
+        );
+        for (name, record, easing) in [
+            (
+                "glide-on",
+                toml::toml! { glide = true },
+                Some(Easing::CubicInOut),
+            ),
+            ("glide-off", toml::toml! { glide = false }, None),
+            ("glide-off-named", toml::toml! { glide = "off" }, None),
+            (
+                "glide-linear",
+                toml::toml! { glide = "linear" },
+                Some(Easing::Linear),
+            ),
+            (
+                "glide-cubic-out",
+                toml::toml! { glide = "cubic-out" },
+                Some(Easing::CubicOut),
+            ),
+        ] {
+            let read = read(name, record).expect("a readable config");
+            assert_eq!(read.easing, easing, "{name}");
+        }
+        let paced = read(
+            "glide-paced",
+            toml::toml! {
+                glide_speed = 600
+                glide_time = [0.1, 0.4]
+                glide_dwell = 0
+            },
+        )
+        .expect("a readable config");
+        assert_eq!(
+            (paced.speed, paced.time, paced.dwell),
+            (600.0, [0.1, 0.4], 0.0)
+        );
+
+        for (name, record, says) in [
+            (
+                "glide-unknown",
+                toml::toml! { glide = "bounce" },
+                "[record] `bounce` is no easing: `linear`, `cubic-in-out` or `cubic-out`, or `off`",
+            ),
+            (
+                "glide-number",
+                toml::toml! { glide = 3 },
+                "an easing such as `cubic-in-out`, or `false`",
+            ),
+            (
+                "glide-still",
+                toml::toml! { glide_speed = 0 },
+                "[record] glide_speed is 0; it is points a second, more than 0",
+            ),
+            (
+                "glide-backwards",
+                toml::toml! { glide_time = [0.5, 0.1] },
+                "[record] glide_time is [0.5, 0.1]; it is the fewest and most seconds, 0 to 5",
+            ),
+            (
+                "glide-endless",
+                toml::toml! { glide_time = [1e9, 1e9] },
+                "0 to 5",
+            ),
+            (
+                "glide-dwelling-for-ever",
+                toml::toml! { glide_dwell = 60 },
+                "[record] glide_dwell is 60; it is seconds, 0 to 5",
+            ),
+            (
+                "glide-negative",
+                toml::toml! { glide_time = [-1, 1] },
+                "[record] glide_time is [-1.0, 1.0]",
+            ),
+        ] {
+            let error = read(name, record).expect_err("an error");
             assert!(error.contains(says), "{name}: {error}");
         }
     }

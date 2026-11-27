@@ -84,6 +84,8 @@ pub(super) struct InputLog {
     lit_for: u64,
     frame: u64,
     keys: VecDeque<(u64, String)>,
+    /// The text typed since the last key, which the newest entry quotes.
+    typing: Option<String>,
     pointer: Option<Pos2>,
     held: [bool; 3],
     pressed_at: [Option<u64>; 3],
@@ -106,6 +108,7 @@ impl InputLog {
             lit_for: frames(LIT_FOR),
             frame: 0,
             keys: VecDeque::new(),
+            typing: None,
             pointer: None,
             held: [false; 3],
             pressed_at: [None; 3],
@@ -124,11 +127,14 @@ impl InputLog {
                     repeat: false,
                     modifiers,
                     ..
-                } => self.list(
-                    egui::KeyboardShortcut::new(*modifiers, *key)
-                        .format(&egui::ModifierNames::NAMES, false),
-                ),
-                Event::Text(text) => self.list(format!("{text:?}")),
+                } => {
+                    self.typing = None;
+                    self.list(
+                        egui::KeyboardShortcut::new(*modifiers, *key)
+                            .format(&egui::ModifierNames::NAMES, false),
+                    );
+                }
+                Event::Text(text) => self.typed(text),
                 Event::PointerMoved(at) => self.pointer = Some(*at),
                 Event::PointerButton {
                     pos,
@@ -141,6 +147,7 @@ impl InputLog {
                         self.held[index] = *pressed;
                         if *pressed {
                             self.pressed_at[index] = Some(self.frame);
+                            self.typing = None;
                         }
                     }
                 }
@@ -148,6 +155,11 @@ impl InputLog {
                 _ => {}
             }
         }
+        self.expire();
+    }
+
+    /// Drop the keys whose time is up.
+    fn expire(&mut self) {
         while self
             .keys
             .front()
@@ -160,6 +172,39 @@ impl InputLog {
     /// Let `frames` pass with no input, as a recording's pause does.
     pub(super) fn hold(&mut self, frames: u32) {
         self.frame += u64::from(frames);
+    }
+
+    /// Let a frame pass with only the pointer moved, as a glide does.
+    pub(super) fn glide(&mut self, at: Pos2) {
+        self.frame += 1;
+        self.pointer = Some(at);
+        self.expire();
+    }
+
+    /// Where the pointer is, unless a drag holds it.
+    pub(super) fn free_pointer(&self) -> Option<Pos2> {
+        self.pointer.filter(|_| !self.held.contains(&true))
+    }
+
+    /// End the run being typed, so the next text lists apart from it.
+    pub(super) fn end_run(&mut self) {
+        self.typing = None;
+    }
+
+    /// Add `text` to the run being typed, or start one.
+    fn typed(&mut self, text: &str) {
+        match &mut self.typing {
+            Some(run) if !self.keys.is_empty() => {
+                run.push_str(text);
+                let quoted = format!("{run:?}");
+                self.keys.pop_back();
+                self.keys.push_back((self.frame, quoted));
+            }
+            _ => {
+                self.typing = Some(text.to_owned());
+                self.list(format!("{text:?}"));
+            }
+        }
     }
 
     fn list(&mut self, key: String) {
@@ -349,6 +394,30 @@ impl InputOverlay {
         self.log.hold(frames);
     }
 
+    pub(super) fn end_run(&mut self) {
+        self.log.end_run();
+    }
+
+    pub(super) fn log(&self) -> &InputLog {
+        &self.log
+    }
+
+    /// A frame of a glide: `scene` with the pointer at `at`.
+    ///
+    /// # Errors
+    /// When the overlay cannot be rendered.
+    pub(super) fn glide_over(
+        &mut self,
+        at: Pos2,
+        zoom: f32,
+        scene: &image::RgbaImage,
+    ) -> Result<image::RgbaImage, String> {
+        self.log.glide(at);
+        let mut frame = scene.clone();
+        self.layer.lay(&self.log.shown(zoom), &mut frame)?;
+        Ok(frame)
+    }
+
     /// Lay the input up to this frame, `events` included, over `frame`.
     ///
     /// # Errors
@@ -368,6 +437,9 @@ impl InputOverlay {
 thread_local! {
     /// Overlays this thread has opened.
     pub(crate) static OVERLAYS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The keys the last panel this thread laid over a frame listed.
+    pub(crate) static KEYS_LAID: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// What draws the input over a frame: a harness, and its last image,
@@ -412,6 +484,8 @@ impl InputLayer {
         shown: &Shown,
         frame: &mut image::RgbaImage,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        KEYS_LAID.with_borrow_mut(|laid| laid.clone_from(&shown.keys));
         if shown.is_empty() {
             return Ok(());
         }

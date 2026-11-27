@@ -138,7 +138,13 @@ impl Films {
         let at = self.place(play, renderer)?;
         let path = self.files()?.next("apng");
         let recorded = temporary(&path)?;
-        watch(harness, &path, FPS, self.recording.hold)?;
+        watch(
+            harness,
+            &path,
+            FPS,
+            self.recording.hold,
+            self.recording.glide,
+        )?;
         Ok(Some(Film {
             films: self,
             recording: None,

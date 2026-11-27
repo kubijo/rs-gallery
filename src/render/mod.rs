@@ -58,6 +58,8 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use gallery_build::{Easing, Glide, GlideSetting};
+
 pub(crate) use self::cursor::use_cursor;
 pub(crate) use self::defaults::RecordDefaults;
 use self::film::Film;
@@ -67,12 +69,15 @@ use self::log_view::LogView;
 pub(crate) use self::overlay::Corner;
 use self::snapshot::{Looks, Seen, component, play_file, play_path};
 pub(crate) use self::snapshot::{Snapshots, Update, built_for};
-#[cfg(test)]
-pub(crate) use self::{overlay::OVERLAYS, record::RENDERED};
 use self::{
     overlay::{InputLayer, InputLog, InputOverlay, Shown},
     play_driver::*,
     record::*,
+};
+#[cfg(test)]
+pub(crate) use self::{
+    overlay::{KEYS_LAID, OVERLAYS},
+    record::RENDERED,
 };
 
 pub(crate) use self::{overrides::*, recipe::*, report::*, session::*, shot::*};
@@ -130,6 +135,7 @@ pub(crate) struct Record {
     /// Where the keys and mouse panel goes on a play's recording;
     /// `None` shows the pointer alone.
     pub(crate) input: Option<Corner>,
+    pub(crate) glide: Glide,
 }
 
 /// The highest frame rate a recording takes.
@@ -214,6 +220,25 @@ impl Record {
     }
 }
 
+/// A recording's own easing, `Some(None)` for none, over the catalog's glide.
+///
+/// # Errors
+/// For an easing of a recording without a play, which has no gestures to glide to;
+/// turning the glide off is no harm there.
+pub(crate) fn glide_with(
+    own: Option<Option<Easing>>,
+    catalog: Glide,
+    has_play: bool,
+) -> Result<Glide, String> {
+    match own {
+        Some(Some(_)) if !has_play => {
+            Err("a recording without a play has no gestures, so it takes no `glide`".to_owned())
+        }
+        Some(easing) => Ok(Glide { easing, ..catalog }),
+        None => Ok(catalog),
+    }
+}
+
 /// `FPS` or `FPS:SECONDS`, as `--record` takes it;
 /// kept whatever the play does.
 ///
@@ -239,6 +264,7 @@ pub(crate) fn parse_record(raw: &str) -> Result<Record, String> {
         formats: VideoFormats::default(),
         hold: None,
         input: None,
+        glide: Glide::default(),
     })
 }
 

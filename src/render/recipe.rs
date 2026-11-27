@@ -143,6 +143,8 @@ struct RecipeRecord {
     format: Option<VideoFormats>,
     /// Seconds a play's recording pauses at each step's end; `gallery.toml`'s unless set.
     hold: Option<f32>,
+    /// Whether a play's recording glides the pointer, and how; `gallery.toml`'s unless set.
+    glide: Option<GlideSetting>,
 }
 
 /// Read a capture recipe into the shots it describes,
@@ -214,6 +216,12 @@ pub(crate) fn read_recipe(
                 .record
                 .as_ref()
                 .map(|record| {
+                    let has_play = shot.play.is_some();
+                    let own = record
+                        .glide
+                        .as_ref()
+                        .map(|glide| glide.easing(defaults.glide.easing))
+                        .transpose()?;
                     let record = Record {
                         fps: record.fps,
                         seconds: record.seconds,
@@ -221,8 +229,8 @@ pub(crate) fn read_recipe(
                         formats: record.format.or(defaults.formats).unwrap_or_default(),
                         hold: record.hold,
                         input: defaults.input,
+                        glide: glide_with(own, defaults.glide, has_play)?,
                     };
-                    let has_play = shot.play.is_some();
                     record
                         .check(has_play)
                         .map(|()| record.holding(defaults.hold, has_play))

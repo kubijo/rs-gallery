@@ -241,14 +241,17 @@ struct VideoReport<'a> {
     /// Frames drawn into it.
     /// A play's frame `n`, as its steps count them, is the `n`th drawn.
     frames: u32,
-    /// Frames added by pausing on each step's last frame,
-    /// so the file runs `frames + held` frames long.
+    /// Frames added by pausing on each step's last frame.
     held: u32,
+    /// Frames added by gliding the pointer between gestures,
+    /// so the file runs `frames + held + glided` frames long.
+    glided: u32,
     /// Frames the file holds, a repeat having lengthened the frame before it instead.
     written: u32,
     /// Drawing the scene, per frame, in microseconds.
     draw_us: u64,
-    /// Rendering a frame and reading it back, per frame, in microseconds.
+    /// Rendering a frame and reading it back, per frame drawn, in microseconds;
+    /// the glides' frames are made in this time too.
     capture_us: u64,
     encode_us: u64,
     /// The most frames waiting for the encoder at once.
@@ -266,6 +269,7 @@ impl<'a> VideoReport<'a> {
             fps: video.fps,
             frames: video.frames,
             held: video.held,
+            glided: video.glided,
             written: video.written,
             draw_us: per_frame(video.draw),
             capture_us: per_frame(video.capture),
@@ -706,7 +710,8 @@ pub(super) fn table(run: Ran<'_>, stream: style::Stream) -> String {
                     .videos
                     .iter()
                     .map(|video| {
-                        let length = f64::from(video.frames + video.held) / f64::from(video.fps);
+                        let length = f64::from(video.frames + video.held + video.glided)
+                            / f64::from(video.fps);
                         format!(
                             "{}  {}",
                             linked(&video.path),

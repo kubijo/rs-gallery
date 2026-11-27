@@ -112,19 +112,20 @@ so a minor release may carry a breaking change.
   `just demo::wgpu`, `femtovg`, `plays` and `shell-scenes`; `just tag` and `just release-check` are `just release::tag`
   and `just release::check`.
 
-- **Recordings.** A shot's `record = { fps, seconds }`, or `--record FPS:SECONDS`, writes what it draws beside its PNG;
-  on a play shot, `record = { fps }` records the whole play, and `video = "failing"` keeps it only when the play fails,
-  while pausing `hold` seconds (0.5 unless set) on each step's end so it can be followed, and shows the play's keys and
-  mouse buttons over it; the pointer is drawn lit while a button is held and for 0.3 s after a press, and shots and
-  screenshots have none. `gallery.toml`'s `[record]` sets `format`, `hold`, the panel's corner (`input`, or `false`) and
-  SVGs of the pointer for every recording, the tests' MP4 videos too but for `format`, a shot's own `format` and `hold`
-  and the flags overriding it; the template's new `studio` scene carries a play touching it with every kind of input to
-  show that on. Frame *n* is drawn at exactly *n* / fps. The default is a seekable H.264 MP4; `format = "apng"`
-  (`--record-format apng`) writes an APNG, lossless and byte-identical between runs, and `format = ["apng", "mp4"]`
-  (`--record-format apng,mp4`) both from one run. The report's `videos` and the summary name each file, and the report
-  adds what a frame cost to draw, capture and encode.
+- **Recordings.** A shot's `record = { fps, seconds }`, or `--record FPS:SECONDS`, writes what it draws beside its PNG,
+  frame *n* at exactly *n* / fps. A play shot's `record = { fps }` records the whole play (`video = "failing"` keeps it
+  only on failure), pausing `hold` seconds at each step's end, with the keys, mouse and pointer drawn over it but never
+  in screenshots. `glide` (`--record-glide [EASING|off]`) eases the pointer to each gesture along an arc and rests it a
+  moment before it acts, in the file only. Formats: a seekable H.264 MP4 (the default), a lossless, byte-identical APNG,
+  and a GIF of 256 colours and at most 50 fps; `format = ["apng", "gif"]` (`--record-format apng,gif`) writes several
+  from one run. `gallery.toml`'s `[record]` sets all of it for every recording, the tests' MP4s too but for `format`; a
+  shot's own `format`, `hold` and `glide`, then the flags, override it. `set_pace(Pace::showcase())` slows a play's
+  drags, scrolls and typing and aims them off-centre. The template's `studio` and `tasks` scenes show it off, and
+  `just showcase` records the board as an MP4 and a GIF. The report names each file with its frames drawn, held and
+  glided, and what a frame cost to draw, capture and encode.
 
-- **Dependencies.** usvg 0.50, notify 9 and process-wrap 11.
+- **Dependencies.** usvg 0.50, notify 9 and process-wrap 11; simplecss 0.2 and svgtypes 0.16, already under usvg, to
+  check cursors as usvg reads them; gif 0.14 and quantette 0.6 for GIFs.
 
 - **Catalog tests.** `gallery::test_main!(renderer)` in a `harness = false` test makes every scene a `smoke::<scene>`
   test and every play a `play::<scene>::<name>` test, run through the same scenes dylib the window loads; `just test` in

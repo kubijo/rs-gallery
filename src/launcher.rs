@@ -148,7 +148,8 @@ fn fail(problem: &Diagnostic) -> ! {
     std::process::exit(1)
 }
 
-/// `--record`'s recording, its format and hold the flags', else the catalog's `defaults`.
+/// `--record`'s recording,
+/// with the flags' format, hold and glide, else the catalog's.
 fn rendered_record(
     record: render::Record,
     cli: &Cli,
@@ -159,10 +160,34 @@ fn rendered_record(
         formats: cli.record_format.or(defaults.formats).unwrap_or_default(),
         hold: cli.record_hold,
         input: defaults.input,
+        glide: render::glide_with(
+            cli.record_glide
+                .as_ref()
+                .map(|GlideFlag(glide)| glide.easing(defaults.glide.easing))
+                .transpose()?,
+            defaults.glide,
+            has_play,
+        )?,
         ..record
     };
     record.check(has_play)?;
     Ok(record.holding(defaults.hold, has_play))
+}
+
+/// `--record-glide` as given, an easing's name checked.
+#[derive(Clone, Debug)]
+struct GlideFlag(render::GlideSetting);
+
+impl GlideFlag {
+    fn parse(name: &str) -> Result<Self, String> {
+        let setting = match name {
+            "true" => render::GlideSetting::On(true),
+            "false" => render::GlideSetting::On(false),
+            _ => render::GlideSetting::Eased(name.to_owned()),
+        };
+        setting.easing(None)?;
+        Ok(Self(setting))
+    }
 }
 
 /// Whether this run writes to stdout and exits instead of opening a window.
@@ -296,8 +321,9 @@ struct Cli {
     )]
     record: Option<render::Record>,
 
-    /// The recording's format: `mp4` (small, seekable) or `apng` (lossless, comparable),
-    /// or both from one run as `apng,mp4` [default: gallery.toml's `[record] format`, else mp4]
+    /// The recording's format: `mp4` (small, seekable), `apng` (lossless, comparable)
+    /// or `gif` (shows anywhere; 256 colours, at most 50 fps), or several from one run as `apng,gif`
+    /// [default: gallery.toml's `[record] format`, else mp4]
     #[arg(long, value_name = "FORMAT[,FORMAT]", requires = "record")]
     record_format: Option<render::VideoFormats>,
 
@@ -305,6 +331,23 @@ struct Cli {
     /// 0 for none [default: gallery.toml's `[record] hold`, else 0.5]
     #[arg(long, value_name = "SECONDS", requires = "record")]
     record_hold: Option<f32>,
+
+    /// Glide a play's recorded pointer to each gesture:
+    ///  - `linear`, `cubic-in-out` or `cubic-out`
+    ///  - `true` (bare), gallery.toml's easing, else `cubic-in-out`
+    ///  - `false` or `off`, whatever gallery.toml says
+    ///
+    /// [default: gallery.toml's `[record] glide`, else off]
+    #[arg(
+        long,
+        verbatim_doc_comment,
+        value_name = "EASING",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = GlideFlag::parse,
+        requires = "record"
+    )]
+    record_glide: Option<GlideFlag>,
 
     /// Canvas size to render at [default: 1280x720]
     #[arg(long, value_name = "WxH")]
@@ -634,6 +677,99 @@ mod tests {
             render::VideoFormat::Mp4.into(),
             "the flag outranks the catalog"
         );
+    }
+
+    #[test]
+    fn a_catalogs_glide_reaches_a_rendered_play_and_the_flag_outranks_it() {
+        let paced = render::Glide {
+            speed: 600.0,
+            ..render::Glide::default()
+        };
+        let glide = |catalog: render::Glide, flags: &[&str]| {
+            let catalog = render::RecordDefaults {
+                glide: catalog,
+                ..render::RecordDefaults::default()
+            };
+            let args = [
+                &[
+                    "gallery", "--scene", "s", "--render", "s.png", "--play", "p", "--record", "30",
+                ][..],
+                flags,
+            ]
+            .concat();
+            let cli = Cli::parse_from(&args);
+            let record = cli.record.expect("a recording");
+            rendered_record(record, &cli, &catalog)
+                .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+                .glide
+        };
+        assert_eq!(glide(paced, &[]), paced, "the catalog's, off");
+        assert_eq!(
+            glide(paced, &["--record-glide"]),
+            render::Glide {
+                easing: Some(render::Easing::CubicInOut),
+                ..paced
+            },
+            "on, at the catalog's pace"
+        );
+        let linear = render::Glide {
+            easing: Some(render::Easing::Linear),
+            ..paced
+        };
+        assert_eq!(glide(linear, &[]), linear, "the catalog's, on");
+        assert_eq!(
+            glide(linear, &["--record-glide", "cubic-out"]).easing,
+            Some(render::Easing::CubicOut),
+            "the flag outranks the catalog"
+        );
+        for on in [&["--record-glide"][..], &["--record-glide", "true"]] {
+            assert_eq!(
+                glide(linear, on).easing,
+                Some(render::Easing::Linear),
+                "{on:?} keeps the catalog's easing"
+            );
+        }
+        for off in ["off", "false"] {
+            assert_eq!(
+                glide(linear, &["--record-glide", off]).easing,
+                None,
+                "`{off}` turns the catalog's glide off for the run"
+            );
+        }
+        let error = Cli::try_parse_from([
+            "gallery",
+            "--scene",
+            "s",
+            "--render",
+            "s.png",
+            "--record",
+            "30",
+            "--record-glide",
+            "bounce",
+        ])
+        .err()
+        .expect("an unknown easing is refused")
+        .to_string();
+        assert!(error.contains("or `off`"), "{error}");
+        let args = [
+            "gallery",
+            "--scene",
+            "s",
+            "--render",
+            "s.png",
+            "--record",
+            "30:1",
+            "--record-glide",
+        ];
+        let cli = Cli::parse_from(args);
+        let error = rendered_record(cli.record.expect("a recording"), &cli, &Default::default())
+            .expect_err("a recording without a play is refused a glide");
+        assert!(error.contains("takes no `glide`"), "{error}");
+        let off = Cli::parse_from(args.iter().copied().chain(["off"]));
+        let record = off.record.expect("a recording");
+        let unglided = rendered_record(record, &off, &Default::default())
+            .expect("turning the glide off is no harm without a play");
+        assert_eq!(unglided.glide.easing, None);
     }
 
     #[test]

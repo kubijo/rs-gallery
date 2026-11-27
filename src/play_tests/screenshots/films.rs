@@ -82,6 +82,15 @@ fn filmed_by(
 }
 
 #[test]
+fn text_typed_by_two_gestures_shows_as_two_runs_on_a_tests_video() {
+    let dir = scratch("films-typed-twice");
+    let (outcome, _) = filmed_on(Renderer::Glow, field, types_twice, &dir, Video::Always);
+    outcome.unwrap_or_else(|failure| panic!("{failure}"));
+    let laid = crate::render::KEYS_LAID.with_borrow(Clone::clone);
+    assert_eq!(laid, ["\"ab\"", "\"cd\""]);
+}
+
+#[test]
 fn a_catalog_without_the_input_panel_films_its_tests_without_one() {
     fn clicks(p: &mut Play<'_>) -> PlayResult {
         p.click("Count")
@@ -127,6 +136,121 @@ fn a_catalogs_hold_pauses_its_tests_videos() {
         1 + drawn + 2 * 30,
         "the frame the play began on, those it drew, and 2 s at 15 a second on each click's step"
     );
+}
+
+#[test]
+fn a_tests_video_dwells_where_a_glide_brought_the_pointer_before_it_clicks() {
+    fn clicks(p: &mut Play<'_>) -> PlayResult {
+        p.hover("Count")?;
+        p.idle(2)?;
+        p.click("0 clicked")
+    }
+    let frames = |name: &str, dwell: f32| {
+        let dir = scratch(name);
+        let catalog = crate::render::RecordDefaults {
+            glide: crate::render::Glide {
+                easing: Some(crate::render::Easing::Linear),
+                dwell,
+                ..crate::render::Glide::default()
+            },
+            ..crate::render::RecordDefaults::default()
+        };
+        let films = films(&dir, Video::Always).recorded_as(catalog);
+        let (outcome, _) = filmed_by(&films, Renderer::Glow, counts, clicks, &dir);
+        outcome.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        decode_mp4(&video(&dir)).len()
+    };
+    assert_eq!(
+        frames("films-dwells", 0.2) - frames("films-dwells-not", 0.0),
+        3,
+        "0.2 s at 15 fps"
+    );
+}
+
+#[test]
+fn a_catalogs_glide_moves_the_pointer_on_its_tests_videos() {
+    fn apart(_: &mut SceneCtx<'_>, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Left");
+            ui.add_space(200.0);
+            ui.label("Right");
+        });
+    }
+    fn crosses(p: &mut Play<'_>) -> PlayResult {
+        p.hover("Left")?;
+        p.hover("Right")
+    }
+    fn stays(p: &mut Play<'_>) -> PlayResult {
+        p.idle(4)
+    }
+    let film = |name: &str, run: PlayFn, easing| {
+        let dir = scratch(name);
+        let catalog = crate::render::RecordDefaults {
+            input: None,
+            glide: crate::render::Glide {
+                easing,
+                ..crate::render::Glide::default()
+            },
+            ..crate::render::RecordDefaults::default()
+        };
+        let films = films(&dir, Video::Always).recorded_as(catalog);
+        let (outcome, log) = filmed_by(&films, Renderer::Glow, apart, run, &dir);
+        outcome.unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        (
+            decode_mp4(&video(&dir)),
+            log.last().map(|step| step.frames.end),
+        )
+    };
+    // The pointer's middle on each frame showing one, against the scene with none.
+    let pointer = |frames: &[image::RgbImage], scene: &image::RgbImage| -> Vec<f32> {
+        frames
+            .iter()
+            .filter_map(|frame| {
+                let xs: Vec<u32> = frame
+                    .enumerate_pixels()
+                    .filter(|(x, y, pixel)| {
+                        let was = scene.get_pixel(*x, *y);
+                        pixel.0.iter().zip(was.0).any(|(a, b)| a.abs_diff(b) > 40)
+                    })
+                    .map(|(x, _, _)| x)
+                    .collect();
+                let (&low, &high) = (xs.iter().min()?, xs.iter().max()?);
+                #[expect(clippy::cast_precision_loss, reason = "a few hundred pixels")]
+                let middle = xs.iter().sum::<u32>() as f32 / xs.len() as f32;
+                (high - low < 40).then_some(middle)
+            })
+            .collect()
+    };
+    let (still, _) = film("films-glide-still", stays, None);
+    let scene = still.last().expect("a frame");
+    let (jumped, drawn) = film("films-glide-off", crosses, None);
+    let placed = pointer(&jumped, scene);
+    let (left, right) = (placed[0], placed[placed.len() - 1]);
+    assert!(
+        right - left > 150.0,
+        "it goes from Left to Right: {placed:?}"
+    );
+    let between = |x: &f32| left + 20.0 < *x && *x < right - 20.0;
+    assert!(
+        !placed.iter().any(between),
+        "without a glide it jumps: {placed:?}"
+    );
+
+    let (glided, glided_drawn) = film(
+        "films-glide-on",
+        crosses,
+        Some(crate::render::Easing::Linear),
+    );
+    let way: Vec<f32> = pointer(&glided, scene)
+        .into_iter()
+        .filter(between)
+        .collect();
+    assert!(way.len() >= 2, "it passes through on its way: {way:?}");
+    assert!(
+        way.windows(2).all(|pair| pair[0] < pair[1]),
+        "from Left to Right: {way:?}"
+    );
+    assert_eq!(glided_drawn, drawn, "the play draws the same frames");
 }
 
 fn filmed(

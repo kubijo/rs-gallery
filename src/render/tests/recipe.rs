@@ -296,35 +296,58 @@ fn recipe_with(
     read_recipe(&path, out.map(Utf8Path::new), defaults)
 }
 
+/// [`recipe_with`] of one shot, `a` of scene `s` into `r` at 10×10, `shot` the rest of its table.
+fn one_shot(
+    name: &str,
+    shot: toml::Table,
+    defaults: &RecordDefaults,
+) -> Result<Capture, Diagnostic> {
+    let mut table = toml::toml! {
+        name = "a"
+        scene = "s"
+    };
+    table.extend(shot);
+    let mut recipe = toml::toml! {
+        out = "r"
+        size = "10x10"
+    };
+    recipe.insert("shot".to_owned(), vec![toml::Value::from(table)].into());
+    let text = toml::to_string(&recipe).expect("BUG: a table writes as TOML");
+    recipe_with(name, &text, None, defaults)
+}
+
 #[test]
 fn a_catalogs_hold_pauses_a_plays_recording_and_leaves_one_without_a_play_be() {
     let catalog = RecordDefaults {
         hold: Some(0.25),
         ..RecordDefaults::default()
     };
-    let read = |name: &str, shot: &str| {
-        let text = indoc::formatdoc! {r#"
-            out = "r"
-            size = "10x10"
-
-            [[shot]]
-            name = "a"
-            scene = "s"
-            {shot}
-        "#};
-        recipe_with(name, &text, None, &catalog)
+    let read = |name: &str, shot| {
+        one_shot(name, shot, &catalog)
             .unwrap_or_else(|e| panic!("{name}: {}", e.summary()))
             .shots[0]
             .record
             .expect("a recording")
     };
-    let timed = read("catalog-hold-timed", "record = { fps = 30, seconds = 1 }");
+    let timed = read(
+        "catalog-hold-timed",
+        toml::toml! { record = { fps = 30, seconds = 1 } },
+    );
     assert_eq!(timed.hold, None, "no steps to pause at");
-    let played = read("catalog-hold-played", "play = \"p\"\nrecord = { fps = 30 }");
+    let played = read(
+        "catalog-hold-played",
+        toml::toml! {
+            play = "p"
+            record = { fps = 30 }
+        },
+    );
     assert_eq!(played.hold, Some(0.25));
     let own = read(
         "catalog-hold-own",
-        "play = \"p\"\nrecord = { fps = 30, hold = 0 }",
+        toml::toml! {
+            play = "p"
+            record = { fps = 30, hold = 0 }
+        },
     );
     assert_eq!(own.hold, Some(0.0), "the shot's own outranks the catalog's");
 }
@@ -512,110 +535,103 @@ fn a_recipe_that_could_not_do_what_it_says_is_rejected() {
 
 #[test]
 fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
-    // One shot, with `extra` as the rest of its table.
-    let shot = |extra: &str| {
-        indoc::formatdoc! {r#"
-            out = "r"
-            size = "10x10"
-
-            [[shot]]
-            name = "a"
-            scene = "s"
-            {extra}
-        "#}
-    };
+    let shot = |name: &str, shot| one_shot(name, shot, &RecordDefaults::default());
     let cases = [
         (
             "seconds-on-a-play",
-            indoc! {r#"
+            toml::toml! {
                 play = "p"
                 record = { fps = 30, seconds = 2 }
-            "#},
+            },
             "records its play",
         ),
         (
             "no-seconds-without-a-play",
-            indoc! {r"
-                record = { fps = 30 }
-            "},
+            toml::toml! { record = { fps = 30 } },
             "needs `seconds`",
         ),
         (
             "no-frames-a-second",
-            indoc! {r"
-                record = { fps = 0, seconds = 1 }
-            "},
+            toml::toml! { record = { fps = 0, seconds = 1 } },
             "1 to 240",
         ),
         (
             "a-negative-length",
-            indoc! {r"
-                record = { fps = 30, seconds = -1 }
-            "},
+            toml::toml! { record = { fps = 30, seconds = -1 } },
             "above 0",
         ),
         (
             "a-hold-without-a-play",
-            indoc! {r"
-                record = { fps = 30, seconds = 1, hold = 1 }
-            "},
+            toml::toml! { record = { fps = 30, seconds = 1, hold = 1 } },
             "takes no `hold`",
         ),
         (
+            "a-glide-without-a-play",
+            toml::toml! { record = { fps = 30, seconds = 1, glide = "linear" } },
+            "takes no `glide`",
+        ),
+        (
             "input-in-a-shot",
-            indoc! {r"
-                record = { fps = 30, seconds = 1, input = true }
-            "},
+            toml::toml! { record = { fps = 30, seconds = 1, input = true } },
             "unknown field `input`",
         ),
         (
             "a-negative-hold",
-            indoc! {r#"
+            toml::toml! {
                 play = "p"
                 record = { fps = 30, hold = -0.5 }
-            "#},
+            },
             "0, for none, or more",
         ),
         (
+            "an-unknown-glide",
+            toml::toml! {
+                play = "p"
+                record = { fps = 30, glide = "bounce" }
+            },
+            "`bounce` is no easing: `linear`, `cubic-in-out` or `cubic-out`, or `off`",
+        ),
+        (
+            "a-glide-of-a-number",
+            toml::toml! {
+                play = "p"
+                record = { fps = 30, glide = 3 }
+            },
+            "an easing such as `cubic-in-out`, or `false`",
+        ),
+        (
             "video-without-a-record",
-            indoc! {r#"
-                video = "always"
-            "#},
+            toml::toml! { video = "always" },
             "has no `record`",
         ),
         (
             "an-unknown-format",
-            indoc! {r#"
-                record = { fps = 30, seconds = 1, format = "gif" }
-            "#},
-            "gif",
+            toml::toml! { record = { fps = 30, seconds = 1, format = "webm" } },
+            "webm",
         ),
         (
             "an-unknown-format-in-a-list",
-            indoc! {r#"
-                record = { fps = 30, seconds = 1, format = ["apng", "gif"] }
-            "#},
-            "`gif` is not a recording format",
+            toml::toml! { record = { fps = 30, seconds = 1, format = ["apng", "webm"] } },
+            "`webm` is not a recording format: `apng`, `mp4` or `gif`",
         ),
         (
             "no-format-at-all",
-            indoc! {r#"
-                record = { fps = 30, seconds = 1, format = [] }
-            "#},
+            toml::toml! { record = { fps = 30, seconds = 1, format = [] } },
             "records nothing",
         ),
     ];
-    for (why, extra, says) in cases {
-        let error = recipe(why, &shot(extra), None)
+    for (why, table, says) in cases {
+        let error = shot(why, table)
             .err()
             .unwrap_or_else(|| panic!("`{why}` is refused"))
             .summary();
         assert!(error.contains(says), "`{why}`: {error}");
     }
-    let mp4 = indoc! {r#"
-        record = { fps = 24, seconds = 1.5, format = "mp4" }
-    "#};
-    let taken = recipe("an-mp4", &shot(mp4), None).expect("a recording that can be made");
+    let taken = shot(
+        "an-mp4",
+        toml::toml! { record = { fps = 24, seconds = 1.5, format = "mp4" } },
+    )
+    .expect("a recording that can be made");
     assert_eq!(
         taken.shots[0].record,
         Some(Record {
@@ -625,12 +641,14 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
             formats: VideoFormat::Mp4.into(),
             hold: None,
             input: Some(Corner::BottomLeft),
+            glide: Glide::default(),
         })
     );
-    let both = indoc! {r#"
-        record = { fps = 24, seconds = 1.5, format = ["mp4", "apng", "mp4"] }
-    "#};
-    let taken = recipe("both", &shot(both), None).expect("a recording in two formats");
+    let taken = shot(
+        "both",
+        toml::toml! { record = { fps = 24, seconds = 1.5, format = ["mp4", "apng", "mp4"] } },
+    )
+    .expect("a recording in two formats");
     let formats: Vec<VideoFormat> = taken.shots[0]
         .record
         .expect("a recording")
@@ -653,29 +671,28 @@ fn a_recording_is_refused_before_anything_is_drawn_when_it_cannot_be_made() {
 
 #[test]
 fn a_shots_recording_takes_what_it_leaves_unset_from_the_catalog() {
-    let shot = |name: &str, record: &str| {
-        let shot = indoc::formatdoc! {r#"
-            out = "r"
-            size = "10x10"
-
-            [[shot]]
-            name = "a"
-            scene = "s"
-            play = "p"
-            record = {{ fps = 30{record} }}
-        "#};
-        let catalog = RecordDefaults {
-            formats: Some(VideoFormat::Apng.into()),
-            hold: Some(0.25),
-            input: Some(Corner::TopRight),
-        };
-        recipe_with(name, &shot, None, &catalog)
+    let catalog = RecordDefaults {
+        formats: Some(VideoFormat::Apng.into()),
+        hold: Some(0.25),
+        input: Some(Corner::TopRight),
+        glide: Glide {
+            easing: Some(Easing::Linear),
+            ..Glide::default()
+        },
+    };
+    // A play shot recorded at 30 fps, with `record` the rest of its `record`.
+    let shot = |name: &str, record: toml::Table| {
+        let mut at_30 = toml::toml! { fps = 30 };
+        at_30.extend(record);
+        let mut shot = toml::toml! { play = "p" };
+        shot.insert("record".to_owned(), at_30.into());
+        one_shot(name, shot, &catalog)
             .unwrap_or_else(|e| panic!("{name}: {}", e.summary()))
             .shots[0]
             .record
             .expect("a recording")
     };
-    let unset = shot("record-unset", "");
+    let unset = shot("record-unset", toml::Table::new());
     assert_eq!(unset.formats, VideoFormat::Apng.into());
     assert_eq!(unset.hold, Some(0.25));
     assert_eq!(
@@ -683,13 +700,49 @@ fn a_shots_recording_takes_what_it_leaves_unset_from_the_catalog() {
         Some(Corner::TopRight),
         "the panel is the catalog's alone"
     );
-    let own = shot("record-own", r#", format = "mp4", hold = 0"#);
+    assert_eq!(unset.glide.easing, Some(Easing::Linear));
+    let own = shot(
+        "record-own",
+        toml::toml! {
+            format = "mp4"
+            hold = 0
+        },
+    );
     assert_eq!(
         own.formats,
         VideoFormat::Mp4.into(),
         "the shot's own outranks the catalog's"
     );
     assert_eq!(own.hold, Some(0.0));
+    for (name, record, easing) in [
+        ("record-glide-off", toml::toml! { glide = false }, None),
+        (
+            "record-glide-off-named",
+            toml::toml! { glide = "off" },
+            None,
+        ),
+        (
+            "record-glide-on",
+            toml::toml! { glide = true },
+            Some(Easing::Linear),
+        ),
+        (
+            "record-glide-eased",
+            toml::toml! { glide = "cubic-out" },
+            Some(Easing::CubicOut),
+        ),
+    ] {
+        let glided = shot(name, record).glide;
+        assert_eq!(
+            glided.easing, easing,
+            "{name}: the shot's own glide, on in the catalog's easing"
+        );
+        assert_eq!(
+            glided.speed,
+            Glide::default().speed,
+            "{name}: at the catalog's pace"
+        );
+    }
     let built_in = RecordDefaults::default();
     assert_eq!(
         (built_in.formats, built_in.hold, built_in.input),

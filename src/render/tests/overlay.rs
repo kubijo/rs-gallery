@@ -35,6 +35,54 @@ fn a_key_lists_its_chord_and_typed_text_its_quoted_run() {
 }
 
 #[test]
+fn text_typed_a_character_at_a_time_lists_as_one_run_until_a_key_ends_it() {
+    let mut log = InputLog::new(10);
+    for typed in ["h", "i"] {
+        log.frame(&[Event::Text(typed.to_owned())]);
+        log.frame(&[]);
+    }
+    assert_eq!(log.shown(1.0).keys, ["\"hi\""]);
+    log.frame(&[key(Key::Enter, true, Modifiers::NONE)]);
+    log.frame(&[Event::Text("!".to_owned())]);
+    assert_eq!(log.shown(1.0).keys, ["\"hi\"", "Enter", "\"!\""]);
+}
+
+#[test]
+fn a_click_ends_the_typed_run() {
+    let mut log = InputLog::new(10);
+    log.frame(&[Event::Text("ab".to_owned())]);
+    log.frame(&[click(true)]);
+    log.frame(&[click(false)]);
+    log.frame(&[Event::Text("cd".to_owned())]);
+    assert_eq!(log.shown(1.0).keys, ["\"ab\"", "\"cd\""]);
+}
+
+#[test]
+fn text_typed_after_a_run_has_gone_starts_a_new_one() {
+    let mut log = InputLog::new(10);
+    log.frame(&[Event::Text("hi".to_owned())]);
+    for _ in 0..20 {
+        log.frame(&[]);
+    }
+    assert!(log.shown(1.0).keys.is_empty(), "the run's time is up");
+    log.frame(&[Event::Text("!".to_owned())]);
+    assert_eq!(log.shown(1.0).keys, ["\"!\""]);
+}
+
+#[test]
+fn a_key_leaves_the_list_on_time_through_a_glide() {
+    let mut log = InputLog::new(10);
+    log.frame(&[key(Key::Enter, true, Modifiers::NONE)]);
+    for x in 0..30 {
+        log.glide(pos2(x as f32, 0.0));
+    }
+    assert!(
+        log.shown(1.0).keys.is_empty(),
+        "3 s of glide, past a key's 1.5 s"
+    );
+}
+
+#[test]
 fn the_pointer_is_shown_where_a_zoomed_frame_has_it() {
     let mut log = InputLog::new(10);
     log.frame(&[Event::PointerMoved(egui::pos2(40.0, 28.0))]);

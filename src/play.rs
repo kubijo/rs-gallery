@@ -549,6 +549,7 @@ pub struct Play<'d> {
     /// Steps finished so far, which numbers their screenshots.
     steps_done: usize,
     wait_frames: u32,
+    pace: Pace,
     knobs_set: KnobsSet,
 }
 
@@ -594,10 +595,48 @@ pub(crate) struct PlayRun {
 
 /// How long gestures and [`Play::wait_for`] wait, in frames.
 pub const DEFAULT_WAIT_FRAMES: u32 = 60;
-/// Pointer moves between a drag's press and release.
+/// The default [`Pace`]'s pointer moves between a drag's press and release.
 pub const DRAG_FRAMES: u32 = 10;
-/// Wheel events a scroll is split into.
+/// The default [`Pace`]'s wheel events a scroll is split into.
 pub const SCROLL_FRAMES: u32 = 5;
+
+/// How fast a play's gestures go, in frames, and how exactly they aim.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Pace {
+    /// Pointer moves between a drag's press and release, at least 1.
+    pub drag_frames: u32,
+    /// Wheel events a scroll is split into, at least 1.
+    pub scroll_frames: u32,
+    /// Frames each typed character takes; 0 types the whole text in one.
+    pub frames_per_char: u32,
+    /// Whether pointer gestures aim off a widget's middle, at a point its label fixes.
+    pub off_centre: bool,
+}
+
+impl Default for Pace {
+    fn default() -> Self {
+        Self {
+            drag_frames: DRAG_FRAMES,
+            scroll_frames: SCROLL_FRAMES,
+            frames_per_char: 0,
+            off_centre: false,
+        }
+    }
+}
+
+impl Pace {
+    /// About as a person goes, at 60 frames a second:
+    /// a drag in ¾ s, a scroll in ⅓ s, 20 characters a second, and aimed off-centre.
+    #[must_use]
+    pub const fn showcase() -> Self {
+        Self {
+            drag_frames: 45,
+            scroll_frames: 20,
+            frames_per_char: 3,
+            off_centre: true,
+        }
+    }
+}
 /// Most frames a play's last knob keys get to land in once it is over.
 const TAIL_FRAMES: u32 = 8;
 
@@ -620,6 +659,7 @@ pub(crate) fn run(entry: &PlayEntry, driver: &mut dyn PlayDriver) -> PlayRun {
         open: Vec::new(),
         steps_done: 0,
         wait_frames: DEFAULT_WAIT_FRAMES,
+        pace: Pace::default(),
         knobs_set: KnobsSet::default(),
     };
     // A `#[play]` catches its own panics, in the copy of gallery that raised them.
@@ -917,6 +957,12 @@ impl Play<'_> {
         self.wait_frames = frames;
     }
 
+    /// How fast the drags, scrolls and typing from here on go:
+    /// [`Pace::showcase`] for a recording to watch.
+    pub fn set_pace(&mut self, pace: Pace) {
+        self.pace = pace;
+    }
+
     /// Move the pointer onto the widget.
     ///
     /// # Errors
@@ -924,19 +970,20 @@ impl Play<'_> {
     #[track_caller]
     pub fn hover(&mut self, by: impl Into<By>) -> PlayResult {
         self.gesture("hover", by.into(), Location::caller(), |p, at| {
-            p.frame(vec![Event::PointerMoved(aim(&at)?)])?;
+            p.frame(vec![Event::PointerMoved(aim(&at, p.pace.off_centre)?)])?;
             p.frame(Vec::new())
         })
     }
 
-    /// Click the widget's centre with the primary button.
+    /// Click the widget with the primary button,
+    /// at its centre unless the [`Pace`] aims off it.
     ///
     /// # Errors
     /// When no single widget matches `by` in time.
     #[track_caller]
     pub fn click(&mut self, by: impl Into<By>) -> PlayResult {
         self.gesture("click", by.into(), Location::caller(), |p, at| {
-            let center = aim(&at)?;
+            let center = aim(&at, p.pace.off_centre)?;
             p.frame(vec![Event::PointerMoved(center)])?;
             p.frame(vec![button(center, true)])?;
             p.frame(vec![button(center, false)])?;
@@ -978,10 +1025,25 @@ impl Play<'_> {
                 p.frame(vec![keyboard(Key::Backspace, true, Modifiers::NONE)])?;
                 p.frame(vec![keyboard(Key::Backspace, false, Modifiers::NONE)])?;
             } else {
-                p.frame(vec![Event::Text(text.to_owned())])?;
+                p.text_frames(text)?;
             }
             p.frame(Vec::new())
         })
+    }
+
+    /// Put `text` in at the play's [`Pace`]: at once, or a character at a time.
+    fn text_frames(&mut self, text: &str) -> PlayResult {
+        let per_char = self.pace.frames_per_char;
+        if per_char == 0 && !text.is_empty() {
+            return self.frame(vec![Event::Text(text.to_owned())]);
+        }
+        for typed in text.chars() {
+            self.frame(vec![Event::Text(typed.to_string())])?;
+            for _ in 1..per_char {
+                self.frame(Vec::new())?;
+            }
+        }
+        Ok(())
     }
 
     /// Type `text` into whatever has focus.
@@ -991,7 +1053,7 @@ impl Play<'_> {
     #[track_caller]
     pub fn type_text(&mut self, text: &str) -> PlayResult {
         self.unnamed(format!("type {text:?}"), Location::caller(), |p| {
-            p.frame(vec![Event::Text(text.to_owned())])?;
+            p.text_frames(text)?;
             p.frame(Vec::new())
         })
     }
@@ -1040,8 +1102,8 @@ impl Play<'_> {
         })
     }
 
-    /// Press on the widget's centre, move by `delta` points, and let go;
-    /// `[x, y]` will do for `delta`.
+    /// Press where a click would and move by `delta` points (`[x, y]` will do),
+    /// easing in and out, then let go.
     ///
     /// # Errors
     /// When no single widget matches `by` in time.
@@ -1049,12 +1111,13 @@ impl Play<'_> {
     pub fn drag(&mut self, by: impl Into<By>, delta: impl Into<Vec2>) -> PlayResult {
         let delta = delta.into();
         self.gesture("drag", by.into(), Location::caller(), |p, at| {
-            let center = aim(&at)?;
+            let center = aim(&at, p.pace.off_centre)?;
             p.frame(vec![Event::PointerMoved(center)])?;
             p.frame(vec![button(center, true)])?;
-            for step in 1..=DRAG_FRAMES {
+            let moves = p.pace.drag_frames.max(1);
+            for step in 1..=moves {
                 #[expect(clippy::cast_precision_loss, reason = "a handful of frames")]
-                let along = step as f32 / DRAG_FRAMES as f32;
+                let along = egui::emath::easing::cubic_in_out(step as f32 / moves as f32);
                 p.frame(vec![Event::PointerMoved(center + delta * along)])?;
             }
             p.frame(vec![button(center + delta, false)])?;
@@ -1071,10 +1134,11 @@ impl Play<'_> {
     pub fn scroll(&mut self, by: impl Into<By>, delta: impl Into<Vec2>) -> PlayResult {
         let delta = delta.into();
         self.gesture("scroll", by.into(), Location::caller(), |p, at| {
-            p.frame(vec![Event::PointerMoved(aim(&at)?)])?;
+            p.frame(vec![Event::PointerMoved(aim(&at, p.pace.off_centre)?)])?;
+            let steps = p.pace.scroll_frames.max(1);
             #[expect(clippy::cast_precision_loss, reason = "a handful of frames")]
-            let each = delta / SCROLL_FRAMES as f32;
-            for _ in 0..SCROLL_FRAMES {
+            let each = delta / steps as f32;
+            for _ in 0..steps {
                 p.frame(vec![Event::MouseWheel {
                     unit: MouseWheelUnit::Point,
                     delta: each,
@@ -1181,9 +1245,33 @@ impl Play<'_> {
     }
 }
 
+/// The most points [`off_centre`] moves an aim across and down its widget.
+const OFF_CENTRE: Vec2 = Vec2::new(16.0, 4.0);
+
+/// `centre` moved within `shown` to a point `label` fixes,
+/// by at most a third of its size and [`OFF_CENTRE`].
+/// CRC-32 fixes it: unlike egui's hashes, it is the same on every machine.
+pub(crate) fn off_centre(centre: Pos2, shown: egui::Rect, label: &str) -> Pos2 {
+    let [a, b, c, d] = crc32fast::hash(label.as_bytes()).to_le_bytes();
+    let unit =
+        |bits: [u8; 2]| f32::from(u16::from_le_bytes(bits)) / f32::from(u16::MAX) * 2.0 - 1.0;
+    let reach = (shown.size() / 3.0).min(OFF_CENTRE);
+    centre + Vec2::new(unit([a, b]), unit([c, d])) * reach
+}
+
 /// Where a pointer gesture aims on `at`: the centre of what shows of it,
-/// else of the whole of it, if it has a place on screen at all.
-fn aim(at: &Found) -> Result<Pos2, PlayError> {
+/// else of the whole of it, if it has a place on screen at all;
+/// moved [`off_centre`] by its label when `off_centre` says.
+fn aim(at: &Found, off_centre: bool) -> Result<Pos2, PlayError> {
+    let centre = centre(at)?;
+    let shown = at.in_sight.unwrap_or(at.rect);
+    Ok(match &at.label {
+        Some(label) if off_centre => self::off_centre(centre, shown, label),
+        _ => centre,
+    })
+}
+
+fn centre(at: &Found) -> Result<Pos2, PlayError> {
     let named = || {
         at.label
             .as_deref()

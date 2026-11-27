@@ -240,6 +240,9 @@ impl crate::play::PlayDriver for HeadlessDriver<'_> {
     }
 
     fn logged(&mut self, index: usize, entry: &Entry) {
+        if entry.outcome.is_none() && matches!(entry.what, What::Gesture { .. }) {
+            gesture_began(self.harness);
+        }
         self.view.logged(index, entry);
     }
 

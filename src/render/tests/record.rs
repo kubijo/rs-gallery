@@ -71,6 +71,7 @@ fn recorded(
                 formats: VideoFormat::Apng.into(),
                 hold: None,
                 input: None,
+                glide: Glide::default(),
             }),
         }],
         sheet: None,
@@ -219,6 +220,7 @@ fn recorded_in(
             formats: VideoFormats::of(formats.iter().copied()).expect("a format"),
             hold: Some(0.0),
             input: None,
+            glide: Glide::default(),
         }),
     };
     let plays: Vec<_> = play
@@ -414,7 +416,7 @@ fn a_video_whose_encoder_failed_renders_no_more() {
         .join("video.apng");
     std::os::unix::fs::symlink("/dev/full", &link).expect("linked");
     let mut harness = staged_harness(flickers, "flickers");
-    watch(&mut harness, &link, 10, None).expect("it begins");
+    watch(&mut harness, &link, 10, None, Glide::default()).expect("it begins");
     let rendered = RENDERED.get();
     for _ in 0..100 {
         step(&mut harness).expect("drawn");

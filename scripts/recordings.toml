@@ -8,7 +8,7 @@ name = "studio-tour"
 scene = "studio"
 size = "960x540"
 play = "tours_every_kind_of_input"
-record = { fps = 30, format = ["apng", "mp4"] }
+record = { fps = 30, format = ["apng", "mp4", "gif"] }
 
 # Every matcher there is, passing in turn on a form recorded as it is.
 [[shot]]
@@ -16,4 +16,4 @@ name = "checks-tour"
 scene = "checks"
 size = "560x400"
 play = "checks_with_every_matcher"
-record = { fps = 30, format = ["apng", "mp4"] }
+record = { fps = 30, format = ["apng", "mp4", "gif"] }

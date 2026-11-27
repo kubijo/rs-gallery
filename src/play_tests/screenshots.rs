@@ -210,6 +210,7 @@ fn a_capture_compares_no_snapshots_and_says_so_whatever_its_shot() {
         formats: VideoFormats::default(),
         hold: Some(0.0),
         input: None,
+        glide: crate::render::Glide::default(),
     };
     for record in [None, Some(recorded)] {
         let shot = Shot {
@@ -248,6 +249,7 @@ fn a_captures_canvas_keeps_its_size_past_a_check() {
             formats: VideoFormat::Apng.into(),
             hold: Some(0.0),
             input: None,
+            glide: crate::render::Glide::default(),
         }),
         ..greeting_shot(&dir)
     };

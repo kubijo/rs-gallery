@@ -1,7 +1,7 @@
 //! How a catalog records unless a shot or a flag says otherwise: its `gallery.toml`'s `[record]`.
 //! Handed to what records, so a test can record as any catalog would.
 
-use super::{Corner, VideoFormat, VideoFormats};
+use super::{Corner, Glide, VideoFormat, VideoFormats};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct RecordDefaults {
@@ -9,6 +9,7 @@ pub(crate) struct RecordDefaults {
     pub(crate) hold: Option<f32>,
     /// Where the keys and mouse panel goes; `None` for no panel.
     pub(crate) input: Option<Corner>,
+    pub(crate) glide: Glide,
 }
 
 /// `[record]`'s own, for a catalog that sets none of it.
@@ -23,6 +24,7 @@ impl From<&gallery_build::Record> for RecordDefaults {
         let format = |format: &gallery_build::Format| match format {
             gallery_build::Format::Mp4 => VideoFormat::Mp4,
             gallery_build::Format::Apng => VideoFormat::Apng,
+            gallery_build::Format::Gif => VideoFormat::Gif,
         };
         Self {
             formats: config
@@ -34,6 +36,7 @@ impl From<&gallery_build::Record> for RecordDefaults {
                 gallery_build::Input::Off => None,
                 gallery_build::Input::In(corner) => Some(corner.into()),
             },
+            glide: config.glide,
         }
     }
 }
@@ -67,6 +70,11 @@ mod tests {
         );
         assert_eq!(read("hold = 0.25").hold, Some(0.25));
         assert_eq!(read("input = false").input, None);
+        let glide = read("glide = \"linear\"\nglide_speed = 600").glide;
+        assert_eq!(
+            (glide.easing, glide.speed),
+            (Some(gallery_build::Easing::Linear), 600.0)
+        );
         for (name, corner) in [
             ("bottom-left", Corner::BottomLeft),
             ("bottom-right", Corner::BottomRight),
